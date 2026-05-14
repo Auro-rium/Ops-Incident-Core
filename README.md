@@ -46,6 +46,19 @@ Low confidence means the system found some relevant evidence but key context is 
 
 Unsupported files are skipped safely. Oversized files are skipped with a logged reason.
 
+## Collector-First Ingestion
+
+Production ingestion is Collector-first. A Collector reads company folders, repos, or exports, normalizes each item, and sends document batches to the Core Backend:
+
+1. `POST /v1/projects/{project_id}/sources`
+2. `POST /v1/projects/{project_id}/collectors/register`
+3. `POST /v1/sources/{source_id}/syncs/start`
+4. `POST /v1/sources/{source_id}/documents/batch`
+5. `POST /v1/sources/{source_id}/syncs/{sync_id}/finish`
+6. Search or investigate over indexed chunks.
+
+Batch ingest is idempotent by `(project_id, source_id, external_id, content_hash)`: unchanged documents are skipped, changed documents replace their previous chunks, and per-document failures are returned without failing the whole batch. Local folder ingest remains as development compatibility and uses the same central indexer internally.
+
 ## Main capabilities
 
 - metadata-aware ingestion and hybrid retrieval
@@ -210,3 +223,5 @@ Project RBAC:
 - `admin`: manage projects, sources, collectors, syncs, document batch ingest, and eval runs.
 
 Source configs reject raw credential keys and obvious secret values. Use `credentials_ref` for references to external secret storage. Audit events are persisted for login attempts, project/source/sync changes, document ingest, workflow runs, approvals, eval runs, rate limits, and permission denials.
+
+Ingestion limits are explicit: `MAX_DOCUMENTS_PER_BATCH`, `MAX_DOCUMENT_BYTES`, `MAX_BATCH_BYTES`, `MAX_CHUNKS_PER_DOCUMENT`, `MAX_METADATA_BYTES`, `MAX_EXTERNAL_ID_LENGTH`, and `MAX_PATH_LENGTH`. See `docs/collector_protocol.md` for the normalized document schema, idempotency behavior, diagnostics, and coverage warnings.

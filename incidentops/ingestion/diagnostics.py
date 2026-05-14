@@ -7,11 +7,13 @@ from incidentops.config.settings import Settings, get_settings
 from incidentops.ingestion.chunking.metadata import classify_source_type
 
 
-def build_source_coverage(source_type_counts: dict[str, int]) -> dict:
+def build_source_coverage(source_type_counts: dict[str, int], chunk_type_counts: dict[str, int] | None = None) -> dict:
+    chunk_type_counts = chunk_type_counts or {}
     has_logs = source_type_counts.get("logs", 0) > 0
     has_code = source_type_counts.get("code", 0) > 0
     has_deploys = source_type_counts.get("deploy", 0) > 0
     has_incidents = source_type_counts.get("incident", 0) > 0
+    has_api_docs = source_type_counts.get("api_doc", 0) > 0
     has_runbooks = (source_type_counts.get("runbook", 0) + source_type_counts.get("api_doc", 0)) > 0
     warnings: list[str] = []
     if not has_logs:
@@ -30,6 +32,9 @@ def build_source_coverage(source_type_counts: dict[str, int]) -> dict:
         "has_deploys": has_deploys,
         "has_incidents": has_incidents,
         "has_runbooks": has_runbooks,
+        "has_api_docs": has_api_docs,
+        "source_type_counts": dict(source_type_counts),
+        "chunk_type_counts": dict(chunk_type_counts),
         "warnings": warnings,
     }
 

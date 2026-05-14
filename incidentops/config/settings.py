@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     max_documents_per_batch: int = 100
     max_document_bytes: int = 2_000_000
     max_batch_bytes: int = 10_000_000
+    max_chunks_per_document: int = 500
+    max_metadata_bytes: int = 64_000
+    max_external_id_length: int = 1024
+    max_path_length: int = 2048
     max_context_tokens: int = 12000
     max_sync_diagnostics_bytes: int = 64_000
     graph_timeout_seconds: int = 120

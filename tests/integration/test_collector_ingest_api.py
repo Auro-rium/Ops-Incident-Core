@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import os
+import asyncio
+import uuid
 from pathlib import Path
 
 import httpx
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
+
+from incidentops.config.settings import get_settings
+from incidentops.db.models import AuditEvent, Chunk, Document
 
 BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 FIXTURE_ROOT = (Path(__file__).resolve().parents[1] / "fixtures" / "basic_incident").resolve()
@@ -56,6 +64,39 @@ def _build_fixture_documents() -> list[dict]:
             }
         )
     return documents
+
+
+async def _document_chunk_count(project_id: str, source_id: str, external_id: str) -> int:
+    factory, engine = _test_session_factory()
+    async with factory() as db:
+        result = await db.execute(
+            select(Document).where(
+                Document.project_id == uuid.UUID(project_id),
+                Document.source_id == uuid.UUID(source_id),
+                Document.external_id == external_id,
+            )
+        )
+        document = result.scalar_one_or_none()
+        if not document:
+            return 0
+        count_result = await db.execute(select(func.count()).select_from(Chunk).where(Chunk.document_id == document.id))
+        count = int(count_result.scalar_one())
+    await engine.dispose()
+    return count
+
+
+async def _audit_count(action: str) -> int:
+    factory, engine = _test_session_factory()
+    async with factory() as db:
+        result = await db.execute(select(func.count()).select_from(AuditEvent).where(AuditEvent.action == action))
+        count = int(result.scalar_one())
+    await engine.dispose()
+    return count
+
+
+def _test_session_factory():
+    engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+    return async_sessionmaker(engine, expire_on_commit=False), engine
 
 
 def test_source_registry_and_collector_sync_batch_ingest_flow():
@@ -211,6 +252,8 @@ def test_batch_ingest_skips_unchanged_and_updates_changed_content():
     )
     assert first_batch.status_code == 200
     assert first_batch.json()["created"] == 1
+    first_chunk_count = asyncio.run(_document_chunk_count(project_id, source_id, "logs/stream.log"))
+    assert first_chunk_count > 0
 
     second_batch = client.post(
         f"/v1/sources/{source_id}/documents/batch",
@@ -234,6 +277,7 @@ def test_batch_ingest_skips_unchanged_and_updates_changed_content():
     )
     assert second_batch.status_code == 200
     assert second_batch.json()["skipped_unchanged"] == 1
+    assert asyncio.run(_document_chunk_count(project_id, source_id, "logs/stream.log")) == first_chunk_count
 
     updated_content = "2026-05-05T10:05:00Z INFO api [deploy=abc1234] betaunique timeout after 1700ms"
     updated_hash = hashlib.sha256(updated_content.encode("utf-8")).hexdigest()
@@ -259,6 +303,7 @@ def test_batch_ingest_skips_unchanged_and_updates_changed_content():
     )
     assert updated_batch.status_code == 200
     assert updated_batch.json()["updated"] == 1
+    assert asyncio.run(_document_chunk_count(project_id, source_id, "logs/stream.log")) == first_chunk_count
 
     old_search = client.post(
         "/v1/search",
@@ -334,4 +379,223 @@ def test_batch_errors_do_not_fail_whole_request():
     payload = response.json()
     assert payload["received"] == 2
     assert payload["created"] == 1
+    assert payload["skipped_invalid"] == 1
     assert len(payload["errors"]) == 1
+    assert payload["errors"][0]["code"] == "parse_error"
+
+    finish = client.post(
+        f"/v1/sources/{source_id}/syncs/{sync_id}/finish",
+        headers=headers,
+        json={"status": "success", "diagnostics": {"files_seen": 2, "files_skipped": 0, "parser_errors": 0}},
+    )
+    assert finish.status_code == 200
+    assert finish.json()["status"] == "partial_success"
+    repeated_finish = client.post(
+        f"/v1/sources/{source_id}/syncs/{sync_id}/finish",
+        headers=headers,
+        json={"status": "success", "diagnostics": {"files_seen": 2, "files_skipped": 0, "parser_errors": 0}},
+    )
+    assert repeated_finish.status_code == 200
+    assert repeated_finish.json()["status"] == "partial_success"
+
+    latest = client.get(f"/v1/sources/{source_id}/syncs/latest", headers=headers)
+    assert latest.status_code == 200
+    latest_payload = latest.json()
+    assert latest_payload["status"] == "partial_success"
+    assert latest_payload["diagnostics"]["documents_created"] == 1
+    assert latest_payload["diagnostics"]["skipped_invalid"] == 1
+    assert latest_payload["coverage"]["has_runbooks"] is True
+    assert latest_payload["coverage"]["has_incidents"] is False
+    assert any("previous incidents" in warning.lower() for warning in latest_payload["coverage"]["warnings"])
+
+
+def test_batch_validation_errors_are_isolated_and_do_not_echo_content():
+    client = httpx.Client(base_url=BASE_URL, timeout=120.0)
+    headers = _login(client)
+    project_id = _create_project(client, headers, "validation")
+    source_id = client.post(
+        f"/v1/projects/{project_id}/sources",
+        headers=headers,
+        json={"name": "mixed", "source_type": "filesystem", "sync_mode": "manual", "config": {}},
+    ).json()["id"]
+    collector_id = client.post(
+        f"/v1/projects/{project_id}/collectors/register",
+        headers=headers,
+        json={"name": "collector", "environment": "validation", "version": "0.1.0"},
+    ).json()["collector_id"]
+    sync_id = client.post(
+        f"/v1/sources/{source_id}/syncs/start",
+        headers=headers,
+        json={"collector_id": collector_id, "diagnostics": {"total_files_seen": 2}},
+    ).json()["sync_id"]
+
+    valid_content = "2026-05-05T10:00:00Z WARN api [deploy=abc1234] gammaunique timeout"
+    secret_content = "do not echo this content"
+    response = client.post(
+        f"/v1/sources/{source_id}/documents/batch",
+        headers=headers,
+        json={
+            "sync_id": sync_id,
+            "collector_id": collector_id,
+            "documents": [
+                {
+                    "external_id": "logs/valid.log",
+                    "path": "logs/valid.log",
+                    "source_type": "logs",
+                    "content": valid_content,
+                    "content_hash": hashlib.sha256(valid_content.encode("utf-8")).hexdigest(),
+                    "metadata": {"service_name": "api"},
+                    "size_bytes": len(valid_content),
+                    "modified_at": "2026-05-05T10:00:00Z",
+                },
+                {
+                    "external_id": "../secret.log",
+                    "path": "../secret.log",
+                    "source_type": "logs",
+                    "content": secret_content,
+                    "content_hash": hashlib.sha256(secret_content.encode("utf-8")).hexdigest(),
+                    "metadata": {},
+                    "size_bytes": len(secret_content),
+                    "modified_at": "2026-05-05T10:00:00Z",
+                },
+            ],
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["created"] == 1
+    assert payload["skipped_invalid"] == 1
+    assert payload["errors"][0]["code"] in {"unsafe_external_id", "unsafe_path"}
+    assert secret_content not in response.text
+
+    search = client.post(
+        "/v1/search",
+        headers=headers,
+        json={"project_id": project_id, "query": "gammaunique", "top_k": 3},
+    )
+    assert search.status_code == 200
+    assert search.json()["total"] > 0
+
+
+def test_batch_limit_rejects_too_many_documents():
+    client = httpx.Client(base_url=BASE_URL, timeout=120.0)
+    headers = _login(client)
+    project_id = _create_project(client, headers, "limit")
+    source_id = client.post(
+        f"/v1/projects/{project_id}/sources",
+        headers=headers,
+        json={"name": "logs", "source_type": "filesystem", "sync_mode": "manual", "config": {}},
+    ).json()["id"]
+    sync_id = client.post(f"/v1/sources/{source_id}/syncs/start", headers=headers, json={"diagnostics": {}}).json()[
+        "sync_id"
+    ]
+    documents = []
+    for index in range(101):
+        content = f"2026-05-05T10:00:00Z INFO api line {index}"
+        documents.append(
+            {
+                "external_id": f"logs/{index}.log",
+                "path": f"logs/{index}.log",
+                "source_type": "logs",
+                "content": content,
+                "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                "metadata": {},
+                "size_bytes": len(content),
+            }
+        )
+    response = client.post(
+        f"/v1/sources/{source_id}/documents/batch",
+        headers=headers,
+        json={"sync_id": sync_id, "documents": documents},
+    )
+    assert response.status_code == 413
+
+
+def test_partial_failure_audit_event_created():
+    client = httpx.Client(base_url=BASE_URL, timeout=120.0)
+    headers = _login(client)
+    project_id = _create_project(client, headers, "audit")
+    source_id = client.post(
+        f"/v1/projects/{project_id}/sources",
+        headers=headers,
+        json={"name": "deploys", "source_type": "filesystem", "sync_mode": "manual", "config": {}},
+    ).json()["id"]
+    sync_id = client.post(f"/v1/sources/{source_id}/syncs/start", headers=headers, json={"diagnostics": {}}).json()[
+        "sync_id"
+    ]
+    before = asyncio.run(_audit_count("documents_batch_partially_failed"))
+    bad_content = "{not valid json"
+    response = client.post(
+        f"/v1/sources/{source_id}/documents/batch",
+        headers=headers,
+        json={
+            "sync_id": sync_id,
+            "documents": [
+                {
+                    "external_id": "deploys/deploy-history.json",
+                    "path": "deploys/deploy-history.json",
+                    "source_type": "deploy",
+                    "content": bad_content,
+                    "content_hash": hashlib.sha256(bad_content.encode("utf-8")).hexdigest(),
+                    "metadata": {},
+                    "size_bytes": len(bad_content),
+                }
+            ],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["skipped_invalid"] == 1
+    after = asyncio.run(_audit_count("documents_batch_partially_failed"))
+    assert after == before + 1
+
+
+def test_wrong_project_collector_and_sync_source_mismatch_rejected():
+    client = httpx.Client(base_url=BASE_URL, timeout=120.0)
+    headers = _login(client)
+    project_a = _create_project(client, headers, "scope-a")
+    project_b = _create_project(client, headers, "scope-b")
+    source_a = client.post(
+        f"/v1/projects/{project_a}/sources",
+        headers=headers,
+        json={"name": "source-a", "source_type": "filesystem", "sync_mode": "manual", "config": {}},
+    ).json()["id"]
+    source_b = client.post(
+        f"/v1/projects/{project_a}/sources",
+        headers=headers,
+        json={"name": "source-b", "source_type": "filesystem", "sync_mode": "manual", "config": {}},
+    ).json()["id"]
+    collector_b = client.post(
+        f"/v1/projects/{project_b}/collectors/register",
+        headers=headers,
+        json={"name": "collector-b", "environment": "test", "version": "0.1.0"},
+    ).json()["collector_id"]
+
+    wrong_collector = client.post(
+        f"/v1/sources/{source_a}/syncs/start",
+        headers=headers,
+        json={"collector_id": collector_b, "diagnostics": {}},
+    )
+    assert wrong_collector.status_code == 404
+
+    sync_a = client.post(f"/v1/sources/{source_a}/syncs/start", headers=headers, json={"diagnostics": {}})
+    assert sync_a.status_code == 200
+    content = "2026-05-05T10:00:00Z INFO api source mismatch"
+    mismatch = client.post(
+        f"/v1/sources/{source_b}/documents/batch",
+        headers=headers,
+        json={
+            "sync_id": sync_a.json()["sync_id"],
+            "documents": [
+                {
+                    "external_id": "logs/mismatch.log",
+                    "path": "logs/mismatch.log",
+                    "source_type": "logs",
+                    "content": content,
+                    "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                    "metadata": {},
+                    "size_bytes": len(content),
+                }
+            ],
+        },
+    )
+    assert mismatch.status_code == 404

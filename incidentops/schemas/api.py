@@ -50,6 +50,9 @@ class SourceCoverageResponse(BaseModel):
     has_deploys: bool
     has_incidents: bool
     has_runbooks: bool
+    has_api_docs: bool = False
+    source_type_counts: dict[str, int] = Field(default_factory=dict)
+    chunk_type_counts: dict[str, int] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -155,7 +158,9 @@ class BatchIngestRequest(BaseModel):
 class BatchIngestErrorResponse(BaseModel):
     external_id: str | None = None
     path: str | None = None
+    code: str = "index_error"
     error: str
+    message: str | None = None
 
 
 class BatchIngestResponse(BaseModel):
@@ -163,8 +168,13 @@ class BatchIngestResponse(BaseModel):
     created: int
     updated: int
     skipped_unchanged: int
+    skipped_invalid: int = 0
     chunks_created: int
     errors: list[BatchIngestErrorResponse] = Field(default_factory=list)
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+    coverage: dict[str, Any] = Field(default_factory=dict)
+    embedding_backend: str | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class SearchRequest(BaseModel):

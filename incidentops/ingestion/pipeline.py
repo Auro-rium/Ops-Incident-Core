@@ -75,7 +75,8 @@ async def run_ingestion(
         )
 
     source_type_counts = dict(read_result.source_type_counts)
-    source_coverage = build_source_coverage(source_type_counts)
+    chunk_type_counts = dict(index_result.chunk_type_counts)
+    source_coverage = build_source_coverage(source_type_counts, chunk_type_counts)
     elapsed_ms = int((time.time() - start) * 1000)
 
     sync.status = "success"
@@ -89,6 +90,14 @@ async def run_ingestion(
         "files_ingested": read_result.files_ingested,
         "skipped_files": skipped_files,
         "parser_errors": parser_errors,
+        "documents_created": index_result.created,
+        "documents_updated": index_result.updated,
+        "skipped_unchanged": index_result.skipped_unchanged,
+        "skipped_invalid": index_result.skipped_invalid,
+        "source_type_counts": source_type_counts,
+        "chunk_type_counts": chunk_type_counts,
+        "warnings": source_coverage["warnings"],
+        "embedding_backend": index_result.embedding_backend,
     }
     sync.finished_at = _utcnow()
 
@@ -117,7 +126,7 @@ async def run_ingestion(
         "skipped_files": skipped_files,
         "parser_errors": parser_errors,
         "source_type_counts": source_type_counts,
-        "chunk_type_counts": _chunk_type_counts(index_result, parser_errors),
+        "chunk_type_counts": chunk_type_counts,
         "source_coverage": source_coverage,
     }
 
@@ -230,14 +239,6 @@ def _utcnow():
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc)
-
-
-def _chunk_type_counts(index_result, parser_errors: list[dict[str, Any]]) -> dict[str, int]:
-    # The legacy response expects a mapping, but the indexer no longer groups by chunk type.
-    # Keep a stable shape without inventing synthetic details.
-    if index_result.chunks_created <= 0:
-        return {}
-    return {"indexed_chunks": index_result.chunks_created, "parser_errors": len(parser_errors)}
 
 
 def _dir_hash(base: Path) -> str:

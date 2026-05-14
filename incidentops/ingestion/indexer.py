@@ -13,7 +13,13 @@ from incidentops.config.settings import get_settings
 from incidentops.db.models import Chunk, Document
 from incidentops.ingestion.chunking.chunker import count_tokens, split_text_by_tokens
 from incidentops.ingestion.chunking.metadata import classify_doc_type, classify_source_type, extract_service_from_path
-from incidentops.ingestion.normalized import BatchIngestResult, DocumentBatchError, NormalizedDocument
+from incidentops.ingestion.diagnostics import build_source_coverage
+from incidentops.ingestion.normalized import (
+    BatchIngestResult,
+    DocumentBatchError,
+    NormalizedDocument,
+    validate_normalized_document,
+)
 from incidentops.ingestion.parsers.code_parser import parse_python
 from incidentops.ingestion.parsers.deploy_parser import parse_deploy_history, parse_patch_file
 from incidentops.ingestion.parsers.incident_parser import parse_incident
@@ -33,61 +39,191 @@ async def index_normalized_documents(
     embed_fn: Any | None = None,
 ) -> BatchIngestResult:
     settings = get_settings()
-    result = BatchIngestResult(received=len(documents))
+    result = BatchIngestResult(received=len(documents), embedding_backend=settings.embedding_model if embed_fn else None)
     if not documents:
         return result
 
-    external_ids = [document.external_id for document in documents]
+    source_type_counts: Counter[str] = Counter()
+    chunk_type_counts: Counter[str] = Counter()
+    seen_external_ids: set[str] = set()
+    for normalized in documents:
+        validation_result = validate_normalized_document(normalized, settings)
+        if isinstance(validation_result, DocumentBatchError):
+            result.skipped_invalid += 1
+            result.errors.append(validation_result)
+            continue
+        normalized = validation_result
+        if normalized.external_id in seen_external_ids:
+            result.skipped_invalid += 1
+            result.errors.append(
+                DocumentBatchError(
+                    external_id=normalized.external_id,
+                    path=normalized.path,
+                    code="duplicate_external_id",
+                    error="duplicate external_id in batch",
+                    message="duplicate external_id in batch",
+                )
+            )
+            continue
+        seen_external_ids.add(normalized.external_id)
+        try:
+            operation = await _index_one_document(
+                db,
+                project_id,
+                source_id,
+                normalized,
+                embed_fn=embed_fn,
+                settings=settings,
+            )
+        except DocumentIndexingError as exc:
+            result.skipped_invalid += 1
+            result.errors.append(
+                DocumentBatchError(
+                    external_id=normalized.external_id,
+                    path=normalized.path,
+                    code=exc.code,
+                    error=exc.safe_message,
+                    message=exc.safe_message,
+                )
+            )
+            continue
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("Failed indexing normalized document %s", normalized.path)
+            result.skipped_invalid += 1
+            result.errors.append(
+                DocumentBatchError(
+                    external_id=normalized.external_id,
+                    path=normalized.path,
+                    code="index_error",
+                    error=f"failed to index document: {exc.__class__.__name__}",
+                    message="failed to index document",
+                )
+            )
+            continue
+
+        result.created += operation["created"]
+        result.updated += operation["updated"]
+        result.skipped_unchanged += operation["skipped_unchanged"]
+        result.chunks_created += operation["chunks_created"]
+        if operation["created"] or operation["updated"]:
+            source_type_counts[normalized.source_type] += 1
+        chunk_type_counts.update(operation["chunk_type_counts"])
+
+    result.source_type_counts = dict(source_type_counts)
+    result.chunk_type_counts = dict(chunk_type_counts)
+    result.coverage = build_source_coverage(result.source_type_counts, result.chunk_type_counts)
+    result.warnings = result.coverage.get("warnings", [])
+    result.diagnostics = {
+        "documents_created": result.created,
+        "documents_updated": result.updated,
+        "skipped_unchanged": result.skipped_unchanged,
+        "skipped_invalid": result.skipped_invalid,
+        "errors": len(result.errors),
+        "source_type_counts": result.source_type_counts,
+        "chunk_type_counts": result.chunk_type_counts,
+        "embedding_backend": result.embedding_backend,
+    }
+    return result
+
+
+class DocumentIndexingError(Exception):
+    def __init__(self, code: str, safe_message: str) -> None:
+        super().__init__(safe_message)
+        self.code = code
+        self.safe_message = safe_message
+
+
+async def _index_one_document(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    source_id: uuid.UUID,
+    normalized: NormalizedDocument,
+    *,
+    embed_fn: Any | None,
+    settings: Any,
+) -> dict[str, Any]:
     existing_result = await db.execute(
         select(Document).where(
             Document.project_id == project_id,
             Document.source_id == source_id,
-            Document.external_id.in_(external_ids),
+            Document.external_id == normalized.external_id,
         )
     )
-    existing_by_external_id = {
-        document.external_id: document
-        for document in existing_result.scalars().all()
-        if document.external_id
-    }
+    current = existing_result.scalar_one_or_none()
+    if current and current.content_hash == normalized.content_hash:
+        return {
+            "created": 0,
+            "updated": 0,
+            "skipped_unchanged": 1,
+            "chunks_created": 0,
+            "chunk_type_counts": {},
+        }
 
-    prepared_chunks: list[dict[str, Any]] = []
-    prepared_embeddings_text: list[str] = []
-    document_operations: list[dict[str, Any]] = []
+    service_name = normalized.metadata.get("service_name") or extract_service_from_path(normalized.path)
+    try:
+        raw_chunks, parse_error = _parse_normalized_document(normalized, service_name=service_name)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("Failed parsing normalized document %s", normalized.path)
+        raise DocumentIndexingError("parse_error", f"failed to parse document: {exc.__class__.__name__}") from exc
 
-    for normalized in documents:
-        current = existing_by_external_id.get(normalized.external_id)
-        if current and current.content_hash == normalized.content_hash:
-            result.skipped_unchanged += 1
-            continue
+    if parse_error:
+        raise DocumentIndexingError("parse_error", parse_error)
+    if not raw_chunks:
+        raise DocumentIndexingError("no_chunks_parsed", "no chunks parsed")
 
-        service_name = normalized.metadata.get("service_name") or extract_service_from_path(normalized.path)
+    chunk_payloads: list[dict[str, Any]] = []
+    embedding_texts: list[str] = []
+    chunk_type_counts: Counter[str] = Counter()
+    for raw_chunk in raw_chunks:
+        sub_texts = (
+            split_text_by_tokens(raw_chunk.text, settings.max_chunk_tokens)
+            if count_tokens(raw_chunk.text) > settings.max_chunk_tokens
+            else [raw_chunk.text]
+        )
+        for sub_text in sub_texts:
+            if len(chunk_payloads) >= settings.max_chunks_per_document:
+                raise DocumentIndexingError(
+                    "too_many_chunks",
+                    "document exceeds configured chunk count limit",
+                )
+            chunk_payload = {
+                "project_id": project_id,
+                "source_id": source_id,
+                "chunk_type": raw_chunk.chunk_type,
+                "service_name": raw_chunk.service_name or service_name,
+                "endpoint": raw_chunk.endpoint,
+                "deploy_hash": raw_chunk.deploy_hash,
+                "timestamp_start": raw_chunk.timestamp_start,
+                "timestamp_end": raw_chunk.timestamp_end,
+                "section_title": raw_chunk.section_title,
+                "start_line": raw_chunk.start_line,
+                "end_line": raw_chunk.end_line,
+                "text": sub_text,
+                "token_count": count_tokens(sub_text),
+                "metadata_json": (raw_chunk.metadata or {})
+                | {
+                    "source_type": raw_chunk.source_type,
+                    "document_path": raw_chunk.document_path,
+                },
+            }
+            chunk_payloads.append(chunk_payload)
+            embedding_texts.append(sub_text)
+            chunk_type_counts[raw_chunk.chunk_type] += 1
+
+    if embed_fn and chunk_payloads:
         try:
-            raw_chunks, parse_error = _parse_normalized_document(normalized, service_name=service_name)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.exception("Failed parsing normalized document %s", normalized.path)
-            raw_chunks, parse_error = [], f"parser raised {exc.__class__.__name__}: {exc}"
+            embeddings = embed_fn(embedding_texts)
+        except Exception as exc:
+            raise DocumentIndexingError("embedding_error", f"failed to embed document: {exc.__class__.__name__}") from exc
+        if len(embeddings) != len(chunk_payloads):
+            raise DocumentIndexingError("embedding_error", "embedding backend returned an unexpected result count")
+        for chunk_payload, embedding in zip(chunk_payloads, embeddings):
+            chunk_payload["embedding"] = embedding
 
-        if parse_error:
-            result.errors.append(
-                DocumentBatchError(
-                    external_id=normalized.external_id,
-                    path=normalized.path,
-                    error=parse_error,
-                )
-            )
-            continue
-        if not raw_chunks:
-            result.errors.append(
-                DocumentBatchError(
-                    external_id=normalized.external_id,
-                    path=normalized.path,
-                    error="no chunks parsed",
-                )
-            )
-            continue
-
+    async with db.begin_nested():
         document_row = current
+        created = 0
+        updated = 0
         if document_row is None:
             document_row = Document(
                 project_id=project_id,
@@ -104,7 +240,7 @@ async def index_normalized_documents(
             )
             db.add(document_row)
             await db.flush()
-            result.created += 1
+            created = 1
         else:
             document_row.title = PurePosixPath(normalized.path).name
             document_row.path = normalized.path
@@ -114,74 +250,27 @@ async def index_normalized_documents(
             document_row.content_hash = normalized.content_hash
             document_row.modified_at = normalized.modified_at
             document_row.size_bytes = normalized.size_bytes
-            result.updated += 1
+            updated = 1
+            await db.execute(delete(Chunk).where(Chunk.document_id == document_row.id))
 
-        document_operations.append(
-            {
-                "document": document_row,
-                "replace_existing_chunks": current is not None,
-            }
-        )
-
-        for raw_chunk in raw_chunks:
-            sub_texts = (
-                split_text_by_tokens(raw_chunk.text, settings.max_chunk_tokens)
-                if count_tokens(raw_chunk.text) > settings.max_chunk_tokens
-                else [raw_chunk.text]
-            )
-            for sub_text in sub_texts:
-                chunk_payload = {
-                    "project_id": project_id,
-                    "document_id": document_row.id,
-                    "source_id": source_id,
-                    "chunk_type": raw_chunk.chunk_type,
-                    "service_name": raw_chunk.service_name or service_name,
-                    "endpoint": raw_chunk.endpoint,
-                    "deploy_hash": raw_chunk.deploy_hash,
-                    "timestamp_start": raw_chunk.timestamp_start,
-                    "timestamp_end": raw_chunk.timestamp_end,
-                    "section_title": raw_chunk.section_title,
-                    "start_line": raw_chunk.start_line,
-                    "end_line": raw_chunk.end_line,
-                    "text": sub_text,
-                    "token_count": count_tokens(sub_text),
-                    "metadata_json": (raw_chunk.metadata or {})
-                    | {
-                        "source_type": raw_chunk.source_type,
-                        "document_path": raw_chunk.document_path,
-                    },
-                }
-                prepared_chunks.append(chunk_payload)
-                prepared_embeddings_text.append(sub_text)
-
-    if embed_fn and prepared_chunks:
-        embeddings = embed_fn(prepared_embeddings_text)
-        for chunk_payload, embedding in zip(prepared_chunks, embeddings):
-            chunk_payload["embedding"] = embedding
-
-    replaced_document_ids = {
-        operation["document"].id
-        for operation in document_operations
-        if operation["replace_existing_chunks"]
-    }
-    if replaced_document_ids:
-        await db.execute(delete(Chunk).where(Chunk.document_id.in_(replaced_document_ids)))
-
-    for chunk_payload in prepared_chunks:
-        db.add(Chunk(**chunk_payload))
-    await db.flush()
-    result.chunks_created = len(prepared_chunks)
-
-    if prepared_chunks:
-        touched_document_ids = list({payload["document_id"] for payload in prepared_chunks})
+        for chunk_payload in chunk_payloads:
+            chunk_payload["document_id"] = document_row.id
+            db.add(Chunk(**chunk_payload))
+        await db.flush()
         await db.execute(
             update(Chunk)
-            .where(Chunk.document_id.in_(touched_document_ids))
+            .where(Chunk.document_id == document_row.id)
             .values(search_tsvector=func.to_tsvector("english", Chunk.text))
         )
         await db.flush()
 
-    return result
+    return {
+        "created": created,
+        "updated": updated,
+        "skipped_unchanged": 0,
+        "chunks_created": len(chunk_payloads),
+        "chunk_type_counts": dict(chunk_type_counts),
+    }
 
 
 def _doc_type_for_normalized_document(document: NormalizedDocument) -> str:
@@ -225,5 +314,7 @@ def _parse_normalized_document(
     if suffix in {".md", ".txt", ".json"}:
         hinted_source_type = source_type or classify_source_type(document.path)
         return parse_markdown(document.content, document.path, source_type=hinted_source_type, service_name=service_name), None
+    if source_type in {"config", "unknown_text", "runbook", "api_doc"}:
+        return parse_markdown(document.content, document.path, source_type=source_type, service_name=service_name), None
     logger.info("No parser configured for normalized document %s", document.path)
     return [], "no parser configured"

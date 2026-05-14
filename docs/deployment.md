@@ -71,6 +71,24 @@ Passwords are stored with bcrypt. Legacy SHA256 hashes are only accepted in loca
 
 Source config must not contain raw credentials. Put secret material in a secret manager and pass only a `credentials_ref`.
 
+## Collector Ingestion Limits
+
+Collector batch ingest is bounded by:
+
+```text
+MAX_DOCUMENTS_PER_BATCH=100
+MAX_DOCUMENT_BYTES=2000000
+MAX_BATCH_BYTES=10000000
+MAX_CHUNKS_PER_DOCUMENT=500
+MAX_METADATA_BYTES=64000
+MAX_EXTERNAL_ID_LENGTH=1024
+MAX_PATH_LENGTH=2048
+```
+
+If a whole batch exceeds count or byte limits, the API rejects the request. If one document is invalid or oversized, the batch response includes a per-document error and continues indexing valid documents. Error responses do not include raw document content.
+
+Production ingestion should use the source/collector/sync/document-batch APIs. `/v1/projects/{project_id}/ingest` remains available for local development and server-visible folder smoke tests only.
+
 ## RBAC
 
 Roles are project-scoped:

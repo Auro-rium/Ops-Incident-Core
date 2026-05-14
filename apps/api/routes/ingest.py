@@ -88,7 +88,33 @@ async def ingest(
     def embed_fn(texts: list[str]) -> list[list[float]]:
         return embed_texts(texts, model_name=settings.embedding_model)
 
+    await record_audit_event(
+        db,
+        action="local_ingest_started",
+        status="success",
+        project_id=project_id,
+        user=user,
+        resource_type="project",
+        resource_id=project_id,
+        request=request,
+        metadata={"mode": "local_path"},
+    )
     stats = await run_ingestion(db, project_id, body.path, embed_fn=embed_fn)
+    await record_audit_event(
+        db,
+        action="local_ingest_finished",
+        status="success",
+        project_id=project_id,
+        user=user,
+        resource_type="project",
+        resource_id=project_id,
+        request=request,
+        metadata={
+            "documents_ingested": stats["documents_ingested"],
+            "chunks_created": stats["chunks_created"],
+            "files_skipped": stats["files_skipped"],
+        },
+    )
     await record_audit_event(
         db,
         action="documents_batch_ingested",
