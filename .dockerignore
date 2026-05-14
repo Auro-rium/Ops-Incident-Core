@@ -1,0 +1,9 @@
+.git
+.venv
+__pycache__
+.pytest_cache
+apps/web/node_modules
+*.pyc
+*.pyo
+*.pyd
+*.log

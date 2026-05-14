@@ -1,0 +1,11 @@
+[
+  {
+    "deploy_hash": "abc1234",
+    "service_name": "orders-api",
+    "commit_sha": "abc1234def5678",
+    "deployed_at": "2026-05-01T09:55:00Z",
+    "author": "ops@example.com",
+    "summary": "add synchronous upstream enrichment",
+    "changed_files": ["services/api/service.py"]
+  }
+]

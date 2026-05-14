@@ -1,0 +1,3 @@
+2026-05-01T10:00:01Z INFO api.gateway [deploy=abc1234] GET /v1/orders request complete in 120ms
+2026-05-01T10:05:01Z WARN api.gateway [deploy=abc1234] GET /v1/orders request complete in 980ms
+2026-05-01T10:05:02Z ERROR api.gateway [deploy=abc1234] GET /v1/orders upstream timeout after 1500ms

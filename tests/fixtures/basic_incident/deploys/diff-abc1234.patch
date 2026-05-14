@@ -1,0 +1,9 @@
+diff --git a/services/api/service.py b/services/api/service.py
+index 1111111..2222222 100644
+--- a/services/api/service.py
++++ b/services/api/service.py
+@@ -5,6 +5,8 @@
+ def handle_orders():
+-    return fetch_orders()
++    response = requests.get("http://inventory.internal/orders")
++    return response.json()
