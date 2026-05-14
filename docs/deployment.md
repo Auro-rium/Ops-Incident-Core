@@ -11,14 +11,22 @@
 alembic upgrade head
 ```
 
-5. Start the API.
-6. Verify liveness:
+5. Bootstrap an admin user:
+
+```bash
+python -m incidentops.security.bootstrap_admin \
+  --email admin@example.com \
+  --password "use-a-strong-password"
+```
+
+6. Start the API.
+7. Verify liveness:
 
 ```bash
 curl http://127.0.0.1:8001/health
 ```
 
-7. Verify readiness:
+8. Verify readiness:
 
 ```bash
 curl http://127.0.0.1:8001/ready
@@ -38,6 +46,45 @@ APP_ENV=production
 `DB_CREATE_ALL=false` is the default. `DB_CREATE_ALL=true` is only honored in `local` or `development` and exists for developer convenience. It is ignored in `staging` and `production`.
 
 Production rule: run Alembic migrations before starting the app. The app must not create schema with SQLAlchemy `create_all` in production.
+
+## Production Security Settings
+
+Set these explicitly for staging/production:
+
+```text
+JWT_SECRET=<strong-random-secret-at-least-32-chars>
+JWT_ALGORITHM=HS256
+JWT_ISSUER=incidentops
+JWT_AUDIENCE=incidentops-api
+ACCESS_TOKEN_EXPIRE_MINUTES=60
+ALLOW_LOCAL_SEED_ADMIN=false
+ALLOW_DEMO_PROJECT_BYPASS=false
+DEMO_MODE_PUBLIC=false
+RATE_LIMIT_BACKEND=redis
+CORS_ALLOW_ORIGINS=https://your-ui.example.com
+ALLOW_WILDCARD_CORS=false
+```
+
+Startup fails in staging/production if default JWT secrets, local seed admin, demo bypass, wildcard CORS, `DB_CREATE_ALL=true`, or in-memory rate limiting are configured.
+
+Passwords are stored with bcrypt. Legacy SHA256 hashes are only accepted in local/development and are rehashed after a successful login.
+
+Source config must not contain raw credentials. Put secret material in a secret manager and pass only a `credentials_ref`.
+
+## RBAC
+
+Roles are project-scoped:
+
+- `viewer`: read evidence/search results, runs, reports, and eval results.
+- `investigator`: create investigations, answers, workflow runs, and local/dev ingests.
+- `approver`: approve or reject gated workflow actions.
+- `admin`: manage sources, collectors, syncs, document batch ingest, project settings, members, and eval runs.
+
+Project membership is enforced for source/sync/search/answer/investigate/runs/evals/approvals. Local demo project bypass is available only outside staging/production when explicitly enabled.
+
+## Audit Events
+
+The `audit_events` table records login success/failure, project creation, source and collector changes, sync lifecycle, document batch ingest, investigations, workflow runs, approval decisions, eval runs, permission denials, and rate-limit blocks. Audit metadata is redacted before storage.
 
 ## Checks
 

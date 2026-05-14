@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.api.deps import ensure_project_access, get_current_user, get_db, get_settings_dep
+from apps.api.deps import check_rate_limit, enforce_query_limits, ensure_project_access, get_current_user, get_db, get_settings_dep
 from incidentops.config.settings import Settings
-from incidentops.db.models import Project
+from incidentops.db.models import ProjectRole
 from incidentops.investigation.service import investigate as run_investigation
 from incidentops.schemas.api import (
     CitationInfo,
@@ -18,7 +17,7 @@ from incidentops.schemas.api import (
     RootCauseResponse,
     TimelineEventResponse,
 )
-from incidentops.security.rate_limit import limiter
+from incidentops.security.audit import record_audit_event
 
 router = APIRouter(prefix="/v1", tags=["Investigate"])
 
@@ -26,20 +25,42 @@ router = APIRouter(prefix="/v1", tags=["Investigate"])
 @router.post("/investigate", response_model=InvestigationResponse)
 async def investigate(
     body: InvestigationRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
     user=Depends(get_current_user),
 ):
+    enforce_query_limits(body.query, body.top_k, settings)
     if user:
-        limiter.check(f"investigate:{user.id}", settings.user_request_limit, 60)
-    await ensure_project_access(db, body.project_id, user, settings)
+        await check_rate_limit(
+            db,
+            settings,
+            f"investigate:{user.id}",
+            settings.user_request_limit,
+            settings.rate_limit_window_seconds,
+            user=user,
+            project_id=body.project_id,
+            action="investigate",
+        )
+    await ensure_project_access(db, body.project_id, user, settings, minimum_role=ProjectRole.investigator)
     investigation, latency_ms = await run_investigation(
         db,
         body.project_id,
-        body.query[: settings.max_query_length],
-        min(body.top_k, settings.max_retrieved_chunks),
+        body.query,
+        body.top_k,
         settings.reranker_model,
         debug=body.debug,
+    )
+    await record_audit_event(
+        db,
+        action="investigation_created",
+        status="success",
+        project_id=body.project_id,
+        user=user,
+        resource_type="investigation",
+        resource_id=body.project_id,
+        request=request,
+        metadata={"task_type": investigation.task_type, "top_k": body.top_k},
     )
     return InvestigationResponse(
         question=investigation.question,

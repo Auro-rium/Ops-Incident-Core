@@ -77,6 +77,11 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(256), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(512), nullable=False)
+    password_scheme: Mapped[str | None] = mapped_column(String(64))
+    token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_login_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -496,4 +501,31 @@ class EvalRunCase(Base):
     __table_args__ = (
         UniqueConstraint("eval_run_id", "case_id", name="uq_eval_run_cases_eval_case"),
         Index("ix_eval_run_cases_eval_id", "eval_run_id"),
+    )
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="SET NULL")
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    actor_email: Mapped[str | None] = mapped_column(Text)
+    action: Mapped[str] = mapped_column(String(128), nullable=False)
+    resource_type: Mapped[str | None] = mapped_column(String(128))
+    resource_id: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(64), nullable=False)
+    ip_address: Mapped[str | None] = mapped_column(Text)
+    user_agent: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_audit_events_project_created", "project_id", "created_at"),
+        Index("ix_audit_events_user_created", "user_id", "created_at"),
+        Index("ix_audit_events_action_created", "action", "created_at"),
     )

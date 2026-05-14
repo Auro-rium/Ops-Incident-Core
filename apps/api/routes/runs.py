@@ -3,12 +3,20 @@ from __future__ import annotations
 import json
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.api.deps import get_db, get_settings_dep, require_user
+from apps.api.deps import (
+    check_rate_limit,
+    enforce_query_limits,
+    ensure_project_access,
+    get_current_user,
+    get_db,
+    get_settings_dep,
+    require_user,
+)
 from incidentops.agent.service import create_run, execute_run, resume_after_approval
 from incidentops.config.settings import Settings
 from incidentops.db.models import AgentRun, AgentRunEvent, ProjectRole
@@ -20,6 +28,7 @@ from incidentops.schemas.api import (
     RunResponse,
 )
 from incidentops.security.rbac import require_project_role
+from incidentops.security.audit import record_audit_event
 
 router = APIRouter(prefix="/v1", tags=["Runs"])
 
@@ -27,13 +36,47 @@ router = APIRouter(prefix="/v1", tags=["Runs"])
 @router.post("/runs", response_model=RunResponse)
 async def start_run(
     body: RunCreateRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
     user=Depends(require_user),
 ):
+    enforce_query_limits(body.query, body.top_k, settings)
+    await check_rate_limit(
+        db,
+        settings,
+        f"run:{user.id}",
+        settings.user_request_limit,
+        settings.rate_limit_window_seconds,
+        user=user,
+        project_id=body.project_id,
+        action="workflow_run",
+    )
     await require_project_role(db, body.project_id, user.id, ProjectRole.investigator)
     run = await create_run(db, body.project_id, user.id, body.query)
     run = await execute_run(db, run, body.top_k, settings.reranker_model, create_issue_draft=body.create_issue_draft)
+    await record_audit_event(
+        db,
+        action="workflow_run_created",
+        status="success",
+        project_id=body.project_id,
+        user=user,
+        resource_type="agent_run",
+        resource_id=run.id,
+        request=request,
+        metadata={"top_k": body.top_k, "create_issue_draft": body.create_issue_draft},
+    )
+    if run.pending_approval:
+        await record_audit_event(
+            db,
+            action="approval_requested",
+            status="pending",
+            project_id=body.project_id,
+            user=user,
+            resource_type="agent_run",
+            resource_id=run.id,
+            request=request,
+        )
     return RunResponse(
         run_id=run.id,
         project_id=run.project_id,
@@ -49,11 +92,17 @@ async def start_run(
 
 
 @router.get("/runs/{run_id}", response_model=RunResponse)
-async def get_run(run_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def get_run(
+    run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+    user=Depends(get_current_user),
+):
     result = await db.execute(select(AgentRun).where(AgentRun.id == run_id))
     run = result.scalar_one_or_none()
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
+    await ensure_project_access(db, run.project_id, user, settings, minimum_role=ProjectRole.viewer)
     return RunResponse(
         run_id=run.id,
         project_id=run.project_id,
@@ -69,7 +118,18 @@ async def get_run(run_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/runs/{run_id}/events")
-async def get_run_events(run_id: uuid.UUID, stream: bool = False, db: AsyncSession = Depends(get_db)):
+async def get_run_events(
+    run_id: uuid.UUID,
+    stream: bool = False,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+    user=Depends(get_current_user),
+):
+    run_result = await db.execute(select(AgentRun).where(AgentRun.id == run_id))
+    run = run_result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    await ensure_project_access(db, run.project_id, user, settings, minimum_role=ProjectRole.viewer)
     result = await db.execute(
         select(AgentRunEvent).where(AgentRunEvent.run_id == run_id).order_by(AgentRunEvent.sequence_no.asc())
     )
@@ -104,6 +164,7 @@ async def get_run_events(run_id: uuid.UUID, stream: bool = False, db: AsyncSessi
 async def approve_run(
     run_id: uuid.UUID,
     body: ApprovalDecisionRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user=Depends(require_user),
 ):
@@ -113,6 +174,16 @@ async def approve_run(
         raise HTTPException(status_code=404, detail="Run not found")
     await require_project_role(db, run.project_id, user.id, ProjectRole.approver)
     await resume_after_approval(db, run, approved=True, rationale=body.rationale)
+    await record_audit_event(
+        db,
+        action="approval_approved",
+        status="success",
+        project_id=run.project_id,
+        user=user,
+        resource_type="agent_run",
+        resource_id=run.id,
+        request=request,
+    )
     return ApprovalDecisionResponse(run_id=run.id, status=run.status.value, rationale=body.rationale)
 
 
@@ -120,6 +191,7 @@ async def approve_run(
 async def reject_run(
     run_id: uuid.UUID,
     body: ApprovalDecisionRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user=Depends(require_user),
 ):
@@ -129,4 +201,14 @@ async def reject_run(
         raise HTTPException(status_code=404, detail="Run not found")
     await require_project_role(db, run.project_id, user.id, ProjectRole.approver)
     await resume_after_approval(db, run, approved=False, rationale=body.rationale)
+    await record_audit_event(
+        db,
+        action="approval_rejected",
+        status="success",
+        project_id=run.project_id,
+        user=user,
+        resource_type="agent_run",
+        resource_id=run.id,
+        request=request,
+    )
     return ApprovalDecisionResponse(run_id=run.id, status=run.status.value, rationale=body.rationale)

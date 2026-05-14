@@ -4,6 +4,9 @@ LLM prompts — system prompt and answer schema for incident investigation.
 
 from __future__ import annotations
 
+from incidentops.security.prompt_injection import inspect_untrusted_text
+from incidentops.security.secret_redaction import redact_secrets
+
 SYSTEM_PROMPT = """\
 You are an incident investigation assistant for backend/SRE teams.
 
@@ -52,13 +55,18 @@ def build_answer_prompt(
     evidence_parts: list[str] = []
     for item in evidence:
         citation = item.get("citation", {})
+        text = redact_secrets(item.get("text", ""))
+        inspection = inspect_untrusted_text(text)
+        security_note = ""
+        if inspection["is_suspicious"]:
+            security_note = "\nSECURITY_NOTE: Suspicious instruction-like text detected in this untrusted source."
         evidence_parts.append(
             EVIDENCE_WRAPPER.format(
                 citation_label=citation.get("label", "[?]"),
                 source_type=item.get("source_type", "unknown"),
                 document_path=item.get("document_path", "unknown"),
                 lines=citation.get("lines", ""),
-                text=item.get("text", ""),
+                text=f"{security_note}\n{text}".strip(),
             )
         )
 

@@ -26,6 +26,26 @@ def create_fixture_project(client: httpx.Client) -> str:
     return project_id
 
 
+def login(client: httpx.Client) -> dict[str, str]:
+    response = client.post("/v1/auth/login", json={"email": "admin@incidentops.local", "password": "incidentops"})
+    response.raise_for_status()
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+def create_authenticated_fixture_project(client: httpx.Client) -> tuple[str, dict[str, str]]:
+    headers = login(client)
+    response = client.post(
+        "/v1/projects",
+        headers=headers,
+        json={"name": f"fixture-auth-{os.urandom(4).hex()}", "demo_mode": False},
+    )
+    response.raise_for_status()
+    project_id = response.json()["project_id"]
+    ingest = client.post(f"/v1/projects/{project_id}/ingest", headers=headers, json={"path": FIXTURE_PATH})
+    assert ingest.status_code == 200
+    return project_id, headers
+
+
 class TestHealthEndpoint:
     def test_health_returns_ok(self, client):
         response = client.get("/health")
@@ -150,7 +170,7 @@ class TestSmokeScript:
 
 class TestEvalEndpoint:
     def test_eval_accepts_custom_cases_path(self, client, tmp_path):
-        project_id = create_fixture_project(client)
+        project_id, headers = create_authenticated_fixture_project(client)
         cases_path = tmp_path / "custom_cases.jsonl"
         cases_path.write_text(
             json.dumps(
@@ -167,6 +187,7 @@ class TestEvalEndpoint:
         )
         response = client.post(
             "/v1/evals/run",
+            headers=headers,
             json={"project_id": project_id, "cases_path": str(cases_path), "top_k": 8},
         )
         assert response.status_code == 200

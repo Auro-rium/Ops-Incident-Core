@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from incidentops.config.settings import Settings, get_settings
+from incidentops.config.validation import validate_startup_settings
 from incidentops.db.session import create_tables
 from incidentops.observability.metrics import incr
 
@@ -25,6 +26,7 @@ def should_run_create_all(settings: Settings) -> bool:
 
 
 async def initialize_database_for_startup(settings: Settings) -> None:
+    validate_startup_settings(settings)
     if not should_run_create_all(settings):
         if settings.is_production_like and settings.db_create_all:
             logger.warning("Ignoring DB_CREATE_ALL=true because APP_ENV=%s forbids create_all", settings.app_env)
@@ -56,7 +58,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=get_settings().cors_origins_list or ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )

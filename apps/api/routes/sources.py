@@ -3,12 +3,20 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.api.deps import ensure_project_access, get_current_user, get_db, get_settings_dep, require_user
+from apps.api.deps import (
+    check_rate_limit,
+    enforce_json_size,
+    ensure_project_access,
+    get_current_user,
+    get_db,
+    get_settings_dep,
+    require_user,
+)
 from incidentops.config.settings import Settings
 from incidentops.db.models import Collector, ProjectRole, Source, SourceSync
 from incidentops.ingestion.indexer import index_normalized_documents
@@ -28,24 +36,26 @@ from incidentops.schemas.api import (
     SyncStatusResponse,
 )
 from incidentops.security.rbac import require_project_role
+from incidentops.security.audit import record_audit_event
+from incidentops.security.source_config import find_source_config_secret_violations
 
 router = APIRouter(prefix="/v1", tags=["Sources"])
-
-DISALLOWED_CONFIG_KEYS = {"password", "secret", "token", "credentials", "credential", "api_key", "apikey"}
 
 
 @router.post("/projects/{project_id}/sources", response_model=SourceResponse, status_code=status.HTTP_201_CREATED)
 async def create_source(
     project_id: uuid.UUID,
     body: SourceCreateRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
     user=Depends(require_user),
 ):
-    await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.investigator)
-    await require_project_role(db, project_id, user.id, ProjectRole.investigator)
-    if _contains_disallowed_config_keys(body.config):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="config contains credential-like keys; use credentials_ref")
+    await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.admin)
+    await require_project_role(db, project_id, user.id, ProjectRole.admin)
+    violations = find_source_config_secret_violations(body.config)
+    if violations:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="config contains raw secret material; use credentials_ref")
     source = Source(
         project_id=project_id,
         name=body.name,
@@ -57,6 +67,18 @@ async def create_source(
     db.add(source)
     await db.flush()
     await db.refresh(source)
+    await record_audit_event(
+        db,
+        action="source_created",
+        status="success",
+        project_id=project_id,
+        user=user,
+        resource_type="source",
+        resource_id=source.id,
+        request=request,
+        metadata={"source_type": body.source_type, "sync_mode": body.sync_mode},
+    )
+    await db.commit()
     return _source_response(source)
 
 
@@ -76,12 +98,13 @@ async def list_sources(
 async def register_collector(
     project_id: uuid.UUID,
     body: CollectorRegisterRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
     user=Depends(require_user),
 ):
-    await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.investigator)
-    await require_project_role(db, project_id, user.id, ProjectRole.investigator)
+    await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.admin)
+    await require_project_role(db, project_id, user.id, ProjectRole.admin)
     now = _utcnow()
     statement = (
         insert(Collector)
@@ -106,6 +129,17 @@ async def register_collector(
     )
     result = await db.execute(statement)
     collector_id, collector_status = result.one()
+    await record_audit_event(
+        db,
+        action="collector_registered",
+        status="success",
+        project_id=project_id,
+        user=user,
+        resource_type="collector",
+        resource_id=collector_id,
+        request=request,
+        metadata={"name": body.name, "environment": body.environment, "version": body.version},
+    )
     return CollectorRegisterResponse(collector_id=collector_id, status=collector_status)
 
 
@@ -113,11 +147,14 @@ async def register_collector(
 async def start_sync(
     source_id: uuid.UUID,
     body: SyncStartRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
     user=Depends(require_user),
 ):
     source = await _require_source(db, source_id)
-    await require_project_role(db, source.project_id, user.id, ProjectRole.investigator)
+    await require_project_role(db, source.project_id, user.id, ProjectRole.admin)
+    enforce_json_size(body.diagnostics, settings.max_sync_diagnostics_bytes, "sync diagnostics")
     collector = await _validate_collector(db, source.project_id, body.collector_id)
     sync = SourceSync(
         project_id=source.project_id,
@@ -133,6 +170,17 @@ async def start_sync(
     source.status = "syncing"
     source.last_sync_started_at = sync.started_at
     source.last_sync_status = "running"
+    await record_audit_event(
+        db,
+        action="sync_started",
+        status="success",
+        project_id=source.project_id,
+        user=user,
+        resource_type="source_sync",
+        resource_id=sync.id,
+        request=request,
+        metadata={"source_id": str(source.id), "collector_id": str(collector.id) if collector else None},
+    )
     return SyncStatusResponse(sync_id=sync.id, status=sync.status)
 
 
@@ -140,31 +188,60 @@ async def start_sync(
 async def ingest_documents_batch(
     source_id: uuid.UUID,
     body: BatchIngestRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
     user=Depends(require_user),
 ):
     source = await _require_source(db, source_id)
-    await require_project_role(db, source.project_id, user.id, ProjectRole.investigator)
+    await require_project_role(db, source.project_id, user.id, ProjectRole.admin)
+    await check_rate_limit(
+        db,
+        settings,
+        f"batch_ingest:{user.id}",
+        settings.project_ingestion_limit,
+        3600,
+        user=user,
+        project_id=source.project_id,
+        action="documents_batch_ingest",
+    )
     sync = await _require_sync(db, body.sync_id, source.id)
     await _validate_collector(db, source.project_id, body.collector_id)
+    if len(body.documents) > settings.max_documents_per_batch:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="document batch exceeds configured count limit")
+    batch_bytes = sum(len(document.content.encode("utf-8")) for document in body.documents)
+    if batch_bytes > settings.max_batch_bytes:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="document batch exceeds configured byte limit")
 
     def embed_fn(texts: list[str]) -> list[list[float]]:
         return embed_texts(texts, model_name=settings.embedding_model)
 
-    normalized_documents = [
-        NormalizedDocument(
-            external_id=document.external_id,
-            path=document.path,
-            source_type=document.source_type,
-            content=document.content,
-            content_hash=document.content_hash,
-            metadata=document.metadata,
-            size_bytes=document.size_bytes,
-            modified_at=document.modified_at,
+    normalized_documents = []
+    preflight_errors: list[BatchIngestErrorResponse] = []
+    for document in body.documents:
+        content_bytes = len(document.content.encode("utf-8"))
+        declared_size = document.size_bytes or content_bytes
+        if content_bytes > settings.max_document_bytes or declared_size > settings.max_document_bytes:
+            preflight_errors.append(
+                BatchIngestErrorResponse(
+                    external_id=document.external_id,
+                    path=document.path,
+                    error="document exceeds configured byte limit",
+                )
+            )
+            continue
+        normalized_documents.append(
+            NormalizedDocument(
+                external_id=document.external_id,
+                path=document.path,
+                source_type=document.source_type,
+                content=document.content,
+                content_hash=document.content_hash,
+                metadata=document.metadata,
+                size_bytes=document.size_bytes,
+                modified_at=document.modified_at,
+            )
         )
-        for document in body.documents
-    ]
     result = await index_normalized_documents(
         db,
         source.project_id,
@@ -173,23 +250,43 @@ async def ingest_documents_batch(
         normalized_documents,
         embed_fn=embed_fn,
     )
-    sync.documents_received += result.received
+    all_errors = preflight_errors + [BatchIngestErrorResponse(**error.model_dump()) for error in result.errors]
+    sync.documents_received += len(body.documents)
     sync.chunks_created += result.chunks_created
-    sync.parser_errors += len(result.errors)
+    sync.parser_errors += len(all_errors)
     diagnostics = dict(sync.diagnostics_json or {})
     diagnostics["last_batch_received"] = result.received
     diagnostics["last_batch_created"] = result.created
     diagnostics["last_batch_updated"] = result.updated
     diagnostics["last_batch_skipped_unchanged"] = result.skipped_unchanged
     sync.diagnostics_json = diagnostics
+    await record_audit_event(
+        db,
+        action="documents_batch_ingested",
+        status="success" if not all_errors else "partial",
+        project_id=source.project_id,
+        user=user,
+        resource_type="source",
+        resource_id=source.id,
+        request=request,
+        metadata={
+            "sync_id": str(sync.id),
+            "received": len(body.documents),
+            "created": result.created,
+            "updated": result.updated,
+            "skipped_unchanged": result.skipped_unchanged,
+            "chunks_created": result.chunks_created,
+            "errors": len(all_errors),
+        },
+    )
     await db.flush()
     return BatchIngestResponse(
-        received=result.received,
+        received=len(body.documents),
         created=result.created,
         updated=result.updated,
         skipped_unchanged=result.skipped_unchanged,
         chunks_created=result.chunks_created,
-        errors=[BatchIngestErrorResponse(**error.model_dump()) for error in result.errors],
+        errors=all_errors,
     )
 
 
@@ -198,11 +295,15 @@ async def finish_sync(
     source_id: uuid.UUID,
     sync_id: uuid.UUID,
     body: SyncFinishRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
     user=Depends(require_user),
 ):
     source = await _require_source(db, source_id)
-    await require_project_role(db, source.project_id, user.id, ProjectRole.investigator)
+    await require_project_role(db, source.project_id, user.id, ProjectRole.admin)
+    enforce_json_size(body.diagnostics, settings.max_sync_diagnostics_bytes, "sync diagnostics")
+    enforce_json_size(body.coverage, settings.max_sync_diagnostics_bytes, "sync coverage")
     sync = await _require_sync(db, sync_id, source.id)
     sync.status = body.status
     sync.finished_at = _utcnow()
@@ -220,6 +321,22 @@ async def finish_sync(
     source.last_sync_finished_at = sync.finished_at
     source.last_sync_status = body.status
     source.last_error = sync.error_message
+    await record_audit_event(
+        db,
+        action="sync_finished",
+        status=body.status,
+        project_id=source.project_id,
+        user=user,
+        resource_type="source_sync",
+        resource_id=sync.id,
+        request=request,
+        metadata={
+            "source_id": str(source.id),
+            "files_seen": sync.files_seen,
+            "files_skipped": sync.files_skipped,
+            "parser_errors": sync.parser_errors,
+        },
+    )
     await db.flush()
     return SyncStatusResponse(sync_id=sync.id, status=sync.status)
 
@@ -292,18 +409,6 @@ async def _validate_collector(db: AsyncSession, project_id: uuid.UUID, collector
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Collector not found for project")
     collector.last_seen_at = _utcnow()
     return collector
-
-
-def _contains_disallowed_config_keys(data: dict) -> bool:
-    for key, value in data.items():
-        normalized = key.lower().replace("-", "_")
-        if normalized in DISALLOWED_CONFIG_KEYS:
-            return True
-        if any(token in normalized for token in ("password", "secret", "token", "credential", "api_key")):
-            return True
-        if isinstance(value, dict) and _contains_disallowed_config_keys(value):
-            return True
-    return False
 
 
 def _source_response(source: Source) -> SourceResponse:

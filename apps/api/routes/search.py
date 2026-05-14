@@ -2,20 +2,17 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.api.deps import ensure_project_access, get_current_user, get_db, get_settings_dep
+from apps.api.deps import check_rate_limit, enforce_query_limits, ensure_project_access, get_current_user, get_db, get_settings_dep
 from incidentops.config.settings import Settings
-from incidentops.db.models import Project
 from incidentops.observability.metrics import incr, observe_latency
 from incidentops.retrieval.citation_builder import build_citations
 from incidentops.retrieval.evidence_packer import pack_evidence
 from incidentops.retrieval.hybrid_search import hybrid_search, hybrid_search_with_debug
 from incidentops.retrieval.reranker import rerank
 from incidentops.schemas.api import CitationInfo, SearchHit, SearchRequest, SearchResponse
-from incidentops.security.rate_limit import limiter
 
 router = APIRouter(prefix="/v1", tags=["Search"])
 
@@ -27,21 +24,31 @@ async def search(
     settings: Settings = Depends(get_settings_dep),
     user=Depends(get_current_user),
 ):
+    enforce_query_limits(body.query, body.top_k, settings)
     if user:
-        limiter.check(f"search:{user.id}", settings.user_request_limit, 60)
+        await check_rate_limit(
+            db,
+            settings,
+            f"search:{user.id}",
+            settings.user_request_limit,
+            settings.rate_limit_window_seconds,
+            user=user,
+            project_id=body.project_id,
+            action="search",
+        )
     await ensure_project_access(db, body.project_id, user, settings)
     start = time.time()
     if body.debug:
         raw_results, retrieval_debug = await hybrid_search_with_debug(
             db,
             body.project_id,
-            body.query[: settings.max_query_length],
+            body.query,
             top_k=max(body.top_k * 3, 30),
             filters=body.filters,
         )
     else:
         raw_results = await hybrid_search(
-            db, body.project_id, body.query[: settings.max_query_length], top_k=max(body.top_k * 3, 30), filters=body.filters
+            db, body.project_id, body.query, top_k=max(body.top_k * 3, 30), filters=body.filters
         )
         retrieval_debug = None
     reranked = rerank(body.query, raw_results, model_name=settings.reranker_model, top_k=min(body.top_k, settings.max_retrieved_chunks))

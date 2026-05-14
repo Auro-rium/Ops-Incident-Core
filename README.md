@@ -62,6 +62,20 @@ alembic upgrade head
 uvicorn apps.api.main:app --reload --port 8000
 ```
 
+Local/development keeps a convenience admin for smoke tests:
+
+```text
+admin@incidentops.local / incidentops
+```
+
+For staging/production, create the first admin explicitly:
+
+```bash
+python -m incidentops.security.bootstrap_admin \
+  --email admin@example.com \
+  --password "use-a-strong-password"
+```
+
 Then use the frontend or CLI:
 
 ```bash
@@ -154,8 +168,14 @@ Environment flags:
 - `APP_ENV=local|development|staging|production`
 - `DB_CREATE_ALL=false`
 - `DB_REQUIRE_MIGRATIONS=true`
+- `JWT_SECRET=<strong secret>`
+- `ALLOW_DEMO_PROJECT_BYPASS=false` in staging/production
+- `ALLOW_LOCAL_SEED_ADMIN=false` in staging/production
+- `RATE_LIMIT_BACKEND=redis` in staging/production when rate limiting is enabled
 
 `DB_CREATE_ALL=true` is only honored in `local` or `development`. It is ignored in `staging` and `production`; production must not silently create schema.
+
+Production startup fails if JWT secrets are missing/default, demo bypass is enabled, local seed admin is enabled, wildcard CORS is enabled, or in-memory rate limiting is configured.
 
 Production database boot sequence:
 
@@ -178,3 +198,15 @@ make db-current
 make db-history
 make db-downgrade
 ```
+
+## Security Model
+
+Authentication uses JWT bearer access tokens signed with `JWT_SECRET`. Passwords are stored with bcrypt; legacy SHA256 hashes are accepted only in local/development long enough to rehash on successful login.
+
+Project RBAC:
+- `viewer`: read project evidence, search, runs, reports, and eval results.
+- `investigator`: ask answers/investigations, create workflow runs, and use local/dev ingest.
+- `approver`: approve or reject gated workflow actions.
+- `admin`: manage projects, sources, collectors, syncs, document batch ingest, and eval runs.
+
+Source configs reject raw credential keys and obvious secret values. Use `credentials_ref` for references to external secret storage. Audit events are persisted for login attempts, project/source/sync changes, document ingest, workflow runs, approvals, eval runs, rate limits, and permission denials.

@@ -18,12 +18,18 @@ services:
   api:
     build: .
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     environment:
-      DATABASE_URL: postgresql+asyncpg://incidentops:incidentops@postgres:5432/incidentops
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://incidentops:incidentops@postgres:5432/incidentops}
       APP_ENV: ${APP_ENV:-local}
       DB_CREATE_ALL: ${DB_CREATE_ALL:-false}
       DB_REQUIRE_MIGRATIONS: ${DB_REQUIRE_MIGRATIONS:-true}
+      JWT_SECRET: ${JWT_SECRET:-incidentops-local-jwt-secret-change-me}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_ISSUER: ${JWT_ISSUER:-incidentops}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-incidentops-api}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+      ALLOW_LOCAL_SEED_ADMIN: ${ALLOW_LOCAL_SEED_ADMIN:-true}
       EMBEDDING_MODEL: local-hash-v1
       EMBEDDING_DIM: "384"
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
@@ -31,6 +37,10 @@ services:
       LLM_MODEL: ${LLM_MODEL:-gpt-4o}
       RERANKER_MODEL: ${RERANKER_MODEL:-}
       DEMO_MODE_PUBLIC: ${DEMO_MODE_PUBLIC:-false}
+      ALLOW_DEMO_PROJECT_BYPASS: ${ALLOW_DEMO_PROJECT_BYPASS:-true}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_BACKEND: ${RATE_LIMIT_BACKEND:-memory}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     depends_on:
       postgres:
         condition: service_healthy

@@ -34,6 +34,14 @@ async def create_project_with_fallback(
     project_name: str,
     headers: dict[str, str],
 ) -> tuple[str, dict[str, str], bool]:
+    if not headers:
+        response = await client.post(
+            "/v1/projects",
+            json={"name": project_name, "demo_mode": True},
+        )
+        response.raise_for_status()
+        return response.json()["project_id"], {}, True
+
     response = await client.post(
         "/v1/projects",
         headers=headers,
@@ -68,6 +76,8 @@ async def run_smoke() -> int:
         auth_mode = "authenticated" if token else "anonymous"
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        else:
+            warnings.append("auth login failed; using local demo project fallback if enabled")
 
         project_name = f"smoke-{os.urandom(4).hex()}"
         project_id, headers, anonymous_project = await create_project_with_fallback(client, project_name, headers)
