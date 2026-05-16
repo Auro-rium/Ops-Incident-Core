@@ -1,5 +1,8 @@
 # Evals
 
+[← Back to Documentation Hub](./README.md)
+
+
 Golden cases track:
 - expected evidence documents
 - expected root cause

@@ -1,5 +1,8 @@
 # Architecture
 
+[← Back to Documentation Hub](./README.md)
+
+
 IncidentOps Agent is split into ingestion, retrieval, investigation, agent workflow, security, evals, observability, and frontend surfaces. Retrieval stays deterministic and metadata-driven. Investigation turns evidence into timelines and hypotheses. The run workflow persists progress and approvals for inspectability.
 
 Production runtime separates API request handling from long-running work:
