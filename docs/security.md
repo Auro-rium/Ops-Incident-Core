@@ -1,5 +1,8 @@
 # Security
 
+[← Back to Documentation Hub](./README.md)
+
+
 - local JWT auth
 - project RBAC: viewer, investigator, approver, admin
 - untrusted evidence wrapper

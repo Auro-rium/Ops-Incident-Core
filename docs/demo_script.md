@@ -1,5 +1,8 @@
 # Demo Script
 
+[← Back to Documentation Hub](./README.md)
+
+
 1. Start the backend and frontend.
 2. Create a project from the UI.
 3. Ingest a real or test folder path.

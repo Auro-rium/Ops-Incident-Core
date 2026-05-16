@@ -1,5 +1,8 @@
 # Sample Output
 
+[← Back to Documentation Hub](./README.md)
+
+
 ## Query
 
 Why did latency increase after the last deploy?
