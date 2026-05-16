@@ -5,6 +5,7 @@ Vector search — pgvector cosine similarity over chunk embeddings.
 from __future__ import annotations
 
 import uuid
+import time
 from typing import Any
 
 from sqlalchemy import select
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from incidentops.db.models import Chunk
+from incidentops.observability.metrics import observe_latency
 
 
 async def vector_search(
@@ -25,6 +27,7 @@ async def vector_search(
     Cosine-similarity search using pgvector.
     Returns list of {chunk, score} dicts.
     """
+    start = time.time()
     distance = Chunk.embedding.cosine_distance(query_embedding)
 
     stmt = (
@@ -39,7 +42,9 @@ async def vector_search(
 
     stmt = stmt.order_by(distance).limit(top_k)
     result = await db.execute(stmt)
-    return [{"chunk": row[0], "score": float(row[1])} for row in result.all()]
+    rows = [{"chunk": row[0], "score": float(row[1])} for row in result.all()]
+    observe_latency("vector_search", (time.time() - start) * 1000)
+    return rows
 
 
 def _apply_filters(stmt, filters: dict):

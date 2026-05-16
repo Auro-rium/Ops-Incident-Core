@@ -22,6 +22,7 @@ from incidentops.db.models import Collector, ProjectRole, Source, SourceSync
 from incidentops.ingestion.diagnostics import build_source_coverage
 from incidentops.ingestion.indexer import index_normalized_documents
 from incidentops.ingestion.normalized import NormalizedDocument, safe_json_size
+from incidentops.observability.metrics import incr
 from incidentops.retrieval.embeddings import embed_texts
 from incidentops.schemas.api import (
     BatchIngestErrorResponse,
@@ -259,6 +260,11 @@ async def ingest_documents_batch(
     )
     if all_errors and sync.status == "running":
         source.last_sync_status = "running_with_errors"
+    incr("documents_received_total", len(body.documents))
+    incr("documents_indexed_total", result.created + result.updated)
+    incr("chunks_created_total", result.chunks_created)
+    incr("documents_skipped_total", result.skipped_unchanged + result.skipped_invalid)
+    incr("parser_errors_total", len(all_errors))
     await record_audit_event(
         db,
         action="documents_batch_ingested",

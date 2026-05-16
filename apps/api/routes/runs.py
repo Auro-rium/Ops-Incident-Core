@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,9 +16,11 @@ from apps.api.deps import (
     get_settings_dep,
     require_user,
 )
+from incidentops.agent.events import append_run_event
 from incidentops.agent.service import create_run, execute_run, resume_after_approval
 from incidentops.config.settings import Settings
-from incidentops.db.models import AgentRun, AgentRunEvent, ProjectRole
+from incidentops.db.models import AgentRun, AgentRunEvent, ProjectRole, RunStatus
+from incidentops.observability.metrics import incr
 from incidentops.schemas.api import (
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
@@ -29,6 +30,7 @@ from incidentops.schemas.api import (
 )
 from incidentops.security.rbac import require_project_role
 from incidentops.security.audit import record_audit_event
+from incidentops.worker.queue import get_job_queue
 
 router = APIRouter(prefix="/v1", tags=["Runs"])
 
@@ -54,7 +56,6 @@ async def start_run(
     )
     await require_project_role(db, body.project_id, user.id, ProjectRole.investigator)
     run = await create_run(db, body.project_id, user.id, body.query)
-    run = await execute_run(db, run, body.top_k, settings.reranker_model, create_issue_draft=body.create_issue_draft)
     await record_audit_event(
         db,
         action="workflow_run_created",
@@ -66,6 +67,66 @@ async def start_run(
         request=request,
         metadata={"top_k": body.top_k, "create_issue_draft": body.create_issue_draft},
     )
+    if settings.worker_mode == "queue":
+        await append_run_event(
+            db,
+            run.id,
+            "job_enqueued",
+            payload={"job_type": "execute_workflow_run", "queue_backend": settings.job_queue_backend},
+        )
+        await record_audit_event(
+            db,
+            action="workflow_job_enqueued",
+            status="queued",
+            project_id=body.project_id,
+            user=user,
+            resource_type="agent_run",
+            resource_id=run.id,
+            request=request,
+            metadata={"top_k": body.top_k, "queue_backend": settings.job_queue_backend},
+        )
+        await db.flush()
+        await db.commit()
+        try:
+            await get_job_queue(settings).enqueue(
+                "execute_workflow_run",
+                {
+                    "run_id": str(run.id),
+                    "top_k": body.top_k,
+                    "reranker_model": settings.reranker_model,
+                    "create_issue_draft": body.create_issue_draft,
+                },
+            )
+        except Exception as exc:
+            error = _safe_error(exc)
+            run.status = RunStatus.failed
+            run.error = error
+            await append_run_event(db, run.id, "run_failed", payload={"error": error})
+            await record_audit_event(
+                db,
+                action="workflow_job_failed",
+                status="failed",
+                project_id=body.project_id,
+                user=user,
+                resource_type="agent_run",
+                resource_id=run.id,
+                request=request,
+                metadata={"error": error},
+            )
+            await db.commit()
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Failed to enqueue workflow job") from exc
+        incr("workflow_jobs_enqueued_total")
+        await db.refresh(run)
+    else:
+        run = await execute_run(
+            db,
+            run,
+            body.top_k,
+            settings.reranker_model,
+            create_issue_draft=body.create_issue_draft,
+            settings=settings,
+        )
+
     if run.pending_approval:
         await record_audit_event(
             db,
@@ -185,6 +246,10 @@ async def approve_run(
         request=request,
     )
     return ApprovalDecisionResponse(run_id=run.id, status=run.status.value, rationale=body.rationale)
+
+
+def _safe_error(exc: Exception) -> str:
+    return str(exc).replace("\n", " ")[:1000]
 
 
 @router.post("/runs/{run_id}/reject", response_model=ApprovalDecisionResponse)

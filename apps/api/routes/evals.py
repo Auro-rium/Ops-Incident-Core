@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.deps import check_rate_limit, ensure_project_access, get_db, get_settings_dep, require_user
 from incidentops.config.settings import Settings
-from incidentops.db.models import EvalRun, ProjectMember, ProjectRole
-from incidentops.eval.runner import run_eval_persisted
+from incidentops.db.models import EvalRun, EvalStatus, ProjectMember, ProjectRole
+from incidentops.eval.runner import create_eval_run, run_eval_persisted
+from incidentops.observability.metrics import incr
 from incidentops.schemas.api import EvalRunRequest, EvalRunResponse
 from incidentops.security.audit import record_audit_event
+from incidentops.worker.queue import get_job_queue
 
 router = APIRouter(prefix="/v1/evals", tags=["Evals"])
 
@@ -57,7 +59,10 @@ async def run_eval_endpoint(
         action="eval_run",
     )
     await ensure_project_access(db, body.project_id, user, settings, minimum_role=ProjectRole.admin)
-    run = await run_eval_persisted(db, body.project_id, top_k=body.top_k, cases_path=body.cases_path)
+    if settings.worker_mode == "queue":
+        run = await create_eval_run(db, body.project_id)
+    else:
+        run = await run_eval_persisted(db, body.project_id, top_k=body.top_k, cases_path=body.cases_path)
     await record_audit_event(
         db,
         action="eval_run_created",
@@ -69,6 +74,44 @@ async def run_eval_endpoint(
         request=request,
         metadata={"top_k": body.top_k, "cases_path": body.cases_path},
     )
+    if settings.worker_mode == "queue":
+        await record_audit_event(
+            db,
+            action="eval_job_enqueued",
+            status="queued",
+            project_id=body.project_id,
+            user=user,
+            resource_type="eval_run",
+            resource_id=run.id,
+            request=request,
+            metadata={"top_k": body.top_k, "queue_backend": settings.job_queue_backend},
+        )
+        await db.flush()
+        await db.commit()
+        try:
+            await get_job_queue(settings).enqueue(
+                "execute_eval_run",
+                {"eval_run_id": str(run.id), "top_k": body.top_k, "cases_path": body.cases_path},
+            )
+        except Exception as exc:
+            error = _safe_error(exc)
+            run.status = EvalStatus.failed
+            run.summary_json = {"status": "failed", "error": error}
+            await record_audit_event(
+                db,
+                action="eval_job_failed",
+                status="failed",
+                project_id=body.project_id,
+                user=user,
+                resource_type="eval_run",
+                resource_id=run.id,
+                request=request,
+                metadata={"error": error},
+            )
+            await db.commit()
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Failed to enqueue eval job") from exc
+        incr("eval_jobs_enqueued_total")
+        await db.refresh(run)
     return EvalRunResponse(
         eval_run_id=run.id,
         project_id=run.project_id,
@@ -77,6 +120,10 @@ async def run_eval_endpoint(
         created_at=run.created_at,
         updated_at=run.updated_at,
     )
+
+
+def _safe_error(exc: Exception) -> str:
+    return str(exc).replace("\n", " ")[:1000]
 
 
 @router.get("/{eval_run_id}", response_model=EvalRunResponse)

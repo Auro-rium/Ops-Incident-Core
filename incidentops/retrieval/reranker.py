@@ -5,6 +5,9 @@ Reranker — cross-encoder reranking with score-fusion fallback.
 from __future__ import annotations
 
 import logging
+import time
+
+from incidentops.observability.metrics import incr, observe_latency
 
 logger = logging.getLogger("incidentops.retrieval.reranker")
 
@@ -39,6 +42,7 @@ def rerank(
     Rerank results using cross-encoder if available.
     Falls back to fused_score ordering.
     """
+    start = time.time()
     if not results:
         return []
 
@@ -54,11 +58,13 @@ def rerank(
             results.sort(key=lambda x: x.get("rerank_score", 0), reverse=True)
             logger.info("Cross-encoder reranked %d results", len(results))
         except Exception as e:
+            incr("rerank_failures_total")
             logger.warning("Cross-encoder failed: %s. Using fused scores.", e)
             _fallback_sort(results)
     else:
         _fallback_sort(results)
 
+    observe_latency("rerank", (time.time() - start) * 1000)
     return results[:top_k]
 
 

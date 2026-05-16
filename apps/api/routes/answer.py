@@ -95,7 +95,9 @@ async def answer(
         message = "LLM provider not configured. Returning retrieved evidence only."
     latency_ms = int((time.time() - start) * 1000)
     incr("answer_requests")
+    incr("answer_requests_total")
     observe_latency("answer", latency_ms)
+    observe_latency("answer_latency", latency_ms)
     return AnswerResponse(
         question=body.query,
         answer=answer_body,

@@ -367,6 +367,7 @@ class LoginResponse(BaseModel):
 class MetricsSummaryResponse(BaseModel):
     counters: dict[str, int | float]
     latencies_ms: dict[str, float]
+    latency_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class EvalRunRequest(BaseModel):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import time
 from pathlib import Path
 
 import httpx
@@ -127,6 +128,7 @@ async def run_smoke() -> int:
             )
             if run_response.is_success:
                 run_payload = run_response.json()
+                run_payload = await poll_run(client, headers, run_payload["run_id"])
             else:
                 run_warnings = [
                     f"workflow run request failed with status {run_response.status_code}: {run_response.text[:200]}"
@@ -204,6 +206,7 @@ async def run_smoke() -> int:
     _print_section("Workflow Run")
     if run_payload and run_payload.get("run_id"):
         print(f"  run_id: {run_payload['run_id']}")
+        print(f"  status: {run_payload.get('status')}")
     else:
         print("  not requested or unavailable")
     print()
@@ -219,6 +222,25 @@ async def run_smoke() -> int:
     if ingest_payload.get("chunks_created", 0) == 0 or search_payload.get("total", 0) == 0:
         return 1
     return 0
+
+
+async def poll_run(client: httpx.AsyncClient, headers: dict[str, str], run_id: str, timeout_seconds: int = 120) -> dict:
+    terminal = {"completed", "awaiting_approval", "waiting_for_approval", "failed", "rejected"}
+    deadline = time.time() + timeout_seconds
+    payload: dict = {"run_id": run_id, "status": "unknown"}
+    while time.time() < deadline:
+        response = await client.get(f"/v1/runs/{run_id}", headers=headers)
+        if response.status_code == 404:
+            await asyncio.sleep(1)
+            continue
+        if not response.is_success:
+            return payload
+        payload = response.json()
+        if payload.get("status") in terminal:
+            return payload
+        await asyncio.sleep(2)
+    payload["warning"] = "timed out waiting for workflow run"
+    return payload
 
 
 if __name__ == "__main__":

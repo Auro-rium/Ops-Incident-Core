@@ -15,6 +15,7 @@ from incidentops.investigation.root_cause_selector import select_root_cause
 from incidentops.investigation.schemas import InvestigationResult
 from incidentops.investigation.scope_resolver import resolve_scope
 from incidentops.investigation.timeline_builder import build_timeline
+from incidentops.observability.metrics import incr, observe_latency
 from incidentops.retrieval.citation_builder import build_citations
 from incidentops.retrieval.evidence_packer import pack_evidence
 from incidentops.retrieval.hybrid_search import hybrid_search, hybrid_search_with_debug
@@ -120,7 +121,12 @@ async def investigate(
         if debug
         else {},
     )
-    return result, int((time.time() - start) * 1000)
+    latency_ms = int((time.time() - start) * 1000)
+    incr("investigations_total")
+    if confidence == "low":
+        incr("weak_evidence_total")
+    observe_latency("investigation", latency_ms)
+    return result, latency_ms
 
 
 def _score_confidence(

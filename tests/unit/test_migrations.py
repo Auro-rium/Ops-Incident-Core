@@ -31,6 +31,9 @@ async def test_production_startup_does_not_call_create_all(monkeypatch):
             allow_demo_project_bypass=False,
             allow_local_seed_admin=False,
             rate_limit_backend="redis",
+            worker_mode="queue",
+            job_queue_backend="redis",
+            metrics_backend="prometheus",
             cors_allow_origins="https://incidentops.example.com",
             allow_wildcard_cors=False,
         )
@@ -92,3 +95,6 @@ def test_production_validation_rejects_unsafe_security_defaults():
     assert any("ALLOW_DEMO_PROJECT_BYPASS" in error for error in errors)
     assert any("ALLOW_LOCAL_SEED_ADMIN" in error for error in errors)
     assert any("RATE_LIMIT_BACKEND" in error for error in errors)
+    assert any("WORKER_MODE" in error for error in errors)
+    assert any("JOB_QUEUE_BACKEND" in error for error in errors)
+    assert any("METRICS_BACKEND" in error for error in errors)

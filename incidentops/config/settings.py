@@ -63,6 +63,17 @@ class Settings(BaseSettings):
     max_context_tokens: int = 12000
     max_sync_diagnostics_bytes: int = 64_000
     graph_timeout_seconds: int = 120
+    worker_mode: str = "inline"
+    job_queue_backend: str = "inline"
+    workflow_node_timeout_seconds: int = 60
+    workflow_max_retries: int = 1
+    workflow_run_timeout_seconds: int = 300
+    eval_run_timeout_seconds: int = 600
+    job_poll_interval_seconds: int = 2
+    enable_otel: bool = False
+    otel_service_name: str = "incidentops-core"
+    otel_exporter_otlp_endpoint: str = ""
+    metrics_backend: str = "memory"
     demo_mode_public: bool = False
     allow_demo_project_bypass: bool = True
     max_ingest_file_bytes: int = 2_000_000

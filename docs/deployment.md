@@ -61,11 +61,15 @@ ALLOW_LOCAL_SEED_ADMIN=false
 ALLOW_DEMO_PROJECT_BYPASS=false
 DEMO_MODE_PUBLIC=false
 RATE_LIMIT_BACKEND=redis
+WORKER_MODE=queue
+JOB_QUEUE_BACKEND=redis
+REDIS_URL=redis://...
+METRICS_BACKEND=prometheus
 CORS_ALLOW_ORIGINS=https://your-ui.example.com
 ALLOW_WILDCARD_CORS=false
 ```
 
-Startup fails in staging/production if default JWT secrets, local seed admin, demo bypass, wildcard CORS, `DB_CREATE_ALL=true`, or in-memory rate limiting are configured.
+Startup fails in staging/production if default JWT secrets, local seed admin, demo bypass, wildcard CORS, `DB_CREATE_ALL=true`, in-memory rate limiting, inline worker mode, non-Redis job queues, or memory-only metrics are configured.
 
 Passwords are stored with bcrypt. Legacy SHA256 hashes are only accepted in local/development and are rehashed after a successful login.
 
@@ -88,6 +92,31 @@ MAX_PATH_LENGTH=2048
 If a whole batch exceeds count or byte limits, the API rejects the request. If one document is invalid or oversized, the batch response includes a per-document error and continues indexing valid documents. Error responses do not include raw document content.
 
 Production ingestion should use the source/collector/sync/document-batch APIs. `/v1/projects/{project_id}/ingest` remains available for local development and server-visible folder smoke tests only.
+
+## Worker Runtime
+
+Production should run the API and at least one worker process:
+
+```bash
+uvicorn apps.api.main:app --host 0.0.0.0 --port 8000
+python -m incidentops.worker
+```
+
+The API validates auth/RBAC, creates persisted workflow or eval records, enqueues jobs, and returns IDs. The worker pulls jobs, executes deterministic workflow/eval logic, persists status/events/results, and records audit events.
+
+Runtime settings:
+
+```text
+WORKER_MODE=queue
+JOB_QUEUE_BACKEND=redis
+WORKFLOW_NODE_TIMEOUT_SECONDS=60
+WORKFLOW_MAX_RETRIES=1
+WORKFLOW_RUN_TIMEOUT_SECONDS=300
+EVAL_RUN_TIMEOUT_SECONDS=600
+JOB_POLL_INTERVAL_SECONDS=2
+```
+
+Local development may use `WORKER_MODE=inline` and `JOB_QUEUE_BACKEND=inline`.
 
 ## RBAC
 
@@ -121,6 +150,31 @@ Run the same readiness check from the CLI:
 python scripts/check_migrations.py
 ```
 
+Run an API-level production smoke:
+
+```bash
+python scripts/smoke_prod.py \
+  --base-url http://127.0.0.1:8001 \
+  --email admin@incidentops.local \
+  --password incidentops \
+  --query "What does this tiny service evidence say?"
+```
+
+The smoke test checks health, readiness, login, project/source/collector/sync creation, normalized batch ingest, search, investigate, workflow run polling, and a small eval when the API can access the generated case file.
+
+## Observability
+
+Set `ENABLE_OTEL=true` to enable OpenTelemetry hooks. Configure `OTEL_SERVICE_NAME` and `OTEL_EXPORTER_OTLP_ENDPOINT` when an OTLP collector is available. If tracing dependencies or exporters are unavailable, the app continues without tracing.
+
+Metrics endpoints:
+
+```text
+GET /v1/metrics/summary
+GET /metrics
+```
+
+Metrics cover HTTP requests, ingestion counters, retrieval/search latency, investigation latency, workflow runs/nodes/failures, eval runs/cases, and LLM calls when configured.
+
 ## Make Commands
 
 ```bash
@@ -129,4 +183,7 @@ make migration-check
 make db-current
 make db-history
 make db-downgrade
+make worker
+make smoke-prod
+make metrics-check
 ```

@@ -48,12 +48,16 @@ class LLMProvider:
                 resp = await client.post(f"{self.base_url}/chat/completions", headers=headers, json=payload)
                 latency_ms = int((time.time() - start) * 1000)
                 observe_latency("llm", latency_ms)
+                observe_latency("llm_latency", latency_ms)
                 resp.raise_for_status()
                 data = resp.json()
                 incr("llm_calls")
+                incr("llm_calls_total")
                 if usage := data.get("usage"):
                     incr("llm_prompt_tokens", usage.get("prompt_tokens", 0))
                     incr("llm_completion_tokens", usage.get("completion_tokens", 0))
+                    incr("llm_input_tokens_total", usage.get("prompt_tokens", 0))
+                    incr("llm_output_tokens_total", usage.get("completion_tokens", 0))
                 content = data["choices"][0]["message"]["content"]
                 try:
                     return json.loads(content)
@@ -62,10 +66,12 @@ class LLMProvider:
         except httpx.HTTPStatusError as exc:
             logger.error("LLM HTTP error %d: %s", exc.response.status_code, exc.response.text[:200])
             incr("llm_failures")
+            incr("llm_failures_total")
             return None
         except Exception as exc:
             logger.error("LLM request failed: %s", exc)
             incr("llm_failures")
+            incr("llm_failures_total")
             return None
 
 

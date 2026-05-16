@@ -5,6 +5,7 @@ Lexical search — Postgres full-text search over chunk tsvectors.
 from __future__ import annotations
 
 import uuid
+import time
 from typing import Any
 
 from sqlalchemy import func, select
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from incidentops.db.models import Chunk
+from incidentops.observability.metrics import observe_latency
 
 
 async def lexical_search(
@@ -25,6 +27,7 @@ async def lexical_search(
     Full-text search using ts_rank_cd with plainto_tsquery.
     Returns list of {chunk, score} dicts ordered by relevance.
     """
+    start = time.time()
     tsquery = func.plainto_tsquery("english", query)
     rank = func.ts_rank_cd(Chunk.search_tsvector, tsquery)
 
@@ -40,7 +43,9 @@ async def lexical_search(
 
     stmt = stmt.order_by(rank.desc()).limit(top_k)
     result = await db.execute(stmt)
-    return [{"chunk": row[0], "score": float(row[1])} for row in result.all()]
+    rows = [{"chunk": row[0], "score": float(row[1])} for row in result.all()]
+    observe_latency("lexical_search", (time.time() - start) * 1000)
+    return rows
 
 
 def _apply_filters(stmt, filters: dict):

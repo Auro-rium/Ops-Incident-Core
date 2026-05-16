@@ -56,7 +56,11 @@ async def search(
     build_citations(evidence)
     latency_ms = int((time.time() - start) * 1000)
     incr("search_requests")
+    incr("search_requests_total")
+    if not evidence:
+        incr("zero_result_total")
     observe_latency("search", latency_ms)
+    observe_latency("search_latency", latency_ms)
     hits = [
         SearchHit(
             chunk_id=item["chunk_id"],

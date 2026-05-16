@@ -59,6 +59,31 @@ Production ingestion is Collector-first. A Collector reads company folders, repo
 
 Batch ingest is idempotent by `(project_id, source_id, external_id, content_hash)`: unchanged documents are skipped, changed documents replace their previous chunks, and per-document failures are returned without failing the whole batch. Local folder ingest remains as development compatibility and uses the same central indexer internally.
 
+## Runtime and Workers
+
+Local development defaults to inline execution:
+
+```text
+WORKER_MODE=inline
+JOB_QUEUE_BACKEND=inline
+```
+
+In staging/production, workflow and eval jobs should run through a worker:
+
+```text
+WORKER_MODE=queue
+JOB_QUEUE_BACKEND=redis
+REDIS_URL=redis://...
+```
+
+`POST /v1/runs` and `POST /v1/evals/run` create persisted run records and enqueue jobs in queue mode. A worker process executes them, persists status/events/results, and records audit events. Start a worker with:
+
+```bash
+python -m incidentops.worker
+```
+
+Workflow nodes emit `node_started`, `node_completed`, `node_failed`, and `node_retried` events. Timeouts and retry limits are controlled by `WORKFLOW_NODE_TIMEOUT_SECONDS`, `WORKFLOW_MAX_RETRIES`, and `WORKFLOW_RUN_TIMEOUT_SECONDS`.
+
 ## Main capabilities
 
 - metadata-aware ingestion and hybrid retrieval
@@ -118,19 +143,30 @@ Then open:
 http://127.0.0.1:3000
 ```
 
-The compose file mounts `${INGEST_ROOT:-.}` into the API container as `/workspace` read-only. When the backend runs in Docker, ingest paths must be container-visible paths such as:
+The compose file mounts `${INGEST_ROOT:-.}` into the API container as `${INGEST_CONTAINER_ROOT:-/workspace}` read-only. When the backend runs in Docker, ingest paths must be container-visible paths such as:
 
 ```txt
 /workspace/tests/fixtures/basic_incident
 ```
 
 To point Docker at a different host folder tree, start compose with `INGEST_ROOT=/path/to/data-root`.
+To preserve host absolute paths for local smoke tests, set both roots to the same path, for example `INGEST_ROOT=/home/lenovo INGEST_CONTAINER_ROOT=/home/lenovo`.
 
 Run migrations before using a fresh database:
 
 ```bash
 alembic upgrade head
 python scripts/check_migrations.py
+```
+
+Run a production-style API smoke check:
+
+```bash
+python scripts/smoke_prod.py \
+  --base-url http://127.0.0.1:8000 \
+  --email admin@incidentops.local \
+  --password incidentops \
+  --query "What does this tiny service evidence say?"
 ```
 
 ## Frontend
@@ -169,6 +205,8 @@ Case format:
 }
 ```
 
+Eval runs are persisted with per-case evidence recall, term coverage, forbidden-term hits, latency, and error fields. One failed case does not fail the whole eval run.
+
 ## Tests and fixtures
 
 Tiny fixtures live under `tests/fixtures/basic_incident/`. They are only for tests and smoke coverage. The main product flow does not depend on `demo_data`.
@@ -185,10 +223,14 @@ Environment flags:
 - `ALLOW_DEMO_PROJECT_BYPASS=false` in staging/production
 - `ALLOW_LOCAL_SEED_ADMIN=false` in staging/production
 - `RATE_LIMIT_BACKEND=redis` in staging/production when rate limiting is enabled
+- `WORKER_MODE=queue` in staging/production
+- `JOB_QUEUE_BACKEND=redis` in staging/production
+- `METRICS_BACKEND=prometheus` or another production metrics backend in staging/production
 
 `DB_CREATE_ALL=true` is only honored in `local` or `development`. It is ignored in `staging` and `production`; production must not silently create schema.
 
 Production startup fails if JWT secrets are missing/default, demo bypass is enabled, local seed admin is enabled, wildcard CORS is enabled, or in-memory rate limiting is configured.
+Production startup also rejects inline worker mode, non-Redis job queues, and memory-only metrics.
 
 Production database boot sequence:
 
@@ -201,6 +243,8 @@ Production database boot sequence:
 7. Verify `GET /ready`.
 
 `/health` is a lightweight liveness check. `/ready` verifies database connectivity, pgvector extension availability, required tables, and Alembic revision state.
+
+`/v1/metrics/summary` returns structured in-process counters and latency averages. `/metrics` exposes a Prometheus-compatible text view for scraping.
 
 Migration commands:
 

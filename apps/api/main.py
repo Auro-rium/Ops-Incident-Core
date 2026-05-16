@@ -5,15 +5,17 @@ IncidentOps API entrypoint.
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from incidentops.config.settings import Settings, get_settings
 from incidentops.config.validation import validate_startup_settings
 from incidentops.db.session import create_tables
-from incidentops.observability.metrics import incr
+from incidentops.observability.metrics import incr, observe_latency
+from incidentops.observability.tracing import configure_tracing
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-5s %(name)s — %(message)s")
 logger = logging.getLogger("incidentops.api")
@@ -62,6 +64,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+configure_tracing(get_settings(), app)
+
+
+@app.middleware("http")
+async def observe_http_requests(request: Request, call_next):
+    start = time.time()
+    try:
+        response = await call_next(request)
+    except Exception:
+        incr("http_requests_total")
+        incr("http_errors_total")
+        observe_latency("http_request_duration", (time.time() - start) * 1000)
+        raise
+    latency_ms = (time.time() - start) * 1000
+    incr("http_requests_total")
+    observe_latency("http_request_duration", latency_ms)
+    if response.status_code >= 400:
+        incr("http_errors_total")
+    return response
 
 from apps.api.routes import answer, auth, evals, health, ingest, investigate, metrics, runs, search, sources  # noqa: E402
 

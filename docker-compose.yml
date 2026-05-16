@@ -15,6 +15,9 @@ services:
       timeout: 3s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+
   api:
     build: .
     ports:
@@ -40,7 +43,16 @@ services:
       ALLOW_DEMO_PROJECT_BYPASS: ${ALLOW_DEMO_PROJECT_BYPASS:-true}
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
       RATE_LIMIT_BACKEND: ${RATE_LIMIT_BACKEND:-memory}
+      WORKER_MODE: ${WORKER_MODE:-inline}
+      JOB_QUEUE_BACKEND: ${JOB_QUEUE_BACKEND:-inline}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      WORKFLOW_NODE_TIMEOUT_SECONDS: ${WORKFLOW_NODE_TIMEOUT_SECONDS:-60}
+      WORKFLOW_MAX_RETRIES: ${WORKFLOW_MAX_RETRIES:-1}
+      WORKFLOW_RUN_TIMEOUT_SECONDS: ${WORKFLOW_RUN_TIMEOUT_SECONDS:-300}
+      EVAL_RUN_TIMEOUT_SECONDS: ${EVAL_RUN_TIMEOUT_SECONDS:-600}
+      JOB_POLL_INTERVAL_SECONDS: ${JOB_POLL_INTERVAL_SECONDS:-2}
+      ENABLE_OTEL: ${ENABLE_OTEL:-false}
+      METRICS_BACKEND: ${METRICS_BACKEND:-memory}
       MAX_DOCUMENTS_PER_BATCH: ${MAX_DOCUMENTS_PER_BATCH:-100}
       MAX_DOCUMENT_BYTES: ${MAX_DOCUMENT_BYTES:-2000000}
       MAX_BATCH_BYTES: ${MAX_BATCH_BYTES:-10000000}
@@ -53,7 +65,36 @@ services:
         condition: service_healthy
     volumes:
       - model_cache:/root/.cache
-      - ${INGEST_ROOT:-.}:/workspace:ro
+      - ${INGEST_ROOT:-.}:${INGEST_CONTAINER_ROOT:-/workspace}:ro
+
+  core-worker:
+    build: .
+    command: python -m incidentops.worker
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://incidentops:incidentops@postgres:5432/incidentops}
+      APP_ENV: ${APP_ENV:-local}
+      DB_CREATE_ALL: ${DB_CREATE_ALL:-false}
+      DB_REQUIRE_MIGRATIONS: ${DB_REQUIRE_MIGRATIONS:-true}
+      JWT_SECRET: ${JWT_SECRET:-incidentops-local-jwt-secret-change-me}
+      ALLOW_LOCAL_SEED_ADMIN: ${ALLOW_LOCAL_SEED_ADMIN:-true}
+      DEMO_MODE_PUBLIC: ${DEMO_MODE_PUBLIC:-false}
+      ALLOW_DEMO_PROJECT_BYPASS: ${ALLOW_DEMO_PROJECT_BYPASS:-true}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_BACKEND: ${RATE_LIMIT_BACKEND:-memory}
+      WORKER_MODE: ${WORKER_MODE:-inline}
+      JOB_QUEUE_BACKEND: ${JOB_QUEUE_BACKEND:-inline}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      EMBEDDING_MODEL: local-hash-v1
+      RERANKER_MODEL: ${RERANKER_MODEL:-}
+      ENABLE_OTEL: ${ENABLE_OTEL:-false}
+      METRICS_BACKEND: ${METRICS_BACKEND:-memory}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - model_cache:/root/.cache
 
   web:
     build:

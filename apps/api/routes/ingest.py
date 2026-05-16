@@ -10,6 +10,7 @@ from apps.api.deps import check_rate_limit, ensure_project_access, get_current_u
 from incidentops.config.settings import Settings
 from incidentops.db.models import Project, ProjectMember, ProjectRole
 from incidentops.ingestion.pipeline import run_ingestion
+from incidentops.observability.metrics import incr
 from incidentops.retrieval.embeddings import embed_texts
 from incidentops.schemas.api import (
     CreateProjectRequest,
@@ -100,6 +101,11 @@ async def ingest(
         metadata={"mode": "local_path"},
     )
     stats = await run_ingestion(db, project_id, body.path, embed_fn=embed_fn)
+    incr("documents_received_total", stats["documents_ingested"])
+    incr("documents_indexed_total", stats["documents_ingested"])
+    incr("chunks_created_total", stats["chunks_created"])
+    incr("documents_skipped_total", stats["files_skipped"])
+    incr("parser_errors_total", len(stats.get("parser_errors", [])))
     await record_audit_event(
         db,
         action="local_ingest_finished",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import time
 import uuid
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from incidentops.db.models import EvalRun, EvalRunCase, EvalStatus
 from incidentops.investigation.service import investigate
+from incidentops.observability.metrics import incr, observe_latency
 
 DEFAULT_CASES_PATH = Path(__file__).parent / "golden_cases.jsonl"
 
@@ -56,37 +58,104 @@ async def run_eval_persisted(
     top_k: int = 10,
     cases_path: str | Path | None = None,
 ) -> EvalRun:
-    run = EvalRun(project_id=project_id, status=EvalStatus.running, summary_json={})
+    run = await create_eval_run(db, project_id)
+    return await execute_eval_run(db, run, top_k=top_k, cases_path=cases_path)
+
+
+async def create_eval_run(db: AsyncSession, project_id: uuid.UUID) -> EvalRun:
+    run = EvalRun(project_id=project_id, status=EvalStatus.queued, summary_json={})
     db.add(run)
     await db.flush()
+    return run
 
-    cases = load_cases(cases_path)
+
+async def execute_eval_run(
+    db: AsyncSession,
+    run: EvalRun,
+    top_k: int = 10,
+    cases_path: str | Path | None = None,
+) -> EvalRun:
+    run_started = time.time()
+    incr("eval_runs_total")
+    run.status = EvalStatus.running
+    run.summary_json = {"status": "running"}
+    await db.flush()
+    try:
+        cases = load_cases(cases_path)
+    except Exception as exc:
+        run.status = EvalStatus.failed
+        incr("eval_failures_total")
+        run.summary_json = {
+            "status": "failed",
+            "error": _safe_error(exc),
+            "total_cases": 0,
+            "passed_cases": 0,
+            "failed_cases": 0,
+        }
+        await db.flush()
+        await db.refresh(run)
+        observe_latency("eval_run_duration", (time.time() - run_started) * 1000)
+        return run
+
     results = []
     for case in cases:
-        investigation, latency_ms = await investigate(
-            db,
-            project_id,
-            case["question"],
-            top_k=top_k,
-            reranker_model="cross-encoder/ms-marco-MiniLM-L-6-v2",
-        )
-        evidence_paths = [item["document_path"] for item in investigation.evidence]
-        answer_payload = " ".join(
-            [
-                investigation.likely_root_cause.summary,
-                investigation.suggested_fix or "",
-                " ".join(investigation.unknowns),
-                " ".join(h.summary for h in investigation.hypotheses),
-            ]
-        )
-        case_result = evaluate_case_output(case, evidence_paths, answer_payload)
-        case_result["latency_ms"] = latency_ms
+        incr("eval_cases_total")
+        started = time.time()
+        try:
+            question = case["question"]
+            investigation, latency_ms = await investigate(
+                db,
+                run.project_id,
+                question,
+                top_k=top_k,
+                reranker_model="",
+            )
+            evidence_paths = [item["document_path"] for item in investigation.evidence]
+            answer_payload = " ".join(
+                [
+                    investigation.likely_root_cause.summary,
+                    investigation.suggested_fix or "",
+                    " ".join(investigation.unknowns),
+                    " ".join(h.summary for h in investigation.hypotheses),
+                ]
+            )
+            case_result = evaluate_case_output(case, evidence_paths, answer_payload)
+            case_result.update(
+                {
+                    "case_id": case.get("id", ""),
+                    "question": question,
+                    "expected_documents": case.get("expected_documents", []),
+                    "expected_terms": case.get("expected_terms", []),
+                    "forbidden_terms": case.get("forbidden_terms", []),
+                    "retrieved_documents": evidence_paths,
+                    "latency_ms": latency_ms,
+                    "error": None,
+                }
+            )
+        except Exception as exc:
+            case_result = {
+                "case_id": str(case.get("id", "")),
+                "question": str(case.get("question", "")),
+                "expected_documents": case.get("expected_documents", []),
+                "expected_terms": case.get("expected_terms", []),
+                "forbidden_terms": case.get("forbidden_terms", []),
+                "retrieved_documents": [],
+                "found_documents": [],
+                "missing_documents": case.get("expected_documents", []),
+                "evidence_recall": 0.0,
+                "found_terms": [],
+                "missing_terms": [str(term).lower() for term in case.get("expected_terms", [])],
+                "term_coverage": 0.0,
+                "forbidden_hits": [],
+                "latency_ms": int((time.time() - started) * 1000),
+                "error": _safe_error(exc),
+            }
         results.append(case_result)
         db.add(
             EvalRunCase(
                 eval_run_id=run.id,
-                case_id=case["id"],
-                question=case["question"],
+                case_id=str(case.get("id", f"case_{len(results)}")),
+                question=str(case.get("question", "")),
                 result_json=case_result,
             )
         )
@@ -94,17 +163,32 @@ async def run_eval_persisted(
     avg_recall = sum(result["evidence_recall"] for result in results) / len(results) if results else 0.0
     avg_term_coverage = sum(result["term_coverage"] for result in results) / len(results) if results else 0.0
     forbidden_hits = sum(1 for result in results if result["forbidden_hits"])
+    failed_cases = sum(1 for result in results if result.get("error"))
+    passed_cases = len(results) - failed_cases
+    avg_latency_ms = sum(int(result.get("latency_ms") or 0) for result in results) / len(results) if results else 0.0
     run.status = EvalStatus.completed
     run.summary_json = {
+        "total_cases": len(results),
+        "passed_cases": passed_cases,
+        "failed_cases": failed_cases,
+        "avg_evidence_recall": avg_recall,
+        "avg_term_coverage": avg_term_coverage,
+        "forbidden_hit_count": forbidden_hits,
+        "avg_latency_ms": avg_latency_ms,
+        # Backward-compatible keys used by existing tests and scripts.
         "cases": len(results),
         "avg_recall": avg_recall,
-        "avg_term_coverage": avg_term_coverage,
         "forbidden_hit_cases": forbidden_hits,
         "results": results,
     }
     await db.flush()
     await db.refresh(run)
+    observe_latency("eval_run_duration", (time.time() - run_started) * 1000)
     return run
+
+
+def _safe_error(exc: Exception) -> str:
+    return str(exc).replace("\n", " ")[:1000]
 
 
 async def run_eval_http(

@@ -36,6 +36,14 @@ def production_settings_errors(settings: Settings) -> list[str]:
         errors.append("ALLOW_LOCAL_SEED_ADMIN must be false in staging/production")
     if settings.rate_limit_enabled and settings.rate_limit_backend == "memory":
         errors.append("RATE_LIMIT_BACKEND=memory is not allowed in staging/production")
+    if settings.worker_mode != "queue":
+        errors.append("WORKER_MODE=queue is required in staging/production")
+    if settings.job_queue_backend != "redis":
+        errors.append("JOB_QUEUE_BACKEND=redis is required in staging/production")
+    if settings.job_queue_backend == "redis" and not settings.redis_url.strip():
+        errors.append("REDIS_URL is required when JOB_QUEUE_BACKEND=redis")
+    if settings.metrics_backend == "memory":
+        errors.append("METRICS_BACKEND=memory is not allowed as the only metrics backend in staging/production")
     if settings.cors_origins_list == ["*"] and not settings.allow_wildcard_cors:
         errors.append("CORS wildcard is disabled but CORS_ALLOW_ORIGINS=*")
     if settings.cors_origins_list == ["*"] and settings.allow_wildcard_cors:
