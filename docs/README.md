@@ -51,3 +51,9 @@ Before merging documentation changes, verify:
 - [ ] Every production-facing doc includes **at least one diagram** (Mermaid and/or static image).
 - [ ] Every critical configuration variable lists **default**, **required/optional**, and **environment scope**.
 - [ ] Every operational process includes explicit **rollback guidance**.
+
+
+## Navigation Standard
+
+- Every documentation page should include a docs hub link in the H1 line: `# <Title> · [Docs Hub](./README.md)`.
+- Keep this format stable to minimize merge conflicts across documentation-only updates.
