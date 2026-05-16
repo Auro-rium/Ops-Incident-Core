@@ -1,7 +1,4 @@
-# Sample Output
-
-[← Back to Documentation Hub](./README.md)
-
+# Sample Output · [Docs Hub](./README.md)
 
 ## Query
 

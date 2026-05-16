@@ -1,7 +1,4 @@
-# Deployment
-
-[← Back to Documentation Hub](./README.md)
-
+# Deployment · [Docs Hub](./README.md)
 
 ## Production Database Boot Sequence
 

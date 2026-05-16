@@ -1,7 +1,4 @@
-# Evals
-
-[← Back to Documentation Hub](./README.md)
-
+# Evals · [Docs Hub](./README.md)
 
 Golden cases track:
 - expected evidence documents

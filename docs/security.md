@@ -1,7 +1,4 @@
-# Security
-
-[← Back to Documentation Hub](./README.md)
-
+# Security · [Docs Hub](./README.md)
 
 - local JWT auth
 - project RBAC: viewer, investigator, approver, admin
