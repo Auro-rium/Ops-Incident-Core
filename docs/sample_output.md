@@ -1,5 +1,8 @@
 # Sample Output
 
+> Back to docs index: [docs/README.md](./README.md)
+
+
 ## Query
 
 Why did latency increase after the last deploy?

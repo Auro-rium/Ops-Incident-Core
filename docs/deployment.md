@@ -1,5 +1,27 @@
 # Deployment
 
+> Back to docs index: [docs/README.md](./README.md)
+
+## Reference Production Topology
+
+![Production topology](./assets/deploy-topology-v1.svg)
+
+```mermaid
+graph TD
+  LB[Load Balancer] --> API1[API Replica 1]
+  LB --> API2[API Replica N]
+  API1 --> PG[(Postgres + pgvector)]
+  API2 --> PG
+  API1 --> R[(Redis)]
+  API2 --> R
+  R --> W1[Worker Replica 1]
+  R --> W2[Worker Replica N]
+  API1 --> OBS[(OTEL/Metrics)]
+  API2 --> OBS
+  W1 --> OBS
+  W2 --> OBS
+```
+
 ## Production Database Boot Sequence
 
 1. Create a Postgres database.
@@ -118,6 +140,33 @@ JOB_POLL_INTERVAL_SECONDS=2
 
 Local development may use `WORKER_MODE=inline` and `JOB_QUEUE_BACKEND=inline`.
 
+## Rollout Strategy
+
+1. **Migration-first:** run `alembic upgrade head` before shifting traffic.
+2. **Canary APIs:** deploy one API replica first, verify `/ready`, then scale out.
+3. **Worker skew management:** keep workers at same schema-compatible version; drain old workers before destructive schema changes.
+4. **Rollback order:**
+   - stop new deploy rollout,
+   - revert API replicas,
+   - drain/restart workers,
+   - rollback schema only when backward compatibility is impossible and data impact is understood.
+
+Safe abort criteria: readiness failures, elevated 5xx, queue age growth, workflow timeout surge.
+
+## Capacity Planning Baseline
+
+Primary bottlenecks:
+
+- embedding/LLM call throughput,
+- Postgres IOPS for hybrid retrieval,
+- Redis queue latency/depth under burst ingest + investigate load.
+
+Initial heuristics:
+
+- API replicas sized by p95 request latency and auth/search concurrency.
+- Worker count sized by median workflow wall time and queue SLO.
+- Keep ingest batch sizes under hard limits and prefer smaller batches for lower tail latency during peak.
+
 ## RBAC
 
 Roles are project-scoped:
@@ -161,6 +210,23 @@ python scripts/smoke_prod.py \
 ```
 
 The smoke test checks health, readiness, login, project/source/collector/sync creation, normalized batch ingest, search, investigate, workflow run polling, and a small eval when the API can access the generated case file.
+
+## SLOs and Alerts
+
+| Signal | Target / Alert Threshold | Why it matters |
+|---|---|---|
+| `/ready` success rate | page if consecutive failures > 2 intervals | indicates platform/db/migration integrity |
+| workflow completion latency p95 | alert on sustained breach vs SLO | detects degraded queue/LLM/dependency behavior |
+| queue depth age | alert when oldest queued run exceeds SLO | detects under-provisioned or stalled workers |
+| ingest rejection rate | alert on anomaly spike | detects source-side regressions or abuse |
+| auth failure rate | alert on anomaly spike | detects credential attacks/misconfiguration |
+| eval pass-rate drift | alert on significant drop | detects model/prompt/regression issues |
+
+## Day-2 Operations
+
+- **Secret rotation:** rotate JWT secret and upstream provider credentials with controlled token expiry overlap.
+- **Failed migration recovery:** pause rollout, restore compatibility, re-run migration checks, resume incrementally.
+- **Worker maintenance drain:** stop job intake, let in-flight jobs complete, then restart workers.
 
 ## Observability
 
