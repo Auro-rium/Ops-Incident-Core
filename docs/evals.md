@@ -1,5 +1,8 @@
 # Evals
 
+> Back to docs index: [docs/README.md](./README.md)
+
+
 Golden cases track:
 - expected evidence documents
 - expected root cause

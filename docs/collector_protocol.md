@@ -1,5 +1,8 @@
 # Collector Protocol
 
+> Back to docs index: [docs/README.md](./README.md)
+
+
 IncidentOps Core Backend is Collector-first. Collectors read company-controlled data sources, normalize documents, and send them to the Core API. The Core does not need direct access to repos, Slack, observability tools, or company file shares.
 
 ## Flow
