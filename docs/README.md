@@ -13,8 +13,6 @@ Central index for all project documentation.
 | [Agent Workflow](./agent_workflow.md) | Run lifecycle, approvals, and workflow states | Operator, Developer | Operate and extend incident investigation workflows |
 | [Evals](./evals.md) | Golden cases and quality measurement process | Developer, Operator, SRE | Validate regression risk and answer quality over time |
 | [Collector Protocol](./collector_protocol.md) | Data ingestion contracts and collector behavior | Developer, Operator, Security Reviewer | Implement and review ingestion interfaces and trust model |
-| [Demo Script](./demo_script.md) | Demo walkthrough for product flow | Operator, Developer | Run a consistent product demonstration |
-| [Sample Output](./sample_output.md) | Example investigation output formatting | Operator, Developer | Reference expected answer format and structure |
 
 ## Audience and Purpose Tags
 
