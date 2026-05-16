@@ -175,6 +175,123 @@ GET /metrics
 
 Metrics cover HTTP requests, ingestion counters, retrieval/search latency, investigation latency, workflow runs/nodes/failures, eval runs/cases, and LLM calls when configured.
 
+## Reference Production Topology
+
+Static architecture companion image:
+
+![Reference production topology](assets/reference-production-topology.svg)
+
+Mermaid deployment diagram:
+
+```mermaid
+flowchart LR
+    U[Clients / UI / Automation] --> LB[Load Balancer]
+    LB --> API1[API Replica 1]
+    LB --> API2[API Replica 2]
+    LB --> API3[API Replica N]
+
+    API1 --> R[(Redis Queue + Cache)]
+    API2 --> R
+    API3 --> R
+
+    API1 --> PG[(Postgres + pgvector)]
+    API2 --> PG
+    API3 --> PG
+
+    R --> W1[Worker Replica 1]
+    R --> W2[Worker Replica 2]
+    R --> W3[Worker Replica N]
+
+    W1 --> PG
+    W2 --> PG
+    W3 --> PG
+
+    API1 --> OBS[(Metrics / Tracing Backend)]
+    API2 --> OBS
+    API3 --> OBS
+    W1 --> OBS
+    W2 --> OBS
+    W3 --> OBS
+```
+
+## Rollout Strategy
+
+1. **Migration-first deployment**
+   - Run `alembic upgrade head` against production before any new API or worker rollout.
+   - Confirm `/ready` is green and `python scripts/check_migrations.py` passes before shifting traffic.
+2. **Canary API rollout**
+   - Roll one API replica with the new version first.
+   - Route a small traffic slice (for example 1-5%), validate auth, ingest, workflow submit, and `/ready`, then expand progressively.
+3. **Worker version skew**
+   - Keep job payloads backward-compatible across at least one version during rollout.
+   - Roll workers gradually; verify old workers can ignore unknown fields and new workers can process jobs created by canary APIs.
+   - Avoid introducing destructive schema assumptions in worker code until all workers are upgraded.
+4. **Rollback order and safe abort criteria**
+   - Abort rollout if `/ready` fails repeatedly, queue age spikes, workflow completion latency regresses materially, or ingest rejection rate jumps.
+   - Roll back in this order: API traffic shift -> canary API version -> worker fleet version.
+   - Do **not** roll back database migrations that have already been used by live write traffic unless a tested downgrade path exists.
+
+## Capacity Planning Baseline
+
+Key initial bottlenecks to monitor:
+
+- **Embedding throughput**: model/token throughput often caps ingestion and retrieval enrichment.
+- **Database IOPS/CPU**: pgvector similarity search and write-heavy ingest can saturate storage and CPU.
+- **Queue latency/age**: backlog growth indicates under-provisioned workers or downstream dependency slowness.
+
+Initial sizing heuristics (starting point, then tune with real traffic):
+
+- **API replicas/concurrency**
+  - Start with 2+ stateless API replicas behind the load balancer.
+  - Target p95 request CPU below ~70% and keep 20-30% burst headroom.
+  - Increase replica count before increasing per-process concurrency if tail latency rises.
+- **Worker replicas/concurrency**
+  - Start with at least 2 worker replicas for redundancy.
+  - Size total worker concurrency so sustained queue age remains below your SLO threshold under peak ingest/run load.
+  - Scale worker count first when queue depth-age rises while API utilization is stable.
+
+Ingest batch sizing recommendations (aligned to enforced limits above):
+
+- Keep normal batches at ~50-80 documents even though `MAX_DOCUMENTS_PER_BATCH=100`.
+- Prefer staying below ~70-80% of `MAX_BATCH_BYTES=10000000` to reduce rejection risk from size variance.
+- Keep individual documents well under `MAX_DOCUMENT_BYTES=2000000` and chunk counts far below `MAX_CHUNKS_PER_DOCUMENT=500` to avoid outlier processing stalls.
+- Apply client-side preflight checks for document bytes, metadata bytes, and path/external ID lengths before submit.
+
+## SLOs and Alerts
+
+| Signal | SLO / Alert Threshold (example baseline) | Alert Condition | Suggested Immediate Action |
+|---|---|---|---|
+| `/ready` failures | 99.9% successful over 5m windows | >1% failures for 5m, or 3 consecutive failures on any replica | Pull replica from load balancer, inspect DB/migration state, run `check_migrations.py`. |
+| Workflow completion latency p95 | p95 < 120s (production baseline) | p95 > 180s for 15m | Check queue age, worker saturation, DB slow queries, and external model latency. |
+| Queue depth age | Oldest queued job < 60s | Oldest queued job > 300s for 10m | Scale workers, inspect stuck jobs, verify Redis health and worker connectivity. |
+| Ingest rejection rate | < 1% of ingest requests | > 3% for 10m | Inspect validation errors, batch-size patterns, and upstream payload changes. |
+| Auth failure anomaly | Stable baseline by tenant/project | 3x baseline auth failures for 10m | Investigate credential rotation, JWT issuer/audience mismatch, brute-force patterns. |
+| Eval pass-rate drift | Within expected band for golden set | >10 percentage-point drop over rolling day | Freeze promotion, inspect model/config changes, review failing eval categories. |
+
+## Day-2 Operations
+
+### Rotate Secrets
+
+- Store secrets in a dedicated secret manager and rotate JWT/DB/Redis credentials on a scheduled cadence.
+- Roll secrets using dual-publish windows where possible (accept old+new briefly, then remove old).
+- After rotation, verify `/ready`, login, job enqueue/dequeue, and metrics export paths.
+
+### Recover from Failed Migration
+
+1. Stop further rollout and keep traffic on known-good app replicas.
+2. Capture migration error logs and current revision (`make db-current`).
+3. If safe and tested, apply corrective forward migration; prefer roll-forward over downgrade.
+4. Re-run `alembic upgrade head` and `python scripts/check_migrations.py`.
+5. Only resume canary traffic once `/ready` and smoke checks are stable.
+
+### Drain Workers for Maintenance
+
+1. Disable new workload intake path (or reduce upstream enqueue rate).
+2. Let workers continue until queue depth-age approaches zero.
+3. Gracefully stop workers after in-flight jobs finish; avoid hard kills for long-running tasks.
+4. Perform maintenance, restart workers, then re-enable normal enqueue rate.
+5. Watch queue age and workflow latency for post-maintenance regression.
+
 ## Make Commands
 
 ```bash
