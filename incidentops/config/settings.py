@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     otel_service_name: str = "incidentops-core"
     otel_exporter_otlp_endpoint: str = ""
     metrics_backend: str = "memory"
+    metrics_public: bool = False
+    local_ingest_enabled: bool = True
+    local_ingest_allowed_roots: str = ".,/tmp"
+    eval_cases_allowed_roots: str = ".,/tmp"
+    max_eval_cases_bytes: int = 1_000_000
     demo_mode_public: bool = False
     allow_demo_project_bypass: bool = True
     max_ingest_file_bytes: int = 2_000_000

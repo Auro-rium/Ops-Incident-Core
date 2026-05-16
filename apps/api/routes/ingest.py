@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.api.deps import check_rate_limit, ensure_project_access, get_current_user, get_db, get_settings_dep
+from apps.api.deps import check_rate_limit, get_current_user, get_db, get_settings_dep, require_user
 from incidentops.config.settings import Settings
 from incidentops.db.models import Project, ProjectMember, ProjectRole
 from incidentops.ingestion.pipeline import run_ingestion
@@ -19,6 +19,8 @@ from incidentops.schemas.api import (
     IngestResponse,
 )
 from incidentops.security.audit import record_audit_event
+from incidentops.security.path_policy import PathPolicyError, validate_path_under_allowed_roots
+from incidentops.security.rbac import require_project_role
 
 router = APIRouter(prefix="/v1", tags=["Projects & Ingestion"])
 
@@ -67,8 +69,10 @@ async def ingest(
     request: Request,
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
-    user=Depends(get_current_user),
+    user=Depends(require_user),
 ):
+    if not settings.local_ingest_enabled or settings.is_production_like:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Local path ingest is disabled")
     if user:
         await check_rate_limit(
             db,
@@ -84,7 +88,15 @@ async def ingest(
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Project not found")
-    await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.investigator)
+    await require_project_role(db, project_id, user.id, ProjectRole.admin)
+    try:
+        ingest_path = validate_path_under_allowed_roots(
+            body.path,
+            settings.local_ingest_allowed_roots,
+            require_dir=True,
+        )
+    except PathPolicyError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     def embed_fn(texts: list[str]) -> list[list[float]]:
         return embed_texts(texts, model_name=settings.embedding_model)
@@ -100,7 +112,7 @@ async def ingest(
         request=request,
         metadata={"mode": "local_path"},
     )
-    stats = await run_ingestion(db, project_id, body.path, embed_fn=embed_fn)
+    stats = await run_ingestion(db, project_id, str(ingest_path), embed_fn=embed_fn)
     incr("documents_received_total", stats["documents_ingested"])
     incr("documents_indexed_total", stats["documents_ingested"])
     incr("chunks_created_total", stats["chunks_created"])

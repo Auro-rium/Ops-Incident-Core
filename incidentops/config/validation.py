@@ -44,6 +44,8 @@ def production_settings_errors(settings: Settings) -> list[str]:
         errors.append("REDIS_URL is required when JOB_QUEUE_BACKEND=redis")
     if settings.metrics_backend == "memory":
         errors.append("METRICS_BACKEND=memory is not allowed as the only metrics backend in staging/production")
+    if settings.local_ingest_enabled:
+        errors.append("LOCAL_INGEST_ENABLED=true is not allowed in staging/production")
     if settings.cors_origins_list == ["*"] and not settings.allow_wildcard_cors:
         errors.append("CORS wildcard is disabled but CORS_ALLOW_ORIGINS=*")
     if settings.cors_origins_list == ["*"] and settings.allow_wildcard_cors:

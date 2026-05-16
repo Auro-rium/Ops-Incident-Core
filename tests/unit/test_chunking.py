@@ -4,8 +4,6 @@ Unit tests for chunking and metadata extraction.
 
 from __future__ import annotations
 
-import pytest
-
 from incidentops.ingestion.chunking.chunker import count_tokens, split_text_by_tokens
 from incidentops.ingestion.chunking.metadata import (
     classify_doc_type,

@@ -53,6 +53,11 @@ services:
       JOB_POLL_INTERVAL_SECONDS: ${JOB_POLL_INTERVAL_SECONDS:-2}
       ENABLE_OTEL: ${ENABLE_OTEL:-false}
       METRICS_BACKEND: ${METRICS_BACKEND:-memory}
+      METRICS_PUBLIC: ${METRICS_PUBLIC:-false}
+      LOCAL_INGEST_ENABLED: ${LOCAL_INGEST_ENABLED:-true}
+      LOCAL_INGEST_ALLOWED_ROOTS: ${LOCAL_INGEST_ALLOWED_ROOTS:-/workspace,/home/lenovo,/tmp}
+      EVAL_CASES_ALLOWED_ROOTS: ${EVAL_CASES_ALLOWED_ROOTS:-/app,/workspace,/home/lenovo,/tmp}
+      MAX_EVAL_CASES_BYTES: ${MAX_EVAL_CASES_BYTES:-1000000}
       MAX_DOCUMENTS_PER_BATCH: ${MAX_DOCUMENTS_PER_BATCH:-100}
       MAX_DOCUMENT_BYTES: ${MAX_DOCUMENT_BYTES:-2000000}
       MAX_BATCH_BYTES: ${MAX_BATCH_BYTES:-10000000}
@@ -88,6 +93,8 @@ services:
       RERANKER_MODEL: ${RERANKER_MODEL:-}
       ENABLE_OTEL: ${ENABLE_OTEL:-false}
       METRICS_BACKEND: ${METRICS_BACKEND:-memory}
+      EVAL_CASES_ALLOWED_ROOTS: ${EVAL_CASES_ALLOWED_ROOTS:-/app,/workspace,/home/lenovo,/tmp}
+      MAX_EVAL_CASES_BYTES: ${MAX_EVAL_CASES_BYTES:-1000000}
     depends_on:
       postgres:
         condition: service_healthy
@@ -95,6 +102,7 @@ services:
         condition: service_started
     volumes:
       - model_cache:/root/.cache
+      - ${INGEST_ROOT:-.}:${INGEST_CONTAINER_ROOT:-/workspace}:ro
 
   web:
     build:

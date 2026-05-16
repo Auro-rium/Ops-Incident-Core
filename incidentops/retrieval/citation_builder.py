@@ -10,7 +10,6 @@ def build_citations(evidence: list[dict]) -> list[dict]:
     Assign citation labels [1], [2], ... to evidence items.
     Returns enriched evidence with 'citation' field.
     """
-    seen_paths: set[str] = set()
     citations: list[dict] = []
 
     for i, item in enumerate(evidence):

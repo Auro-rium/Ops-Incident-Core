@@ -4,8 +4,6 @@ Unit tests for parsers — markdown, code, log, deploy, incident.
 
 from __future__ import annotations
 
-import pytest
-
 from incidentops.ingestion.parsers.markdown_parser import parse_markdown
 from incidentops.ingestion.parsers.code_parser import parse_python
 from incidentops.ingestion.parsers.log_parser import parse_logs

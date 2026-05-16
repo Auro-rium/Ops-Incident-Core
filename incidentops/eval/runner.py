@@ -10,15 +10,30 @@ from pathlib import Path
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from incidentops.config.settings import Settings, get_settings
 from incidentops.db.models import EvalRun, EvalRunCase, EvalStatus
 from incidentops.investigation.service import investigate
 from incidentops.observability.metrics import incr, observe_latency
+from incidentops.security.path_policy import validate_path_under_allowed_roots
 
 DEFAULT_CASES_PATH = Path(__file__).parent / "golden_cases.jsonl"
 
 
-def load_cases(cases_path: str | Path | None = None) -> list[dict]:
-    path = Path(cases_path) if cases_path else DEFAULT_CASES_PATH
+def resolve_cases_path(cases_path: str | Path | None = None, settings: Settings | None = None) -> Path:
+    if not cases_path:
+        return DEFAULT_CASES_PATH
+    if settings is None:
+        return Path(cases_path)
+    return validate_path_under_allowed_roots(
+        str(cases_path),
+        settings.eval_cases_allowed_roots,
+        require_file=True,
+        max_bytes=settings.max_eval_cases_bytes,
+    )
+
+
+def load_cases(cases_path: str | Path | None = None, settings: Settings | None = None) -> list[dict]:
+    path = resolve_cases_path(cases_path, settings)
     cases = []
     with open(path, encoding="utf-8") as handle:
         for line in handle:
@@ -57,9 +72,10 @@ async def run_eval_persisted(
     project_id: uuid.UUID,
     top_k: int = 10,
     cases_path: str | Path | None = None,
+    settings: Settings | None = None,
 ) -> EvalRun:
     run = await create_eval_run(db, project_id)
-    return await execute_eval_run(db, run, top_k=top_k, cases_path=cases_path)
+    return await execute_eval_run(db, run, top_k=top_k, cases_path=cases_path, settings=settings)
 
 
 async def create_eval_run(db: AsyncSession, project_id: uuid.UUID) -> EvalRun:
@@ -74,14 +90,16 @@ async def execute_eval_run(
     run: EvalRun,
     top_k: int = 10,
     cases_path: str | Path | None = None,
+    settings: Settings | None = None,
 ) -> EvalRun:
+    settings = settings or get_settings()
     run_started = time.time()
     incr("eval_runs_total")
     run.status = EvalStatus.running
     run.summary_json = {"status": "running"}
     await db.flush()
     try:
-        cases = load_cases(cases_path)
+        cases = load_cases(cases_path, settings=settings)
     except Exception as exc:
         run.status = EvalStatus.failed
         incr("eval_failures_total")

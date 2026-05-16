@@ -6,7 +6,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from incidentops.db.models import ProjectMember, ProjectRole, User
+from incidentops.db.models import ProjectMember, ProjectRole
 from incidentops.security.audit import record_permission_denied
 from incidentops.security.permission_policy import role_allows
 

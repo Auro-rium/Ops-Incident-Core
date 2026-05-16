@@ -34,6 +34,7 @@ async def test_production_startup_does_not_call_create_all(monkeypatch):
             worker_mode="queue",
             job_queue_backend="redis",
             metrics_backend="prometheus",
+            local_ingest_enabled=False,
             cors_allow_origins="https://incidentops.example.com",
             allow_wildcard_cors=False,
         )
@@ -98,3 +99,4 @@ def test_production_validation_rejects_unsafe_security_defaults():
     assert any("WORKER_MODE" in error for error in errors)
     assert any("JOB_QUEUE_BACKEND" in error for error in errors)
     assert any("METRICS_BACKEND" in error for error in errors)
+    assert any("LOCAL_INGEST_ENABLED" in error for error in errors)

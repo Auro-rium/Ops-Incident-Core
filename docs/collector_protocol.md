@@ -92,4 +92,4 @@ Coverage warnings are advisory, not failures.
 
 ## Local Ingest
 
-`POST /v1/projects/{project_id}/ingest` remains for local development and smoke tests. It reads a server-visible folder, converts files into `NormalizedDocument` objects, and uses the same central indexer as collector batch ingest.
+`POST /v1/projects/{project_id}/ingest` remains for local development and smoke tests. It is disabled in staging/production, requires an authenticated project admin, only accepts canonical paths under `LOCAL_INGEST_ALLOWED_ROOTS`, reads a server-visible folder, converts files into `NormalizedDocument` objects, and uses the same central indexer as collector batch ingest.

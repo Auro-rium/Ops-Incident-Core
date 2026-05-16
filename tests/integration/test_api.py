@@ -19,9 +19,14 @@ def client():
 
 
 def create_fixture_project(client: httpx.Client) -> str:
-    response = client.post("/v1/projects", json={"name": f"fixture-{os.urandom(4).hex()}", "demo_mode": True})
+    headers = login(client)
+    response = client.post(
+        "/v1/projects",
+        headers=headers,
+        json={"name": f"fixture-{os.urandom(4).hex()}", "demo_mode": True},
+    )
     project_id = response.json()["project_id"]
-    ingest = client.post(f"/v1/projects/{project_id}/ingest", json={"path": FIXTURE_PATH})
+    ingest = client.post(f"/v1/projects/{project_id}/ingest", headers=headers, json={"path": FIXTURE_PATH})
     assert ingest.status_code == 200
     return project_id
 
@@ -65,9 +70,14 @@ class TestHealthEndpoint:
 
 class TestIngestEndpoint:
     def test_ingest_fixture_data(self, client):
-        response = client.post("/v1/projects", json={"name": f"ingest-{os.urandom(4).hex()}", "demo_mode": True})
+        headers = login(client)
+        response = client.post(
+            "/v1/projects",
+            headers=headers,
+            json={"name": f"ingest-{os.urandom(4).hex()}", "demo_mode": True},
+        )
         project_id = response.json()["project_id"]
-        ingest = client.post(f"/v1/projects/{project_id}/ingest", json={"path": FIXTURE_PATH})
+        ingest = client.post(f"/v1/projects/{project_id}/ingest", headers=headers, json={"path": FIXTURE_PATH})
         assert ingest.status_code == 200
         payload = ingest.json()
         assert payload["documents_ingested"] > 0
@@ -82,9 +92,14 @@ class TestIngestEndpoint:
         (tmp_path / "bad-deploy-history.json").write_text("{not valid json", encoding="utf-8")
         (tmp_path / "ignore.bin").write_bytes(b"\x00\x01\x02")
         (tmp_path / "huge.log").write_text("x" * 2_100_000, encoding="utf-8")
-        response = client.post("/v1/projects", json={"name": f"diag-{os.urandom(4).hex()}", "demo_mode": True})
+        headers = login(client)
+        response = client.post(
+            "/v1/projects",
+            headers=headers,
+            json={"name": f"diag-{os.urandom(4).hex()}", "demo_mode": True},
+        )
         project_id = response.json()["project_id"]
-        ingest = client.post(f"/v1/projects/{project_id}/ingest", json={"path": str(tmp_path)})
+        ingest = client.post(f"/v1/projects/{project_id}/ingest", headers=headers, json={"path": str(tmp_path)})
         assert ingest.status_code == 200
         payload = ingest.json()
         assert payload["chunks_created"] > 0
@@ -96,9 +111,14 @@ class TestIngestEndpoint:
     def test_ingest_coverage_warnings_when_sources_missing(self, client, tmp_path):
         (tmp_path / "docs" / "guide.md").parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / "docs" / "guide.md").write_text("# Guide\nOnly docs here\n", encoding="utf-8")
-        response = client.post("/v1/projects", json={"name": f"coverage-{os.urandom(4).hex()}", "demo_mode": True})
+        headers = login(client)
+        response = client.post(
+            "/v1/projects",
+            headers=headers,
+            json={"name": f"coverage-{os.urandom(4).hex()}", "demo_mode": True},
+        )
         project_id = response.json()["project_id"]
-        ingest = client.post(f"/v1/projects/{project_id}/ingest", json={"path": str(tmp_path)})
+        ingest = client.post(f"/v1/projects/{project_id}/ingest", headers=headers, json={"path": str(tmp_path)})
         assert ingest.status_code == 200
         coverage = ingest.json()["source_coverage"]
         assert coverage["has_runbooks"] is True

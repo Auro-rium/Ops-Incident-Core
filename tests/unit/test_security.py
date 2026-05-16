@@ -10,6 +10,7 @@ from incidentops.llm.prompts import build_answer_prompt
 from incidentops.security.auth import create_access_token, decode_token, ensure_local_seed_admin
 from incidentops.security.output_sanitizer import sanitize_output
 from incidentops.security.passwords import hash_password, needs_rehash, verify_password
+from incidentops.security.path_policy import PathPolicyError, validate_path_under_allowed_roots
 from incidentops.security.prompt_injection import inspect_untrusted_text
 from incidentops.security.secret_redaction import redact_secrets
 from incidentops.security.source_config import find_source_config_secret_violations
@@ -100,3 +101,19 @@ def test_prompt_wraps_untrusted_evidence_and_redacts_secrets():
     assert "SECURITY_NOTE" in user_message
     assert "[REDACTED_API_KEY]" in user_message
     assert "abcdefghijklmnop1234567890" not in user_message
+
+
+def test_path_policy_allows_only_configured_roots(tmp_path):
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    file_path = allowed / "cases.jsonl"
+    file_path.write_text('{"id":"case_001"}\n', encoding="utf-8")
+    outside_file = outside / "cases.jsonl"
+    outside_file.write_text('{"id":"case_002"}\n', encoding="utf-8")
+
+    resolved = validate_path_under_allowed_roots(str(file_path), str(allowed), require_file=True)
+    assert resolved == file_path.resolve()
+    with pytest.raises(PathPolicyError):
+        validate_path_under_allowed_roots(str(outside_file), str(allowed), require_file=True)

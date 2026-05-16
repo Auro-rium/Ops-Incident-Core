@@ -151,6 +151,7 @@ The compose file mounts `${INGEST_ROOT:-.}` into the API container as `${INGEST_
 
 To point Docker at a different host folder tree, start compose with `INGEST_ROOT=/path/to/data-root`.
 To preserve host absolute paths for local smoke tests, set both roots to the same path, for example `INGEST_ROOT=/home/lenovo INGEST_CONTAINER_ROOT=/home/lenovo`.
+Local folder ingest also enforces `LOCAL_INGEST_ALLOWED_ROOTS`; custom eval case files enforce `EVAL_CASES_ALLOWED_ROOTS` and `MAX_EVAL_CASES_BYTES`.
 
 Run migrations before using a fresh database:
 
@@ -206,6 +207,7 @@ Case format:
 ```
 
 Eval runs are persisted with per-case evidence recall, term coverage, forbidden-term hits, latency, and error fields. One failed case does not fail the whole eval run.
+Custom case files accepted through the API must be under `EVAL_CASES_ALLOWED_ROOTS` and within `MAX_EVAL_CASES_BYTES`.
 
 ## Tests and fixtures
 
@@ -226,11 +228,15 @@ Environment flags:
 - `WORKER_MODE=queue` in staging/production
 - `JOB_QUEUE_BACKEND=redis` in staging/production
 - `METRICS_BACKEND=prometheus` or another production metrics backend in staging/production
+- `METRICS_PUBLIC=false` unless protected by private network controls
+- `LOCAL_INGEST_ENABLED=false` in staging/production
+- `LOCAL_INGEST_ALLOWED_ROOTS=<dev-only roots>` for local path ingest
+- `EVAL_CASES_ALLOWED_ROOTS=<approved roots>` for custom eval case files
 
 `DB_CREATE_ALL=true` is only honored in `local` or `development`. It is ignored in `staging` and `production`; production must not silently create schema.
 
 Production startup fails if JWT secrets are missing/default, demo bypass is enabled, local seed admin is enabled, wildcard CORS is enabled, or in-memory rate limiting is configured.
-Production startup also rejects inline worker mode, non-Redis job queues, and memory-only metrics.
+Production startup also rejects inline worker mode, non-Redis job queues, memory-only metrics, and enabled local path ingest.
 
 Production database boot sequence:
 
@@ -244,7 +250,7 @@ Production database boot sequence:
 
 `/health` is a lightweight liveness check. `/ready` verifies database connectivity, pgvector extension availability, required tables, and Alembic revision state.
 
-`/v1/metrics/summary` returns structured in-process counters and latency averages. `/metrics` exposes a Prometheus-compatible text view for scraping.
+`/v1/metrics/summary` returns structured in-process counters and latency averages. `/metrics` exposes a Prometheus-compatible text view for scraping. Metrics endpoints require authentication by default unless `METRICS_PUBLIC=true` is explicitly set for a protected environment.
 
 Migration commands:
 
@@ -262,9 +268,9 @@ Authentication uses JWT bearer access tokens signed with `JWT_SECRET`. Passwords
 
 Project RBAC:
 - `viewer`: read project evidence, search, runs, reports, and eval results.
-- `investigator`: ask answers/investigations, create workflow runs, and use local/dev ingest.
+- `investigator`: ask answers/investigations and create workflow runs.
 - `approver`: approve or reject gated workflow actions.
-- `admin`: manage projects, sources, collectors, syncs, document batch ingest, and eval runs.
+- `admin`: manage projects, sources, collectors, syncs, document batch ingest, dev/local path ingest, and eval runs.
 
 Source configs reject raw credential keys and obvious secret values. Use `credentials_ref` for references to external secret storage. Audit events are persisted for login attempts, project/source/sync changes, document ingest, workflow runs, approvals, eval runs, rate limits, and permission denials.
 

@@ -87,11 +87,16 @@ WORKER_MODE=queue
 JOB_QUEUE_BACKEND=redis
 REDIS_URL=redis://...
 METRICS_BACKEND=prometheus
+METRICS_PUBLIC=false
+LOCAL_INGEST_ENABLED=false
+LOCAL_INGEST_ALLOWED_ROOTS=/workspace
+EVAL_CASES_ALLOWED_ROOTS=/workspace
+MAX_EVAL_CASES_BYTES=1000000
 CORS_ALLOW_ORIGINS=https://your-ui.example.com
 ALLOW_WILDCARD_CORS=false
 ```
 
-Startup fails in staging/production if default JWT secrets, local seed admin, demo bypass, wildcard CORS, `DB_CREATE_ALL=true`, in-memory rate limiting, inline worker mode, non-Redis job queues, or memory-only metrics are configured.
+Startup fails in staging/production if default JWT secrets, local seed admin, demo bypass, wildcard CORS, `DB_CREATE_ALL=true`, in-memory rate limiting, inline worker mode, non-Redis job queues, memory-only metrics, or enabled local path ingest are configured.
 
 Passwords are stored with bcrypt. Legacy SHA256 hashes are only accepted in local/development and are rehashed after a successful login.
 
@@ -113,7 +118,7 @@ MAX_PATH_LENGTH=2048
 
 If a whole batch exceeds count or byte limits, the API rejects the request. If one document is invalid or oversized, the batch response includes a per-document error and continues indexing valid documents. Error responses do not include raw document content.
 
-Production ingestion should use the source/collector/sync/document-batch APIs. `/v1/projects/{project_id}/ingest` remains available for local development and server-visible folder smoke tests only.
+Production ingestion should use the source/collector/sync/document-batch APIs. `/v1/projects/{project_id}/ingest` remains available for local development and server-visible folder smoke tests only. It requires an authenticated project admin, is disabled in staging/production, and only accepts canonical paths under `LOCAL_INGEST_ALLOWED_ROOTS`.
 
 ## Worker Runtime
 
@@ -172,9 +177,9 @@ Initial heuristics:
 Roles are project-scoped:
 
 - `viewer`: read evidence/search results, runs, reports, and eval results.
-- `investigator`: create investigations, answers, workflow runs, and local/dev ingests.
+- `investigator`: create investigations, answers, and workflow runs.
 - `approver`: approve or reject gated workflow actions.
-- `admin`: manage sources, collectors, syncs, document batch ingest, project settings, members, and eval runs.
+- `admin`: manage sources, collectors, syncs, document batch ingest, dev/local path ingest, project settings, members, and eval runs.
 
 Project membership is enforced for source/sync/search/answer/investigate/runs/evals/approvals. Local demo project bypass is available only outside staging/production when explicitly enabled.
 
@@ -239,7 +244,7 @@ GET /v1/metrics/summary
 GET /metrics
 ```
 
-Metrics cover HTTP requests, ingestion counters, retrieval/search latency, investigation latency, workflow runs/nodes/failures, eval runs/cases, and LLM calls when configured.
+Metrics endpoints require authentication by default unless `METRICS_PUBLIC=true` is explicitly set behind private network controls. Metrics cover HTTP requests, ingestion counters, retrieval/search latency, investigation latency, workflow runs/nodes/failures, eval runs/cases, and LLM calls when configured.
 
 ## Reference Production Topology
 

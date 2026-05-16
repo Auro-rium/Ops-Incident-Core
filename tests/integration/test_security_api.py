@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from pathlib import Path
 
 import httpx
 from sqlalchemy import func, select
@@ -14,6 +15,7 @@ from incidentops.db.models import AuditEvent, ProjectMember, ProjectRole, User
 from incidentops.security.passwords import hash_password
 
 BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+FIXTURE_PATH = str((Path(__file__).resolve().parents[1] / "fixtures" / "basic_incident").resolve())
 
 
 def _login(client: httpx.Client, email: str = "admin@incidentops.local", password: str = "incidentops") -> dict[str, str]:
@@ -133,6 +135,31 @@ def test_viewer_cannot_batch_ingest():
         json={"sync_id": sync.json()["sync_id"], "documents": []},
     )
     assert denied.status_code == 403
+
+
+def test_viewer_cannot_use_local_path_ingest():
+    client = httpx.Client(base_url=BASE_URL, timeout=120.0)
+    admin_headers = _login(client)
+    project_id = _create_project(client, admin_headers)
+    viewer_email, viewer_password = asyncio.run(_create_user_member(project_id, ProjectRole.viewer))
+    viewer_headers = _login(client, viewer_email, viewer_password)
+
+    denied = client.post(
+        f"/v1/projects/{project_id}/ingest",
+        headers=viewer_headers,
+        json={"path": FIXTURE_PATH},
+    )
+    assert denied.status_code == 403
+
+
+def test_metrics_require_authentication_by_default():
+    client = httpx.Client(base_url=BASE_URL, timeout=120.0)
+    unauthenticated = client.get("/metrics")
+    assert unauthenticated.status_code == 401
+
+    authenticated = client.get("/metrics", headers=_login(client))
+    assert authenticated.status_code == 200
+    assert "http_requests_total" in authenticated.text or "app_startups_total" in authenticated.text
 
 
 def test_batch_ingest_oversized_document_is_per_doc_error_and_audited():

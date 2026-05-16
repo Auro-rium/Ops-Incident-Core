@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from apps.api.deps import check_rate_limit, ensure_project_access, get_db, get_settings_dep, require_user
 from incidentops.config.settings import Settings
 from incidentops.db.models import EvalRun, EvalStatus, ProjectMember, ProjectRole
-from incidentops.eval.runner import create_eval_run, run_eval_persisted
+from incidentops.eval.runner import create_eval_run, resolve_cases_path, run_eval_persisted
 from incidentops.observability.metrics import incr
 from incidentops.schemas.api import EvalRunRequest, EvalRunResponse
 from incidentops.security.audit import record_audit_event
@@ -59,10 +59,14 @@ async def run_eval_endpoint(
         action="eval_run",
     )
     await ensure_project_access(db, body.project_id, user, settings, minimum_role=ProjectRole.admin)
+    try:
+        cases_path = str(resolve_cases_path(body.cases_path, settings)) if body.cases_path else None
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if settings.worker_mode == "queue":
         run = await create_eval_run(db, body.project_id)
     else:
-        run = await run_eval_persisted(db, body.project_id, top_k=body.top_k, cases_path=body.cases_path)
+        run = await run_eval_persisted(db, body.project_id, top_k=body.top_k, cases_path=cases_path, settings=settings)
     await record_audit_event(
         db,
         action="eval_run_created",
@@ -72,7 +76,7 @@ async def run_eval_endpoint(
         resource_type="eval_run",
         resource_id=run.id,
         request=request,
-        metadata={"top_k": body.top_k, "cases_path": body.cases_path},
+        metadata={"top_k": body.top_k, "cases_path": cases_path},
     )
     if settings.worker_mode == "queue":
         await record_audit_event(
@@ -91,7 +95,7 @@ async def run_eval_endpoint(
         try:
             await get_job_queue(settings).enqueue(
                 "execute_eval_run",
-                {"eval_run_id": str(run.id), "top_k": body.top_k, "cases_path": body.cases_path},
+                {"eval_run_id": str(run.id), "top_k": body.top_k, "cases_path": cases_path},
             )
         except Exception as exc:
             error = _safe_error(exc)

@@ -5,10 +5,9 @@ Database repository helpers — CRUD operations for Phase 1 tables.
 from __future__ import annotations
 
 import uuid
-from typing import Any, Sequence
+from typing import Any
 
-from pgvector.sqlalchemy import Vector
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from incidentops.db.models import Chunk, Document, Project, RetrievalResult, RetrievalRun, Source

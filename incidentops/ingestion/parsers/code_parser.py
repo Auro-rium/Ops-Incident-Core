@@ -5,7 +5,6 @@ Python code parser — extracts functions and classes using AST.
 from __future__ import annotations
 
 import ast
-import textwrap
 
 from incidentops.ingestion.schemas import RawChunk
 
