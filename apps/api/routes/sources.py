@@ -60,6 +60,20 @@ async def create_source(
     violations = find_source_config_secret_violations(body.config)
     if violations:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="config contains raw secret material; use credentials_ref")
+    existing_result = await db.execute(
+        select(Source)
+        .where(
+            Source.project_id == project_id,
+            Source.name == body.name,
+            Source.source_type == body.source_type,
+        )
+        .order_by(Source.created_at.asc())
+        .limit(1)
+    )
+    existing_source = existing_result.scalar_one_or_none()
+    if existing_source:
+        return _source_response(existing_source)
+
     source = Source(
         project_id=project_id,
         name=body.name,
@@ -252,7 +266,16 @@ async def ingest_documents_batch(
     sync.documents_received += len(body.documents)
     sync.chunks_created += result.chunks_created
     sync.parser_errors += len(all_errors)
-    diagnostics = _merge_batch_diagnostics(dict(sync.diagnostics_json or {}), result, len(all_errors))
+    diagnostics = _merge_batch_diagnostics(
+        dict(sync.diagnostics_json or {}),
+        result,
+        len(all_errors),
+        {
+            "collector_version": body.collector_version,
+            "schema_version": body.schema_version,
+            "core_api_version": body.core_api_version,
+        },
+    )
     sync.diagnostics_json = diagnostics
     sync.coverage_json = build_source_coverage(
         diagnostics.get("source_type_counts", {}),
@@ -463,7 +486,15 @@ def _validate_sync_collector(sync: SourceSync, collector_id: uuid.UUID | None) -
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="collector does not match sync")
 
 
-def _merge_batch_diagnostics(diagnostics: dict, result, error_count: int) -> dict:
+def _merge_batch_diagnostics(
+    diagnostics: dict,
+    result,
+    error_count: int,
+    version_metadata: dict[str, str | None] | None = None,
+) -> dict:
+    for key, value in (version_metadata or {}).items():
+        if value is not None:
+            diagnostics[key] = value
     diagnostics["last_batch_received"] = result.received
     diagnostics["last_batch_created"] = result.created
     diagnostics["last_batch_updated"] = result.updated

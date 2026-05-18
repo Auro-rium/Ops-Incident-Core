@@ -99,6 +99,27 @@ def _test_session_factory():
     return async_sessionmaker(engine, expire_on_commit=False), engine
 
 
+def test_capabilities_endpoint_returns_collector_contract():
+    client = httpx.Client(base_url=BASE_URL, timeout=120.0)
+    response = client.get("/v1/capabilities")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["version"] == "0.5.0"
+    assert payload["features"]["sync_tracking"] is True
+    assert payload["features"]["collector_registration"] is True
+    assert payload["features"]["batch_ingest"] is True
+    assert payload["features"]["search"] is True
+    assert payload["features"]["investigate"] is True
+    assert payload["features"]["runs"] is True
+    assert payload["limits"]["max_documents_per_batch"] == get_settings().max_documents_per_batch
+    assert payload["limits"]["max_document_bytes"] == get_settings().max_document_bytes
+    assert payload["limits"]["max_batch_bytes"] == get_settings().max_batch_bytes
+    assert payload["limits"]["max_batch_size"] == get_settings().max_batch_bytes
+    assert payload["endpoints"]["batch_upload"] == "/v1/sources/{source_id}/documents/batch"
+    assert payload["endpoints"]["register_collector"] == "/v1/projects/{project_id}/collectors/register"
+    assert payload["endpoints"]["run_events"] == "/v1/runs/{run_id}/events"
+
+
 def test_source_registry_and_collector_sync_batch_ingest_flow():
     client = httpx.Client(base_url=BASE_URL, timeout=120.0)
     headers = _login(client)
@@ -116,6 +137,18 @@ def test_source_registry_and_collector_sync_batch_ingest_flow():
     )
     assert create_source.status_code == 201
     source_id = create_source.json()["id"]
+    repeated_create_source = client.post(
+        f"/v1/projects/{project_id}/sources",
+        headers=headers,
+        json={
+            "name": "orders logs",
+            "source_type": "filesystem",
+            "sync_mode": "manual",
+            "config": {"description": "Production logs exported locally"},
+        },
+    )
+    assert repeated_create_source.status_code == 201
+    assert repeated_create_source.json()["id"] == source_id
 
     list_sources = client.get(f"/v1/projects/{project_id}/sources", headers=headers)
     assert list_sources.status_code == 200
@@ -150,6 +183,9 @@ def test_source_registry_and_collector_sync_batch_ingest_flow():
         json={
             "sync_id": sync_id,
             "collector_id": collector_id,
+            "collector_version": "0.1.1",
+            "schema_version": "normalized-document-v1",
+            "core_api_version": "0.5.0",
             "documents": _build_fixture_documents(),
         },
     )
@@ -159,6 +195,9 @@ def test_source_registry_and_collector_sync_batch_ingest_flow():
     assert batch_payload["created"] == 6
     assert batch_payload["chunks_created"] > 0
     assert batch_payload["errors"] == []
+    assert batch_payload["diagnostics"]["collector_version"] == "0.1.1"
+    assert batch_payload["diagnostics"]["schema_version"] == "normalized-document-v1"
+    assert batch_payload["diagnostics"]["core_api_version"] == "0.5.0"
 
     finish = client.post(
         f"/v1/sources/{source_id}/syncs/{sync_id}/finish",
@@ -186,6 +225,9 @@ def test_source_registry_and_collector_sync_batch_ingest_flow():
     assert latest_payload["status"] == "success"
     assert latest_payload["documents_received"] == 6
     assert latest_payload["chunks_created"] > 0
+    assert latest_payload["diagnostics"]["collector_version"] == "0.1.1"
+    assert latest_payload["diagnostics"]["schema_version"] == "normalized-document-v1"
+    assert latest_payload["diagnostics"]["core_api_version"] == "0.5.0"
 
     listed_sources = client.get(f"/v1/projects/{project_id}/sources", headers=headers)
     source_payload = next(item for item in listed_sources.json() if item["id"] == source_id)

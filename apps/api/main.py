@@ -85,9 +85,22 @@ async def observe_http_requests(request: Request, call_next):
         incr("http_errors_total")
     return response
 
-from apps.api.routes import answer, auth, evals, health, ingest, investigate, metrics, runs, search, sources  # noqa: E402
+from apps.api.routes import (  # noqa: E402
+    answer,
+    auth,
+    capabilities,
+    evals,
+    health,
+    ingest,
+    investigate,
+    metrics,
+    runs,
+    search,
+    sources,
+)
 
 app.include_router(health.router)
+app.include_router(capabilities.router)
 app.include_router(auth.router)
 app.include_router(ingest.router)
 app.include_router(search.router)

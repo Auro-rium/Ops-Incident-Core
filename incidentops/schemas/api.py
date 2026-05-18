@@ -138,6 +138,13 @@ class SyncStatusResponse(BaseModel):
     status: str
 
 
+class CapabilitiesResponse(BaseModel):
+    version: str
+    features: dict[str, bool]
+    limits: dict[str, int]
+    endpoints: dict[str, str]
+
+
 class BatchDocumentRequest(BaseModel):
     external_id: str = Field(..., min_length=1, max_length=4096)
     path: str = Field(..., min_length=1, max_length=4096)
@@ -152,6 +159,9 @@ class BatchDocumentRequest(BaseModel):
 class BatchIngestRequest(BaseModel):
     sync_id: UUID
     collector_id: UUID | None = None
+    collector_version: str | None = Field(default=None, max_length=256)
+    schema_version: str | None = Field(default=None, max_length=256)
+    core_api_version: str | None = Field(default=None, max_length=256)
     documents: list[BatchDocumentRequest] = Field(default_factory=list)
 
 

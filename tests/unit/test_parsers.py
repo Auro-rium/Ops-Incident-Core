@@ -140,6 +140,18 @@ class TestDeployParser:
         assert chunks[0].service_name == "checkout"
         assert chunks[0].chunk_type == "deploy_diff"
 
+    def test_parses_single_deploy_object_with_collector_aliases(self):
+        json_content = """{
+            "service": "orders",
+            "commit_sha": "abcdef1234567890",
+            "deployed_at": "2026-05-05T09:59:00Z"
+        }"""
+        chunks = parse_deploy_history(json_content, "deploys/deploy-history.json")
+        assert len(chunks) == 1
+        assert chunks[0].deploy_hash == "abcdef1234567890"
+        assert chunks[0].service_name == "orders"
+        assert chunks[0].chunk_type == "deploy_diff"
+
     def test_parses_patch_file(self):
         patch = (
             "diff --git a/services/checkout/service.py b/services/checkout/service.py\n"

@@ -60,3 +60,5 @@ def test_unsupported_source_type_maps_safely():
     assert normalize_source_type("strange-export", "notes.txt") == "runbook"
     assert normalize_source_type("strange-export", "config/app.conf") == "unknown_text"
     assert normalize_source_type("json", "settings.json") == "config"
+    assert normalize_source_type("deploy_history", "deploys/deploy-history.json") == "deploy"
+    assert normalize_source_type("incident_report", "incidents/incident-001.md") == "incident"

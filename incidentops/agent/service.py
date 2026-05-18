@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from incidentops.agent.events import append_run_event
-from incidentops.agent.graph import NODE_ORDER
+from incidentops.agent.graph import graph_engine_name, run_agent_graph
 from incidentops.agent.state import InvestigationState
 from incidentops.agent.tools import search_evidence
 from incidentops.config.settings import Settings, get_settings
@@ -69,8 +69,26 @@ async def execute_run(
             state.evidence = evidence
             await append_run_event(db, run.id, "retrieved_evidence", payload={"count": len(evidence)})
 
-            for node_name, node in NODE_ORDER:
-                state = await execute_node_with_observability(db, run.id, node_name, node, state, settings)
+            await append_run_event(
+                db,
+                run.id,
+                "workflow_graph_started",
+                payload={"engine": graph_engine_name()},
+            )
+
+            async def node_runner(node_name, node, node_state):
+                return await execute_node_with_observability(
+                    db, run.id, node_name, node, node_state, settings
+                )
+
+            state = await run_agent_graph(state, node_runner=node_runner, prefer_langgraph=True)
+
+            await append_run_event(
+                db,
+                run.id,
+                "workflow_graph_completed",
+                payload={"engine": graph_engine_name(), "status": state.status},
+            )
 
             run.task_type = state.task_type
             run.risk_level = state.risk_level

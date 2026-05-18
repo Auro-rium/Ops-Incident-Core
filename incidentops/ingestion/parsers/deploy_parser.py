@@ -18,6 +18,8 @@ def parse_deploy_history(content: str, file_path: str) -> list[RawChunk]:
         deploys = json.loads(content)
     except json.JSONDecodeError:
         return []
+    if isinstance(deploys, dict):
+        deploys = [deploys]
     if not isinstance(deploys, list):
         return []
 
@@ -25,9 +27,22 @@ def parse_deploy_history(content: str, file_path: str) -> list[RawChunk]:
     for i, deploy in enumerate(deploys):
         if not isinstance(deploy, dict):
             continue
-        deploy_hash = deploy.get("deploy_hash", "unknown")
-        service_name = deploy.get("service_name")
+        if not any(deploy.get(key) for key in ("deploy_hash", "commit_sha", "commit", "sha", "deployed_at")):
+            continue
+        deploy_hash = (
+            deploy.get("deploy_hash")
+            or deploy.get("commit_sha")
+            or deploy.get("commit")
+            or deploy.get("sha")
+            or "unknown"
+        )
+        service_name = deploy.get("service_name") or deploy.get("service")
         deployed_at_str = deploy.get("deployed_at", "")
+        changed_files = deploy.get("changed_files", [])
+        if isinstance(changed_files, str):
+            changed_files = [changed_files]
+        if not isinstance(changed_files, list):
+            changed_files = []
 
         text_parts = [
             f"Deploy: {deploy_hash}",
@@ -36,7 +51,7 @@ def parse_deploy_history(content: str, file_path: str) -> list[RawChunk]:
             f"Deployed at: {deployed_at_str}",
             f"Commit: {deploy.get('commit_sha', 'unknown')}",
             f"Summary: {deploy.get('summary', '')}",
-            f"Changed files: {', '.join(deploy.get('changed_files', []))}",
+            f"Changed files: {', '.join(str(path) for path in changed_files)}",
         ]
         text = "\n".join(text_parts)
 

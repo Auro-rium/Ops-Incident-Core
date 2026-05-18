@@ -34,6 +34,9 @@ SOURCE_TYPE_ALIASES = {
     "docs": "runbook",
     "doc": "runbook",
     "postmortem": "incident",
+    "incident_report": "incident",
+    "incidents": "incident",
+    "deploy_history": "deploy",
     "diff": "deploy",
     "patch": "deploy",
     "yaml": "config",
@@ -56,6 +59,9 @@ class NormalizedDocument(BaseModel):
 class DocumentBatchRequest(BaseModel):
     sync_id: str
     collector_id: str | None = None
+    collector_version: str | None = None
+    schema_version: str | None = None
+    core_api_version: str | None = None
     documents: list[NormalizedDocument] = Field(default_factory=list)
 
 
