@@ -158,6 +158,7 @@ async def register_collector(
         request=request,
         metadata={"name": body.name, "environment": body.environment, "version": body.version},
     )
+    await db.commit()
     return CollectorRegisterResponse(collector_id=collector_id, status=collector_status)
 
 
@@ -200,6 +201,7 @@ async def start_sync(
         request=request,
         metadata={"source_id": str(source.id), "collector_id": str(collector.id) if collector else None},
     )
+    await db.commit()
     return SyncStatusResponse(sync_id=sync.id, status=sync.status)
 
 
@@ -330,6 +332,7 @@ async def ingest_documents_batch(
             },
         )
     await db.flush()
+    await db.commit()
     return BatchIngestResponse(
         received=len(body.documents),
         created=result.created,
@@ -406,6 +409,7 @@ async def finish_sync(
         },
     )
     await db.flush()
+    await db.commit()
     return SyncStatusResponse(sync_id=sync.id, status=sync.status)
 
 

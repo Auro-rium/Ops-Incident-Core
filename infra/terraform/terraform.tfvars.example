@@ -1,0 +1,20 @@
+aws_region = "us-east-1"
+
+project_name = "incidentops-core"
+environment  = "production"
+
+cors_origins             = "https://your-frontend.example.com"
+bootstrap_admin_email    = "admin@example.com"
+bootstrap_admin_password = "replace-with-a-strong-password"
+
+# Optional HTTPS listener.
+# certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/..."
+
+# Optional LLM calls. Leave blank for evidence-only mode.
+# openai_api_key = ""
+
+# Cost/sizing defaults are intentionally small. Increase before real production traffic.
+api_desired_count    = 2
+worker_desired_count = 1
+db_instance_class    = "db.t4g.micro"
+redis_node_type      = "cache.t4g.micro"

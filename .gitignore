@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 .venv/
 venv/
@@ -31,5 +32,12 @@ apps/web/.next/
 .cache/
 tmp/
 temp/
+
+# Terraform local state and private variables
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.auto.tfvars
 
 .DS_Store

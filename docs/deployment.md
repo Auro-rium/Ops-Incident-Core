@@ -2,6 +2,8 @@
 
 > Back to docs index: [docs/README.md](./README.md)
 
+AWS-specific infrastructure and CI/CD setup lives in [aws-deployment.md](./aws-deployment.md).
+
 ## Reference Production Topology
 
 ![Production topology](./assets/deploy-topology-v1.svg)
@@ -196,6 +198,7 @@ The `audit_events` table records login success/failure, project creation, source
 - database connectivity
 - pgvector extension
 - required application tables
+- required application columns
 - Alembic current revision against head revision
 
 Run the same readiness check from the CLI:

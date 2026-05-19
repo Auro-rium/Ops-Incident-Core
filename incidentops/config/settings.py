@@ -4,11 +4,17 @@ Centralized application settings.
 
 from __future__ import annotations
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
+    )
 
     app_env: str = "local"
     db_create_all: bool = False
@@ -75,7 +81,10 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str = ""
     metrics_backend: str = "memory"
     metrics_public: bool = False
-    local_ingest_enabled: bool = True
+    local_ingest_enabled: bool = Field(
+        True,
+        validation_alias=AliasChoices("LOCAL_INGEST_ENABLED", "ENABLE_LOCAL_INGEST"),
+    )
     local_ingest_allowed_roots: str = ".,/tmp"
     eval_cases_allowed_roots: str = ".,/tmp"
     max_eval_cases_bytes: int = 1_000_000
@@ -84,7 +93,10 @@ class Settings(BaseSettings):
     max_ingest_file_bytes: int = 2_000_000
     max_chunk_tokens: int = 512
     supported_extensions: str = ".md,.txt,.log,.json,.yaml,.yml,.py,.patch,.diff"
-    cors_allow_origins: str = "*"
+    cors_allow_origins: str = Field(
+        "*",
+        validation_alias=AliasChoices("CORS_ALLOW_ORIGINS", "CORS_ORIGINS"),
+    )
     allow_wildcard_cors: bool = True
 
     @property

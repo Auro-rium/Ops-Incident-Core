@@ -170,6 +170,18 @@ python scripts/smoke_prod.py \
   --query "What does this tiny service evidence say?"
 ```
 
+## AWS Deployment
+
+Production AWS deployment assets live under:
+
+- `infra/terraform/`
+- `.github/workflows/deploy-core.yml`
+- `docs/aws-deployment.md`
+
+The AWS deployment uses ECS Fargate for separate API and worker services, RDS PostgreSQL, ElastiCache Redis, ECR, Secrets Manager, an Application Load Balancer, CloudWatch logs, a migration one-off task, and `smoke_prod.py` after deploy.
+
+Production must run Alembic migrations before service rollout and must not use SQLAlchemy `create_all`.
+
 ## Frontend
 
 The frontend lets you:
@@ -248,7 +260,7 @@ Production database boot sequence:
 6. Verify `GET /health`.
 7. Verify `GET /ready`.
 
-`/health` is a lightweight liveness check. `/ready` verifies database connectivity, pgvector extension availability, required tables, and Alembic revision state.
+`/health` is a lightweight liveness check. `/ready` verifies database connectivity, pgvector extension availability, required tables and columns, and Alembic revision state.
 
 `/v1/metrics/summary` returns structured in-process counters and latency averages. `/metrics` exposes a Prometheus-compatible text view for scraping. Metrics endpoints require authentication by default unless `METRICS_PUBLIC=true` is explicitly set for a protected environment.
 

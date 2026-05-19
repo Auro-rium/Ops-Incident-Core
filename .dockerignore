@@ -15,11 +15,17 @@ build
 !tests/fixtures/**/*.log
 .env
 .env.*
+!.env.production.example
 apps/web/node_modules
 apps/web/.next
 .cache
 tmp
 temp
+.terraform
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.auto.tfvars
 tests/__pycache__
 *.pyc
 *.pyo

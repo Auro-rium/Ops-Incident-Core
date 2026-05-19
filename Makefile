@@ -1,10 +1,11 @@
-.PHONY: migrate migration-check db-current db-history db-downgrade worker smoke-prod metrics-check
+.PHONY: migrate migration-check db-current db-history db-downgrade worker smoke-prod metrics-check docker-build terraform-fmt terraform-validate
 
 PYTHON ?= python
 ALEMBIC ?= alembic
 API_BASE_URL ?= http://127.0.0.1:8000
 SMOKE_EMAIL ?= admin@incidentops.local
 SMOKE_PASSWORD ?= incidentops
+DOCKER_IMAGE ?= incidentops-core:local
 
 migrate:
 	$(ALEMBIC) upgrade head
@@ -29,3 +30,13 @@ smoke-prod:
 
 metrics-check:
 	$(PYTHON) -c "import httpx; c=httpx.Client(base_url='$(API_BASE_URL)', timeout=10); token=c.post('/v1/auth/login', json={'email':'$(SMOKE_EMAIL)','password':'$(SMOKE_PASSWORD)'}).json()['access_token']; r=c.get('/metrics', headers={'Authorization':f'Bearer {token}'}); print(r.text[:500]); r.raise_for_status()"
+
+docker-build:
+	docker build -t $(DOCKER_IMAGE) .
+
+terraform-fmt:
+	terraform -chdir=infra/terraform fmt -recursive
+
+terraform-validate:
+	terraform -chdir=infra/terraform init -backend=false
+	terraform -chdir=infra/terraform validate

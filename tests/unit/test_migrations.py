@@ -6,7 +6,12 @@ from apps.api.main import initialize_database_for_startup, should_run_create_all
 from incidentops.config.settings import Settings
 from incidentops.config.validation import production_settings_errors
 from incidentops.db.base import Base
-from incidentops.db.migrations import build_readiness_payload, get_head_revision, required_tables
+from incidentops.db.migrations import (
+    build_readiness_payload,
+    get_head_revision,
+    required_columns,
+    required_tables,
+)
 
 
 def test_create_all_is_local_only_and_explicit():
@@ -15,6 +20,12 @@ def test_create_all_is_local_only_and_explicit():
     assert should_run_create_all(Settings(app_env="local", db_create_all=False)) is False
     assert should_run_create_all(Settings(app_env="staging", db_create_all=True)) is False
     assert should_run_create_all(Settings(app_env="production", db_create_all=True)) is False
+
+
+def test_production_deployment_env_aliases_are_supported():
+    settings = Settings(ENABLE_LOCAL_INGEST=False, CORS_ORIGINS="https://incidentops.example.com")
+    assert settings.local_ingest_enabled is False
+    assert settings.cors_allow_origins == "https://incidentops.example.com"
 
 
 @pytest.mark.asyncio
@@ -49,6 +60,14 @@ def test_required_tables_match_current_models():
     assert set(required_tables()) == set(Base.metadata.tables.keys())
 
 
+def test_required_columns_match_current_models():
+    expected = {
+        table_name: sorted(column.name for column in table.columns)
+        for table_name, table in Base.metadata.tables.items()
+    }
+    assert required_columns() == expected
+
+
 def test_readiness_payload_ready_when_all_checks_pass():
     payload = build_readiness_payload(
         database_ok=True,
@@ -59,6 +78,7 @@ def test_readiness_payload_ready_when_all_checks_pass():
     )
     assert payload["ready"] is True
     assert payload["required_tables"] == "ok"
+    assert payload["required_columns"] == "ok"
     assert payload["migration"] == "ok"
 
 
@@ -75,6 +95,24 @@ def test_readiness_payload_reports_missing_tables_and_outdated_migration():
     assert payload["ready"] is False
     assert payload["required_tables"] == ["chunks"]
     assert payload["migration"] == "outdated"
+
+
+def test_readiness_payload_reports_missing_columns():
+    existing_tables = set(required_tables())
+    existing_columns = {
+        table_name: set(columns) for table_name, columns in required_columns().items()
+    }
+    existing_columns["sources"].remove("name")
+    payload = build_readiness_payload(
+        database_ok=True,
+        pgvector_ok=True,
+        existing_tables=existing_tables,
+        existing_columns=existing_columns,
+        current_revision="0002_security_audit_events",
+        head_revision="0002_security_audit_events",
+    )
+    assert payload["ready"] is False
+    assert payload["required_columns"] == {"sources": ["name"]}
 
 
 def test_readiness_payload_reports_missing_pgvector_and_missing_revision():
