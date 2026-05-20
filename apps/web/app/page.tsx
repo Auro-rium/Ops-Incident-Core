@@ -15,7 +15,10 @@ type RunEvent = {
 };
 
 export default function HomePage() {
-  const [apiBaseUrl, setApiBaseUrl] = useState("http://127.0.0.1:8000");
+  const [apiBaseUrl, setApiBaseUrl] = useState(process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api");
+  const [email, setEmail] = useState("admin@incidentops.local");
+  const [password, setPassword] = useState("");
+  const [accessToken, setAccessToken] = useState("");
   const [projectName, setProjectName] = useState("local-project");
   const [projectId, setProjectId] = useState("");
   const [dataPath, setDataPath] = useState("/path/to/logs-and-docs");
@@ -35,12 +38,31 @@ export default function HomePage() {
     [],
   );
 
+  function authHeaders() {
+    return {
+      "Content-Type": "application/json",
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    };
+  }
+
+  async function login() {
+    setStatus("Signing in...");
+    const response = await fetch(`${apiBaseUrl}/v1/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const payload = await response.json();
+    setAccessToken(payload.access_token ?? "");
+    setStatus(response.ok ? "Signed in." : payload.detail ?? "Sign-in failed.");
+  }
+
   async function createProject() {
     setStatus("Creating project...");
     const response = await fetch(`${apiBaseUrl}/v1/projects`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: projectName, demo_mode: true }),
+      headers: authHeaders(),
+      body: JSON.stringify({ name: projectName, demo_mode: false }),
     });
     const payload = await response.json();
     setProjectId(payload.project_id ?? "");
@@ -55,7 +77,7 @@ export default function HomePage() {
     setStatus("Ingesting path...");
     const response = await fetch(`${apiBaseUrl}/v1/projects/${projectId}/ingest`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify({ path: dataPath }),
     });
     const payload = await response.json();
@@ -74,7 +96,7 @@ export default function HomePage() {
     setStatus("Searching...");
     const response = await fetch(`${apiBaseUrl}/v1/search`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify({ project_id: projectId, query, top_k: 8 }),
     });
     const payload = await response.json();
@@ -90,7 +112,7 @@ export default function HomePage() {
     setStatus("Investigating...");
     const response = await fetch(`${apiBaseUrl}/v1/investigate`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify({ project_id: projectId, query, top_k: 8 }),
     });
     const payload = await response.json();
@@ -106,7 +128,7 @@ export default function HomePage() {
     setStatus("Creating workflow run...");
     const response = await fetch(`${apiBaseUrl}/v1/runs`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify({ project_id: projectId, query, top_k: 8, create_issue_draft: true }),
     });
     const payload = await response.json();
@@ -114,7 +136,9 @@ export default function HomePage() {
       setStatus(payload.detail ?? "Run creation failed.");
       return;
     }
-    const eventsResponse = await fetch(`${apiBaseUrl}/v1/runs/${payload.run_id}/events`);
+    const eventsResponse = await fetch(`${apiBaseUrl}/v1/runs/${payload.run_id}/events`, {
+      headers: authHeaders(),
+    });
     const eventsPayload = await eventsResponse.json();
     setRunEvents(eventsPayload ?? []);
     setStatus("Workflow run created.");
@@ -133,6 +157,14 @@ export default function HomePage() {
         <h2 style={{ marginTop: 0, fontSize: 18 }}>Connection</h2>
         <div style={{ display: "grid", gap: 10 }}>
           <input value={apiBaseUrl} onChange={(e) => setApiBaseUrl(e.target.value)} />
+          <input value={email} onChange={(e) => setEmail(e.target.value)} />
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="Password"
+          />
+          <button onClick={login}>Sign In</button>
           <input value={projectName} onChange={(e) => setProjectName(e.target.value)} />
           <button onClick={createProject}>Create Project</button>
           <div>Project ID: {projectId || "not created"}</div>

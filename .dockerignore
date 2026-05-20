@@ -16,11 +16,16 @@ build
 .env
 .env.*
 !.env.production.example
+!deploy/ec2/.env.demo.example
 apps/web/node_modules
 apps/web/.next
 .cache
 tmp
 temp
+deploy/ec2/.env.demo
+deploy/ec2/.env.runtime
+deploy/ec2/backups
+deploy/ec2/nginx/certs
 .terraform
 *.tfstate
 *.tfstate.*

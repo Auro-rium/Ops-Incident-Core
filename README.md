@@ -182,6 +182,8 @@ The AWS deployment uses ECS Fargate for separate API and worker services, RDS Po
 
 Production must run Alembic migrations before service rollout and must not use SQLAlchemy `create_all`.
 
+For a budget-safe single-instance flagship demo, see [docs/ec2-demo-deployment.md](docs/ec2-demo-deployment.md). That path runs Core, worker, Postgres pgvector, Redis, Collector, frontend, and Nginx on one EC2 instance with Docker Compose and avoids RDS, ElastiCache, ALB, NAT Gateway, and ECS.
+
 ## Frontend
 
 The frontend lets you:

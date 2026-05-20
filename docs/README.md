@@ -7,6 +7,7 @@ This folder contains production-facing technical documentation for IncidentOps.
 - [Architecture](./architecture.md) — system topology, component responsibilities, data flows, failure modes.
 - [Deployment](./deployment.md) — production boot sequence, secure configuration, runtime operations, SLO-oriented checks.
 - [AWS Deployment](./aws-deployment.md) — ECS Fargate, RDS, Redis, Secrets Manager, ECR, ALB, and GitHub Actions CI/CD setup.
+- [Budget-Safe EC2 Demo Deployment](./ec2-demo-deployment.md) — one-instance Docker Compose demo stack for Core, Collector, frontend, Postgres, Redis, and Nginx.
 - [Security](./security.md) — threat model, trust boundaries, control matrix, incident response and verification.
 - [Retrieval](./retrieval.md) — indexing/search design and evidence retrieval behavior.
 - [Agent Workflow](./agent_workflow.md) — deterministic execution graph, approvals, event persistence.
@@ -22,6 +23,7 @@ This folder contains production-facing technical documentation for IncidentOps.
 | architecture.md | Developers, SREs | Understand end-to-end system design and reliability behavior |
 | deployment.md | SREs, platform engineers | Operate safely in staging/production |
 | aws-deployment.md | Platform engineers | Provision AWS infrastructure and deploy through CI/CD |
+| ec2-demo-deployment.md | Demo operators, platform engineers | Run a budget-safe public demo on one EC2 instance |
 | security.md | Security reviewers, operators | Validate controls and run security operations |
 | retrieval.md | Developers, ML engineers | Understand retrieval mechanics and constraints |
 | agent_workflow.md | Developers, operators | Understand workflow nodes and approval mechanics |

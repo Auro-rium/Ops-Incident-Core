@@ -8,7 +8,7 @@
     "start": "next start -p 3000"
   },
   "dependencies": {
-    "next": "15.1.0",
+    "next": "15.5.18",
     "react": "19.0.0",
     "react-dom": "19.0.0"
   },
@@ -16,5 +16,8 @@
     "@types/node": "25.6.0",
     "@types/react": "19.2.14",
     "typescript": "5.7.2"
+  },
+  "overrides": {
+    "postcss": "8.5.10"
   }
 }

@@ -1,4 +1,4 @@
-.PHONY: migrate migration-check db-current db-history db-downgrade worker smoke-prod metrics-check docker-build terraform-fmt terraform-validate
+.PHONY: migrate migration-check db-current db-history db-downgrade worker smoke-prod metrics-check docker-build terraform-fmt terraform-validate ec2-demo-deploy ec2-demo-smoke ec2-demo-backup ec2-demo-teardown
 
 PYTHON ?= python
 ALEMBIC ?= alembic
@@ -40,3 +40,15 @@ terraform-fmt:
 terraform-validate:
 	terraform -chdir=infra/terraform init -backend=false
 	terraform -chdir=infra/terraform validate
+
+ec2-demo-deploy:
+	./scripts/deploy_ec2_demo.sh
+
+ec2-demo-smoke:
+	./scripts/smoke_ec2_demo.sh
+
+ec2-demo-backup:
+	./scripts/backup_db.sh
+
+ec2-demo-teardown:
+	./scripts/teardown_ec2_demo.sh
