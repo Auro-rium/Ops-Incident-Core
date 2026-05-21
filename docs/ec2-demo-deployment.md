@@ -190,6 +190,7 @@ Required GitHub secrets:
 - `EC2_HOST`: `44.200.229.227` or the EC2 public DNS
 - `EC2_USER`: `ubuntu`
 - `EC2_SSH_KEY`: private key for SSH access to the instance
+- `GH_READ_TOKEN`: GitHub token with read access to Core, Collector, and frontend if those repos are private
 
 Manual redeploy command executed by the workflow:
 
