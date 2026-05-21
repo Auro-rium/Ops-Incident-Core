@@ -19,6 +19,7 @@ compose() {
 }
 
 echo "Checking public health/readiness..."
+curl -fsS "${API_BASE_URL%/api}/" | grep -qi "<html"
 curl -fsS "${API_BASE_URL%/api}/health" >/dev/null
 curl -fsS "${API_BASE_URL%/api}/ready" >/dev/null
 curl -fsS "$API_BASE_URL/v1/capabilities" >/dev/null
@@ -28,10 +29,31 @@ COLLECTOR_HEALTH="$(compose exec -T collector opsincident-collector daemon healt
 printf '%s\n' "$COLLECTOR_HEALTH"
 printf '%s' "$COLLECTOR_HEALTH" | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p.get("core_reachable") is True, p'
 
-set -a
-source "$ENV_FILE"
-source "$RUNTIME_ENV_FILE"
-set +a
+read_env_key() {
+  local file="$1"
+  local key="$2"
+  python3 - "$file" "$key" <<'PY'
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+target = sys.argv[2]
+for line in path.read_text(encoding="utf-8").splitlines():
+    raw = line.strip()
+    if not raw or raw.startswith("#") or "=" not in raw:
+        continue
+    key, value = raw.split("=", 1)
+    if key == target:
+        print(value)
+        break
+PY
+}
+
+DEMO_PROJECT_ID="$(read_env_key "$RUNTIME_ENV_FILE" DEMO_PROJECT_ID)"
+COLLECTOR_SOURCE_NAME_VALUE="$(read_env_key "$ENV_FILE" COLLECTOR_SOURCE_NAME)"
+COLLECTOR_SOURCE_NAME_VALUE="${COLLECTOR_SOURCE_NAME_VALUE:-ec2-demo-fixture}"
 
 echo "Forcing one Collector sync cycle..."
 compose run --rm collector sync \
@@ -39,7 +61,7 @@ compose run --rm collector sync \
   --export api \
   --api-url http://api:8000 \
   --project-id "$DEMO_PROJECT_ID" \
-  --source-name "${COLLECTOR_SOURCE_NAME:-ec2-demo-fixture}" \
+  --source-name "$COLLECTOR_SOURCE_NAME_VALUE" \
   --source-type filesystem \
   --yes \
   --force >/tmp/incidentops-collector-sync.json

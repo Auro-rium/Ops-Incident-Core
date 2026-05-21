@@ -22,18 +22,28 @@ Do not expose Postgres, Redis, Core API, Collector health, or Next.js directly.
 
 ## Repository Layout
 
-Clone both repositories as siblings:
+Clone the Core, Collector, and frontend repositories as siblings:
 
 ```bash
-mkdir -p ~/incidentops-demo
-cd ~/incidentops-demo
-git clone https://github.com/Auro-rium/inspection-ops.git
-git clone https://github.com/Auro-rium/OpsIncident-Collector.git
-cd inspection-ops
+mkdir -p ~/incidentops
+cd ~/incidentops
+git clone https://github.com/Auro-rium/Ops-Incident-Core.git Ops-Incident-Core
+git clone https://github.com/Auro-rium/OpsIncident-Collector.git Ops-Incident-Collector
+git clone https://github.com/Auro-rium/incidentops-frontend.git Ops-Incident-frontend
+cd Ops-Incident-Core
 git checkout core
 ```
 
-The default Collector build context is `../OpsIncident-Collector`. Override it with `--collector-repo` or `COLLECTOR_REPO_PATH` if your path differs.
+Expected layout:
+
+```text
+~/incidentops/
+  Ops-Incident-Core/
+  Ops-Incident-Collector/
+  Ops-Incident-frontend/
+```
+
+The default Collector build context is `../Ops-Incident-Collector`. The default frontend build context is `../Ops-Incident-frontend`. Override them with `--collector-repo`, `--frontend-repo`, `COLLECTOR_REPO_PATH`, or `FRONTEND_REPO_PATH` if your paths differ.
 
 ## Bootstrap Instance
 
@@ -58,7 +68,8 @@ FRONTEND_URL=http://YOUR_EC2_PUBLIC_DNS_OR_IP
 CORS_ALLOW_ORIGINS=http://YOUR_EC2_PUBLIC_DNS_OR_IP
 CORS_ORIGINS=http://YOUR_EC2_PUBLIC_DNS_OR_IP
 BOOTSTRAP_ADMIN_EMAIL=admin@example.com
-COLLECTOR_REPO_PATH=../OpsIncident-Collector
+COLLECTOR_REPO_PATH=../Ops-Incident-Collector
+FRONTEND_REPO_PATH=../Ops-Incident-frontend
 ```
 
 `scripts/deploy_ec2_demo.sh` generates strong values for `POSTGRES_PASSWORD`, `JWT_SECRET`, and `BOOTSTRAP_ADMIN_PASSWORD`. The generated admin password stays in `deploy/ec2/.env.demo`, which is gitignored.
@@ -68,7 +79,8 @@ COLLECTOR_REPO_PATH=../OpsIncident-Collector
 ```bash
 scripts/deploy_ec2_demo.sh \
   --public-url http://YOUR_EC2_PUBLIC_DNS_OR_IP \
-  --collector-repo ../OpsIncident-Collector
+  --collector-repo ../Ops-Incident-Collector \
+  --frontend-repo ../Ops-Incident-frontend
 ```
 
 The script prepares env files, generates a temporary self-signed HTTPS certificate if no cert exists, builds images, starts Postgres and Redis, runs `alembic upgrade head`, runs `python scripts/check_migrations.py`, starts Core/frontend/Nginx, bootstraps the admin, creates a demo project, writes `deploy/ec2/.env.runtime`, and starts the Collector daemon.
@@ -155,12 +167,37 @@ scripts/teardown_ec2_demo.sh --volumes
 
 After the demo, stop or terminate the EC2 instance to control costs.
 
+For the current demo instance:
+
+```bash
+aws ec2 stop-instances --region us-east-1 --instance-ids i-083255401a6e27271
+```
+
 ## Useful Commands
 
 ```bash
 docker compose --env-file deploy/ec2/.env.demo --env-file deploy/ec2/.env.runtime -f docker-compose.ec2-demo.yml ps
 docker compose --env-file deploy/ec2/.env.demo --env-file deploy/ec2/.env.runtime -f docker-compose.ec2-demo.yml logs -f api
 docker compose --env-file deploy/ec2/.env.demo --env-file deploy/ec2/.env.runtime -f docker-compose.ec2-demo.yml logs -f collector
+```
+
+## Manual GitHub Actions Redeploy
+
+The Core repo includes `.github/workflows/deploy-ec2-demo.yml` for manual redeploys. It SSHes into the EC2 host, pulls all three sibling repos, runs the EC2 deploy script with the Collector and frontend repo paths, then runs `scripts/smoke_ec2_demo.sh`.
+
+Required GitHub secrets:
+
+- `EC2_HOST`: `44.200.229.227` or the EC2 public DNS
+- `EC2_USER`: `ubuntu`
+- `EC2_SSH_KEY`: private key for SSH access to the instance
+
+Manual redeploy command executed by the workflow:
+
+```bash
+scripts/deploy_ec2_demo.sh \
+  --public-url http://44.200.229.227 \
+  --collector-repo ../Ops-Incident-Collector \
+  --frontend-repo ../Ops-Incident-frontend
 ```
 
 ## Caveats

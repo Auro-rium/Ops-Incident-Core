@@ -7,17 +7,56 @@ ENV_FILE="${ENV_FILE:-$ROOT_DIR/deploy/ec2/.env.demo}"
 RUNTIME_ENV_FILE="${RUNTIME_ENV_FILE:-$ROOT_DIR/deploy/ec2/.env.runtime}"
 PUBLIC_URL="${PUBLIC_URL:-}"
 COLLECTOR_REPO_PATH="${COLLECTOR_REPO_PATH:-}"
+FRONTEND_REPO_PATH="${FRONTEND_REPO_PATH:-}"
 LOCAL_API_BASE="${LOCAL_API_BASE:-http://127.0.0.1/api}"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/deploy_ec2_demo.sh [--public-url http://ec2-host] [--collector-repo ../OpsIncident-Collector]
+Usage: scripts/deploy_ec2_demo.sh [--public-url http://ec2-host] [--collector-repo ../Ops-Incident-Collector] [--frontend-repo ../Ops-Incident-frontend]
 
 Environment overrides:
   ENV_FILE              default deploy/ec2/.env.demo
   RUNTIME_ENV_FILE      default deploy/ec2/.env.runtime
   LOCAL_API_BASE        default http://127.0.0.1/api
+  COLLECTOR_REPO_PATH   default from deploy/ec2/.env.demo
+  FRONTEND_REPO_PATH    default from deploy/ec2/.env.demo
 EOF
+}
+
+resolve_repo_path() {
+  local path="$1"
+  if [[ -z "$path" ]]; then
+    return 0
+  fi
+  if [[ -d "$path" ]]; then
+    return 0
+  fi
+  if [[ -d "$ROOT_DIR/$path" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+read_env_key() {
+  local file="$1"
+  local key="$2"
+  python3 - "$file" "$key" <<'PY'
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+target = sys.argv[2]
+for line in path.read_text(encoding="utf-8").splitlines():
+    raw = line.strip()
+    if not raw or raw.startswith("#") or "=" not in raw:
+        continue
+    key, value = raw.split("=", 1)
+    if key == target:
+        print(value)
+        break
+PY
 }
 
 while [[ $# -gt 0 ]]; do
@@ -28,6 +67,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --collector-repo)
       COLLECTOR_REPO_PATH="${2:?--collector-repo requires a value}"
+      shift 2
+      ;;
+    --frontend-repo)
+      FRONTEND_REPO_PATH="${2:?--frontend-repo requires a value}"
       shift 2
       ;;
     -h|--help)
@@ -47,9 +90,19 @@ if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>
   exit 1
 fi
 
+if ! resolve_repo_path "$COLLECTOR_REPO_PATH"; then
+  echo "Collector repo path does not exist: $COLLECTOR_REPO_PATH" >&2
+  exit 1
+fi
+
+if ! resolve_repo_path "$FRONTEND_REPO_PATH"; then
+  echo "Frontend repo path does not exist: $FRONTEND_REPO_PATH" >&2
+  exit 1
+fi
+
 mkdir -p "$ROOT_DIR/deploy/ec2/nginx/certs" "$ROOT_DIR/deploy/ec2/backups"
 
-python3 - "$ROOT_DIR/deploy/ec2/.env.demo.example" "$ENV_FILE" "$PUBLIC_URL" "$COLLECTOR_REPO_PATH" <<'PY'
+python3 - "$ROOT_DIR/deploy/ec2/.env.demo.example" "$ENV_FILE" "$PUBLIC_URL" "$COLLECTOR_REPO_PATH" "$FRONTEND_REPO_PATH" <<'PY'
 from __future__ import annotations
 
 import secrets
@@ -60,6 +113,7 @@ example = Path(sys.argv[1])
 env_path = Path(sys.argv[2])
 public_url = sys.argv[3].strip()
 collector_repo = sys.argv[4].strip()
+frontend_repo = sys.argv[5].strip()
 
 
 def parse_env(text: str) -> tuple[list[str], dict[str, str]]:
@@ -88,6 +142,8 @@ if public_url:
     values["CORS_ORIGINS"] = public_url.rstrip("/")
 if collector_repo:
     values["COLLECTOR_REPO_PATH"] = collector_repo
+if frontend_repo:
+    values["FRONTEND_REPO_PATH"] = frontend_repo
 
 def needs_secret(key: str) -> bool:
     value = values.get(key, "")
@@ -117,6 +173,11 @@ values["JOB_QUEUE_BACKEND"] = "redis"
 values["RATE_LIMIT_BACKEND"] = "redis"
 values["METRICS_BACKEND"] = "prometheus"
 values["NEXT_PUBLIC_API_BASE_URL"] = "/api"
+values["NEXT_PUBLIC_INCIDENTOPS_API_URL"] = "/api"
+values["NEXT_PUBLIC_COLLECTOR_HEALTH_URL"] = "/collector/health"
+values["NEXT_PUBLIC_COLLECTOR_METRICS_URL"] = "/collector/metrics"
+values["COLLECTOR_HEALTH_URL"] = "http://collector:8686/health"
+values["COLLECTOR_METRICS_URL"] = "http://collector:8687/metrics"
 
 ordered_keys = []
 for line in template_lines:
@@ -146,6 +207,17 @@ env_path.chmod(0o600)
 print(f"Prepared {env_path}")
 PY
 
+EFFECTIVE_COLLECTOR_REPO_PATH="$(read_env_key "$ENV_FILE" COLLECTOR_REPO_PATH)"
+EFFECTIVE_FRONTEND_REPO_PATH="$(read_env_key "$ENV_FILE" FRONTEND_REPO_PATH)"
+if ! resolve_repo_path "$EFFECTIVE_COLLECTOR_REPO_PATH"; then
+  echo "Collector repo path does not exist: $EFFECTIVE_COLLECTOR_REPO_PATH" >&2
+  exit 1
+fi
+if ! resolve_repo_path "$EFFECTIVE_FRONTEND_REPO_PATH"; then
+  echo "Frontend repo path does not exist: $EFFECTIVE_FRONTEND_REPO_PATH" >&2
+  exit 1
+fi
+
 if [[ ! -f "$ROOT_DIR/deploy/ec2/nginx/certs/selfsigned.crt" || ! -f "$ROOT_DIR/deploy/ec2/nginx/certs/selfsigned.key" ]]; then
   openssl req -x509 -nodes -days 14 -newkey rsa:2048 \
     -keyout "$ROOT_DIR/deploy/ec2/nginx/certs/selfsigned.key" \
@@ -164,7 +236,7 @@ compose() {
 }
 
 echo "Building images..."
-compose build api core-worker frontend collector nginx
+compose build api core-worker frontend collector nginx migrate admin-bootstrap
 
 echo "Starting Postgres and Redis..."
 compose up -d postgres redis

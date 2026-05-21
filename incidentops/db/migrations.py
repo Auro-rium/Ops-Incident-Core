@@ -16,6 +16,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
 
 
+def _resolve_alembic_ini() -> Path:
+    if ALEMBIC_INI.exists():
+        return ALEMBIC_INI
+    cwd_config = Path.cwd() / "alembic.ini"
+    if cwd_config.exists():
+        return cwd_config
+    return ALEMBIC_INI
+
+
 def required_tables() -> list[str]:
     return sorted(Base.metadata.tables.keys())
 
@@ -28,7 +37,12 @@ def required_columns() -> dict[str, list[str]]:
 
 
 def get_alembic_config() -> Config:
-    return Config(str(ALEMBIC_INI))
+    config_path = _resolve_alembic_ini()
+    config = Config(str(config_path))
+    if not config.get_main_option("script_location"):
+        script_location = config_path.parent / "alembic"
+        config.set_main_option("script_location", str(script_location))
+    return config
 
 
 def get_head_revision() -> str | None:

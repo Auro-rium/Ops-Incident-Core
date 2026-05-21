@@ -1,0 +1,70 @@
+name: Deploy EC2 Demo
+
+on:
+  workflow_dispatch:
+    inputs:
+      public_url:
+        description: "Public demo URL"
+        required: false
+        default: "http://44.200.229.227"
+
+permissions:
+  contents: read
+
+jobs:
+  redeploy:
+    name: Redeploy EC2 demo stack
+    runs-on: ubuntu-latest
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USER: ${{ secrets.EC2_USER || 'ubuntu' }}
+      PUBLIC_URL: ${{ inputs.public_url || 'http://44.200.229.227' }}
+      CORE_DIR: ~/incidentops/Ops-Incident-Core
+      COLLECTOR_DIR: ~/incidentops/Ops-Incident-Collector
+      FRONTEND_DIR: ~/incidentops/Ops-Incident-frontend
+    steps:
+      - name: Validate required secrets
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          test -n "$EC2_HOST" || { echo "EC2_HOST secret is required"; exit 1; }
+          test -n "$EC2_SSH_KEY" || { echo "EC2_SSH_KEY secret is required"; exit 1; }
+
+      - name: Configure SSH
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/incidentops-ec2
+          chmod 600 ~/.ssh/incidentops-ec2
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Pull repos, deploy, and smoke test
+        run: |
+          ssh -i ~/.ssh/incidentops-ec2 "$EC2_USER@$EC2_HOST" "PUBLIC_URL='$PUBLIC_URL' bash -se" <<'REMOTE'
+          set -euo pipefail
+
+          cd ~/incidentops/Ops-Incident-Core
+          git pull --ff-only
+
+          cd ~/incidentops/Ops-Incident-Collector
+          git pull --ff-only
+
+          cd ~/incidentops/Ops-Incident-frontend
+          git pull --ff-only
+
+          cd ~/incidentops/Ops-Incident-Core
+          scripts/deploy_ec2_demo.sh \
+            --public-url "$PUBLIC_URL" \
+            --collector-repo ../Ops-Incident-Collector \
+            --frontend-repo ../Ops-Incident-frontend
+
+          scripts/smoke_ec2_demo.sh
+
+          docker compose --env-file deploy/ec2/.env.demo --env-file deploy/ec2/.env.runtime \
+            -f docker-compose.ec2-demo.yml ps
+          REMOTE
+
+      - name: Print demo URL
+        run: |
+          echo "EC2 demo deployed: $PUBLIC_URL"
