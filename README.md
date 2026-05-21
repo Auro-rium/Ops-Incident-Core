@@ -1,166 +1,217 @@
-# IncidentOps Agent
+# IncidentOps Core
 
-IncidentOps Agent is a production-style incident investigation copilot for backend and SRE teams. It is designed for bring-your-own incident data: logs, docs, code, incident reports, and deploy metadata from arbitrary project folders.
+IncidentOps Core is a production-style, collector-first RAG backend for incident investigation. It turns engineering evidence such as logs, code, deploy history, runbooks, API docs, database notes, and previous incident reports into searchable, cited evidence for backend and SRE teams.
 
-## Bring Your Own Data
+The system is not a generic PDF chatbot. It is an incident investigation backend designed around source-aware ingestion, hybrid retrieval, confidence scoring, missing-data warnings, workflow runs, auditability, and deployment discipline. Fancy words, yes, but this time they map to actual running services instead of decorative README fog.
 
-Expected folder types:
-- application and gateway logs
-- service code and patches
-- deploy history or release metadata
-- incident reports or postmortems
-- runbooks and API docs
+## What it does
 
-Supported files:
-- `.md`
-- `.txt`
-- `.log`
-- `.json`
-- `.yaml`
-- `.yml`
-- `.py`
-- `.patch`
-- `.diff`
+IncidentOps Core answers operational questions such as:
 
-What good input looks like:
-- timestamped logs with service names or request paths
-- deploy history with hashes, times, and changed files
-- code or diffs for the affected service
-- prior incident writeups and runbooks
+```text
+Why did /checkout latency spike after the last deploy?
+What changed before the timeout errors started?
+Which logs, deploys, docs, and previous incidents support this hypothesis?
+What evidence is missing before we can trust the root-cause claim?
+```
 
-What weak input looks like:
-- docs only, without logs or deploy context
-- logs without timestamps
-- deploy questions without deploy metadata
-- folders dominated by unsupported binaries or oversized dumps
+It returns:
 
-Low confidence means the system found some relevant evidence but key context is missing or inconsistent. In that case it will return the best evidence it has, confidence reasons, and missing data needed to investigate further.
+- cited evidence
+- likely root-cause hypothesis
+- confidence and confidence reasons
+- missing data and unknowns
+- affected services
+- timeline and hypotheses
+- workflow run events
+- report/issue draft state behind approval gates
 
-## Workflow
+## Repository role
 
-1. Start the backend.
-2. Create a project.
-3. Ingest a server-visible folder such as `/path/to/logs-and-docs`.
-4. Ask an incident question.
-5. Inspect cited evidence, investigation output, and optional workflow run events.
+This repository is the **Core Backend**.
 
-Unsupported files are skipped safely. Oversized files are skipped with a logged reason.
+The full IncidentOps system is split into three repositories:
 
-## Collector-First Ingestion
+```text
+Ops-Incident-Core        FastAPI backend, workers, database, retrieval, investigation
+Ops-Incident-Collector   deterministic edge collector and Core sync client
+Ops-Incident-frontend    operator console UI
+```
 
-Production ingestion is Collector-first. A Collector reads company folders, repos, or exports, normalizes each item, and sends document batches to the Core Backend:
+Core owns:
 
-1. `POST /v1/projects/{project_id}/sources`
-2. `POST /v1/projects/{project_id}/collectors/register`
-3. `POST /v1/sources/{source_id}/syncs/start`
-4. `POST /v1/sources/{source_id}/documents/batch`
-5. `POST /v1/sources/{source_id}/syncs/{sync_id}/finish`
-6. Search or investigate over indexed chunks.
+- API contract
+- authentication and RBAC
+- source and collector registry
+- sync lifecycle
+- normalized document batch ingestion
+- indexing and chunk storage
+- hybrid retrieval
+- investigation responses
+- workflow runs and approvals
+- evals, metrics, readiness, audit events
+- production deployment assets
 
-Batch ingest is idempotent by `(project_id, source_id, external_id, content_hash)`: unchanged documents are skipped, changed documents replace their previous chunks, and per-document failures are returned without failing the whole batch. Local folder ingest remains as development compatibility and uses the same central indexer internally.
+Collector owns local data access, filtering, redaction, normalization, and upload. The frontend owns the operator experience. Splitting them is not aesthetic minimalism. It prevents the backend from becoming a junk drawer with Docker Compose wallpaper.
 
-## Runtime and Workers
+## Core architecture
 
-Local development defaults to inline execution:
+```text
+Collector or local/dev ingest
+  -> NormalizedDocument[]
+  -> validation and idempotent indexer
+  -> documents + chunks in Postgres
+  -> pgvector + full-text retrieval
+  -> evidence packing + citations
+  -> investigation service
+  -> workflow runs, events, approvals, evals, metrics
+```
+
+The production ingestion path is Collector-first:
+
+1. Create a project.
+2. Create/register a source.
+3. Register a collector.
+4. Start a source sync.
+5. Send normalized document batches.
+6. Finish the sync.
+7. Search or investigate over indexed evidence.
+
+Core exposes `/v1/capabilities` so Collector and tooling can discover supported features, limits, and endpoint paths.
+
+## Normalized document contract
+
+Collector sends documents shaped like:
+
+```json
+{
+  "external_id": "logs/app.log",
+  "path": "logs/app.log",
+  "source_type": "logs",
+  "content": "timestamped log content...",
+  "content_hash": "sha256...",
+  "metadata": {
+    "service_name": "orders",
+    "endpoint": "/v1/orders",
+    "deploy_hash": "abcdef1234567890"
+  },
+  "size_bytes": 1234,
+  "modified_at": "2026-05-21T10:00:00Z"
+}
+```
+
+Batch ingestion is idempotent by source and external identity:
+
+- same external ID and same content hash -> skipped unchanged
+- same external ID and new content hash -> document updated and old chunks replaced
+- bad document -> per-document error, not whole batch failure
+- repeated sync -> no duplicate chunks
+
+## Retrieval and investigation
+
+Core uses hybrid retrieval instead of pretending embeddings alone can remember deploy hashes, endpoints, and error codes like a responsible adult.
+
+Retrieval combines:
+
+- pgvector semantic search
+- Postgres full-text search
+- metadata filters and boosts
+- optional reranking
+- evidence packing
+- citation building
+- secret redaction and prompt-injection marking
+
+Investigation then performs incident-specific reasoning over evidence:
+
+- task classification
+- entity extraction
+- evidence retrieval
+- timeline construction
+- hypothesis generation
+- confidence scoring
+- missing-data detection
+- cited answer generation
+
+When evidence is weak, Core does not fake certainty. It returns an insufficient-evidence root cause with citations and missing-data guidance.
+
+## Security model
+
+Core includes:
+
+- JWT authentication
+- bcrypt password hashing
+- explicit admin bootstrap
+- project-scoped RBAC
+- audit events
+- source config secret rejection
+- redaction and output sanitization
+- prompt-injection inspection for retrieved content
+- request and batch limits
+- Redis-backed rate limit/queue paths for production
+- local folder ingest disabled by default in production
+- canonical allowed-root validation for local/dev ingest
+
+Production must not rely on demo-mode bypasses or runtime `create_all` schema creation.
+
+## Runtime services
+
+Core can run as separate API and worker processes.
+
+```text
+core-api       FastAPI API
+core-worker    background workflow/eval worker
+postgres       PostgreSQL + pgvector
+redis          queue/rate-limit/runtime backing service
+```
+
+Local/development can use inline execution:
 
 ```text
 WORKER_MODE=inline
 JOB_QUEUE_BACKEND=inline
 ```
 
-In staging/production, workflow and eval jobs should run through a worker:
+Production-style runtime should use queue mode:
 
 ```text
 WORKER_MODE=queue
 JOB_QUEUE_BACKEND=redis
-REDIS_URL=redis://...
+RATE_LIMIT_BACKEND=redis
 ```
 
-`POST /v1/runs` and `POST /v1/evals/run` create persisted run records and enqueue jobs in queue mode. A worker process executes them, persists status/events/results, and records audit events. Start a worker with:
+## Local quick start
+
+```bash
+cp .env.example .env
+alembic upgrade head
+python scripts/check_migrations.py
+uvicorn apps.api.main:app --reload --port 8000
+```
+
+Start a worker separately when using queue mode:
 
 ```bash
 python -m incidentops.worker
 ```
 
-Workflow nodes emit `node_started`, `node_completed`, `node_failed`, and `node_retried` events. Timeouts and retry limits are controlled by `WORKFLOW_NODE_TIMEOUT_SECONDS`, `WORKFLOW_MAX_RETRIES`, and `WORKFLOW_RUN_TIMEOUT_SECONDS`.
-
-## Main capabilities
-
-- metadata-aware ingestion and hybrid retrieval
-- structured incident investigation with citations
-- workflow runs with persisted events and approval gates
-- JWT auth, RBAC, redaction, prompt-injection inspection, output sanitization
-- persisted eval runs with custom case files
-
-## Quick start
+Run tests:
 
 ```bash
-cp .env.example .env
-alembic upgrade head
-uvicorn apps.api.main:app --reload --port 8000
+uv run --extra dev ruff check .
+uv run --extra dev python -m pytest tests/unit tests/integration -q
 ```
 
-Local/development keeps a convenience admin for smoke tests:
-
-```text
-admin@incidentops.local / incidentops
-```
-
-For staging/production, create the first admin explicitly:
-
-```bash
-python -m incidentops.security.bootstrap_admin \
-  --email admin@example.com \
-  --password "use-a-strong-password"
-```
-
-Then use the frontend or CLI:
+Run a local smoke test:
 
 ```bash
 python scripts/smoke_local.py \
-  --data-path /path/to/project/data \
-  --query "Why did latency increase after the last deploy?" \
-  --base-url http://127.0.0.1:8000
+  --base-url http://127.0.0.1:8000 \
+  --data-path tests/fixtures/basic_incident \
+  --query "Why did GET /v1/orders slow down after deploy abc1234?" \
+  --create-run
 ```
 
-Inspect a folder before ingesting:
-
-```bash
-python scripts/inspect_folder.py --data-path /path/to/project/data
-```
-
-## Docker
-
-Run the full stack:
-
-```bash
-docker compose up --build
-```
-
-Then open:
-
-```txt
-http://127.0.0.1:3000
-```
-
-The compose file mounts `${INGEST_ROOT:-.}` into the API container as `${INGEST_CONTAINER_ROOT:-/workspace}` read-only. When the backend runs in Docker, ingest paths must be container-visible paths such as:
-
-```txt
-/workspace/tests/fixtures/basic_incident
-```
-
-To point Docker at a different host folder tree, start compose with `INGEST_ROOT=/path/to/data-root`.
-To preserve host absolute paths for local smoke tests, set both roots to the same path, for example `INGEST_ROOT=/home/lenovo INGEST_CONTAINER_ROOT=/home/lenovo`.
-Local folder ingest also enforces `LOCAL_INGEST_ALLOWED_ROOTS`; custom eval case files enforce `EVAL_CASES_ALLOWED_ROOTS` and `MAX_EVAL_CASES_BYTES`.
-
-Run migrations before using a fresh database:
-
-```bash
-alembic upgrade head
-python scripts/check_migrations.py
-```
-
-Run a production-style API smoke check:
+Run production-style smoke:
 
 ```bash
 python scripts/smoke_prod.py \
@@ -170,19 +221,19 @@ python scripts/smoke_prod.py \
   --query "What does this tiny service evidence say?"
 ```
 
-## AWS Deployment
+## EC2 demo deployment
 
-Production AWS deployment assets live under:
+The budget-safe demo stack runs the full system on one EC2 instance using Docker Compose:
 
-- `infra/terraform/`
-- `.github/workflows/deploy-core.yml`
-- `docs/aws-deployment.md`
-
-The AWS deployment uses ECS Fargate for separate API and worker services, RDS PostgreSQL, ElastiCache Redis, ECR, Secrets Manager, an Application Load Balancer, CloudWatch logs, a migration one-off task, and `smoke_prod.py` after deploy.
-
-Production must run Alembic migrations before service rollout and must not use SQLAlchemy `create_all`.
-
-For a budget-safe single-instance flagship demo, see [docs/ec2-demo-deployment.md](docs/ec2-demo-deployment.md). That path runs Core, worker, Postgres pgvector, Redis, Collector, the separate `Ops-Incident-frontend` repo, and Nginx on one EC2 instance with Docker Compose and avoids RDS, ElastiCache, ALB, NAT Gateway, and ECS.
+```text
+Nginx public on 80/443
+Frontend console
+Core API
+Core worker
+Postgres pgvector
+Redis
+Collector daemon
+```
 
 Expected EC2 sibling repo layout:
 
@@ -202,108 +253,45 @@ scripts/deploy_ec2_demo.sh \
   --frontend-repo ../Ops-Incident-frontend
 ```
 
-## Frontend
-
-The frontend lets you:
-- enter API base URL
-- create a project
-- ingest a server-visible path
-- enter a custom query
-- inspect evidence
-- inspect investigation output
-- inspect workflow run events
-
-## Evals
-
-Run custom eval cases:
+Smoke:
 
 ```bash
-python incidentops/eval/runner.py \
-  --project-id PROJECT_ID \
-  --cases eval/custom_cases.jsonl \
-  --base-url http://127.0.0.1:8000 \
-  --email admin@incidentops.local \
-  --password incidentops
+scripts/smoke_ec2_demo.sh
 ```
 
-Case format:
+See [`docs/ec2-demo-deployment.md`](docs/ec2-demo-deployment.md) for the EC2 runbook.
 
-```json
-{
-  "id": "case_001",
-  "question": "Why did latency increase after the deploy?",
-  "expected_documents": ["deploy-history.json"],
-  "expected_terms": ["deploy", "latency"],
-  "forbidden_terms": ["database outage"]
-}
-```
+## AWS managed deployment
 
-Eval runs are persisted with per-case evidence recall, term coverage, forbidden-term hits, latency, and error fields. One failed case does not fail the whole eval run.
-Custom case files accepted through the API must be under `EVAL_CASES_ALLOWED_ROOTS` and within `MAX_EVAL_CASES_BYTES`.
+This repository also includes deployment assets for a more production-shaped AWS path:
 
-## Tests and fixtures
+- ECS Fargate API service
+- ECS Fargate worker service
+- RDS PostgreSQL
+- ElastiCache/Redis or Valkey
+- ECR
+- Secrets Manager
+- CloudWatch logs
+- ALB
+- migration one-off task
+- GitHub Actions CI/CD
 
-Tiny fixtures live under `tests/fixtures/basic_incident/`. They are only for tests and smoke coverage. The main product flow does not depend on `demo_data`.
+See:
 
-## Database and readiness
+- [`docs/deployment-overview.md`](docs/deployment-overview.md)
+- [`docs/aws-deployment.md`](docs/aws-deployment.md)
+- [`docs/operations-runbook.md`](docs/operations-runbook.md)
 
-The backend is production-deployable from Alembic migrations. Runtime schema creation is disabled by default.
+## Documentation map
 
-Environment flags:
-- `APP_ENV=local|development|staging|production`
-- `DB_CREATE_ALL=false`
-- `DB_REQUIRE_MIGRATIONS=true`
-- `JWT_SECRET=<strong secret>`
-- `ALLOW_DEMO_PROJECT_BYPASS=false` in staging/production
-- `ALLOW_LOCAL_SEED_ADMIN=false` in staging/production
-- `RATE_LIMIT_BACKEND=redis` in staging/production when rate limiting is enabled
-- `WORKER_MODE=queue` in staging/production
-- `JOB_QUEUE_BACKEND=redis` in staging/production
-- `METRICS_BACKEND=prometheus` or another production metrics backend in staging/production
-- `METRICS_PUBLIC=false` unless protected by private network controls
-- `LOCAL_INGEST_ENABLED=false` in staging/production
-- `LOCAL_INGEST_ALLOWED_ROOTS=<dev-only roots>` for local path ingest
-- `EVAL_CASES_ALLOWED_ROOTS=<approved roots>` for custom eval case files
+- [`docs/system-architecture.md`](docs/system-architecture.md): system design and data flow
+- [`docs/collector-core-contract.md`](docs/collector-core-contract.md): Collector to Core API contract
+- [`docs/operations-runbook.md`](docs/operations-runbook.md): operating, debugging, and demoing Core
+- [`docs/deployment-overview.md`](docs/deployment-overview.md): deployment options and promotion path
+- [`docs/ec2-demo-deployment.md`](docs/ec2-demo-deployment.md): one-box AWS EC2 demo deployment
 
-`DB_CREATE_ALL=true` is only honored in `local` or `development`. It is ignored in `staging` and `production`; production must not silently create schema.
+## Current maturity
 
-Production startup fails if JWT secrets are missing/default, demo bypass is enabled, local seed admin is enabled, wildcard CORS is enabled, or in-memory rate limiting is configured.
-Production startup also rejects inline worker mode, non-Redis job queues, memory-only metrics, and enabled local path ingest.
+IncidentOps Core has been validated as a deployed AWS EC2 demo stack with Collector sync, search, investigation, citations, and workflow runs working end-to-end. It is production-style and portfolio/flagship ready. It is not yet a fully managed SaaS deployment until domain, HTTPS, managed DB, alerting, backups, and long-running CI/CD operations are completed.
 
-Production database boot sequence:
-
-1. Create the Postgres database.
-2. Use a pgvector-capable Postgres image or managed service.
-3. Set `DATABASE_URL`.
-4. Run `alembic upgrade head`.
-5. Start the API.
-6. Verify `GET /health`.
-7. Verify `GET /ready`.
-
-`/health` is a lightweight liveness check. `/ready` verifies database connectivity, pgvector extension availability, required tables and columns, and Alembic revision state.
-
-`/v1/metrics/summary` returns structured in-process counters and latency averages. `/metrics` exposes a Prometheus-compatible text view for scraping. Metrics endpoints require authentication by default unless `METRICS_PUBLIC=true` is explicitly set for a protected environment.
-
-Migration commands:
-
-```bash
-make migrate
-make migration-check
-make db-current
-make db-history
-make db-downgrade
-```
-
-## Security Model
-
-Authentication uses JWT bearer access tokens signed with `JWT_SECRET`. Passwords are stored with bcrypt; legacy SHA256 hashes are accepted only in local/development long enough to rehash on successful login.
-
-Project RBAC:
-- `viewer`: read project evidence, search, runs, reports, and eval results.
-- `investigator`: ask answers/investigations and create workflow runs.
-- `approver`: approve or reject gated workflow actions.
-- `admin`: manage projects, sources, collectors, syncs, document batch ingest, dev/local path ingest, and eval runs.
-
-Source configs reject raw credential keys and obvious secret values. Use `credentials_ref` for references to external secret storage. Audit events are persisted for login attempts, project/source/sync changes, document ingest, workflow runs, approvals, eval runs, rate limits, and permission denials.
-
-Ingestion limits are explicit: `MAX_DOCUMENTS_PER_BATCH`, `MAX_DOCUMENT_BYTES`, `MAX_BATCH_BYTES`, `MAX_CHUNKS_PER_DOCUMENT`, `MAX_METADATA_BYTES`, `MAX_EXTERNAL_ID_LENGTH`, and `MAX_PATH_LENGTH`. See `docs/collector_protocol.md` for the normalized document schema, idempotency behavior, diagnostics, and coverage warnings.
+That distinction matters. Overclaiming is how good engineering turns into brochure fiction.
