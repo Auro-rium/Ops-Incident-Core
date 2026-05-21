@@ -1,0 +1,90 @@
+name: Deploy EC2 Demo
+
+on:
+  workflow_dispatch:
+    inputs:
+      public_url:
+        description: "Public demo URL"
+        required: false
+        default: "http://44.200.229.227"
+
+permissions:
+  contents: read
+
+jobs:
+  redeploy:
+    name: Redeploy EC2 demo stack
+    runs-on: ubuntu-latest
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USER: ${{ secrets.EC2_USER || 'ubuntu' }}
+      PUBLIC_URL: ${{ inputs.public_url || 'http://44.200.229.227' }}
+      GH_READ_TOKEN: ${{ secrets.GH_READ_TOKEN || github.token }}
+      CORE_DIR: ~/incidentops/Ops-Incident-Core
+      COLLECTOR_DIR: ~/incidentops/Ops-Incident-Collector
+      FRONTEND_DIR: ~/incidentops/Ops-Incident-frontend
+    steps:
+      - name: Validate required secrets
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          test -n "$EC2_HOST" || { echo "EC2_HOST secret is required"; exit 1; }
+          test -n "$EC2_SSH_KEY" || { echo "EC2_SSH_KEY secret is required"; exit 1; }
+          test -n "$GH_READ_TOKEN" || { echo "GH_READ_TOKEN secret or github.token is required"; exit 1; }
+
+      - name: Configure SSH
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/incidentops-ec2
+          chmod 600 ~/.ssh/incidentops-ec2
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Pull repos, deploy, and smoke test
+        run: |
+          GH_READ_TOKEN_B64="$(printf '%s' "$GH_READ_TOKEN" | base64 -w 0)"
+          ssh -i ~/.ssh/incidentops-ec2 "$EC2_USER@$EC2_HOST" "PUBLIC_URL='$PUBLIC_URL' GH_READ_TOKEN_B64='$GH_READ_TOKEN_B64' bash -se" <<'REMOTE'
+          set -euo pipefail
+          GH_READ_TOKEN="$(printf '%s' "$GH_READ_TOKEN_B64" | base64 -d)"
+          export GH_READ_TOKEN
+
+          git_pull_ff() {
+            askpass="$(mktemp)"
+            {
+              printf '%s\n' '#!/bin/sh'
+              printf '%s\n' 'case "$1" in'
+              printf '%s\n' '  *Username*) printf "%s\n" "x-access-token" ;;'
+              printf '%s\n' '  *Password*) printf "%s\n" "$GH_READ_TOKEN" ;;'
+              printf '%s\n' '  *) printf "\n" ;;'
+              printf '%s\n' 'esac'
+            } > "$askpass"
+            chmod 700 "$askpass"
+            GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$askpass" git pull --ff-only
+            rm -f "$askpass"
+          }
+
+          cd ~/incidentops/Ops-Incident-Core
+          git_pull_ff
+
+          cd ~/incidentops/Ops-Incident-Collector
+          git_pull_ff
+
+          cd ~/incidentops/Ops-Incident-frontend
+          git_pull_ff
+
+          cd ~/incidentops/Ops-Incident-Core
+          scripts/deploy_ec2_demo.sh \
+            --public-url "$PUBLIC_URL" \
+            --collector-repo ../Ops-Incident-Collector \
+            --frontend-repo ../Ops-Incident-frontend
+
+          scripts/smoke_ec2_demo.sh
+
+          docker compose --env-file deploy/ec2/.env.demo --env-file deploy/ec2/.env.runtime \
+            -f docker-compose.ec2-demo.yml ps
+          REMOTE
+
+      - name: Print demo URL
+        run: |
+          echo "EC2 demo deployed: $PUBLIC_URL"

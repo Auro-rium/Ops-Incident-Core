@@ -182,7 +182,25 @@ The AWS deployment uses ECS Fargate for separate API and worker services, RDS Po
 
 Production must run Alembic migrations before service rollout and must not use SQLAlchemy `create_all`.
 
-For a budget-safe single-instance flagship demo, see [docs/ec2-demo-deployment.md](docs/ec2-demo-deployment.md). That path runs Core, worker, Postgres pgvector, Redis, Collector, frontend, and Nginx on one EC2 instance with Docker Compose and avoids RDS, ElastiCache, ALB, NAT Gateway, and ECS.
+For a budget-safe single-instance flagship demo, see [docs/ec2-demo-deployment.md](docs/ec2-demo-deployment.md). That path runs Core, worker, Postgres pgvector, Redis, Collector, the separate `Ops-Incident-frontend` repo, and Nginx on one EC2 instance with Docker Compose and avoids RDS, ElastiCache, ALB, NAT Gateway, and ECS.
+
+Expected EC2 sibling repo layout:
+
+```text
+~/incidentops/
+  Ops-Incident-Core/
+  Ops-Incident-Collector/
+  Ops-Incident-frontend/
+```
+
+Deploy with:
+
+```bash
+scripts/deploy_ec2_demo.sh \
+  --public-url http://YOUR_EC2_PUBLIC_DNS_OR_IP \
+  --collector-repo ../Ops-Incident-Collector \
+  --frontend-repo ../Ops-Incident-frontend
+```
 
 ## Frontend
 

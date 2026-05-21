@@ -88,6 +88,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      disable: true
     networks:
       - incidentops_private
 
@@ -107,24 +109,40 @@ services:
 
   frontend:
     build:
-      context: ./apps/web
+      context: ${FRONTEND_REPO_PATH:-../Ops-Incident-frontend}
       args:
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-/api}
+        NEXT_PUBLIC_INCIDENTOPS_API_URL: ${NEXT_PUBLIC_INCIDENTOPS_API_URL:-/api}
     restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "sed -i 's/listen 8080;/listen 3000;/' /etc/nginx/templates/default.conf.template && exec /docker-entrypoint.sh nginx -g 'daemon off;'"
     environment:
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-/api}
+      NEXT_PUBLIC_INCIDENTOPS_API_URL: ${NEXT_PUBLIC_INCIDENTOPS_API_URL:-/api}
+      NEXT_PUBLIC_APP_ENV: production
+      NEXT_PUBLIC_COLLECTOR_HEALTH_URL: ${NEXT_PUBLIC_COLLECTOR_HEALTH_URL:-/collector/health}
+      NEXT_PUBLIC_COLLECTOR_METRICS_URL: ${NEXT_PUBLIC_COLLECTOR_METRICS_URL:-/collector/metrics}
+      COLLECTOR_HEALTH_URL: ${COLLECTOR_HEALTH_URL:-http://collector:8686/health}
+      COLLECTOR_METRICS_URL: ${COLLECTOR_METRICS_URL:-http://collector:8687/metrics}
       NODE_ENV: production
       PORT: "3000"
       HOSTNAME: "0.0.0.0"
     depends_on:
       api:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     networks:
       - incidentops_private
 
   collector:
     build:
-      context: ${COLLECTOR_REPO_PATH:-../OpsIncident-Collector}
+      context: ${COLLECTOR_REPO_PATH:-../Ops-Incident-Collector}
     restart: unless-stopped
     env_file:
       - ${EC2_DEMO_ENV_FILE:-deploy/ec2/.env.demo}

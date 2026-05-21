@@ -6,6 +6,9 @@ API_BASE_URL ?= http://127.0.0.1:8000
 SMOKE_EMAIL ?= admin@incidentops.local
 SMOKE_PASSWORD ?= incidentops
 DOCKER_IMAGE ?= incidentops-core:local
+EC2_PUBLIC_URL ?= http://127.0.0.1
+EC2_COLLECTOR_REPO ?= ../Ops-Incident-Collector
+EC2_FRONTEND_REPO ?= ../Ops-Incident-frontend
 
 migrate:
 	$(ALEMBIC) upgrade head
@@ -42,7 +45,7 @@ terraform-validate:
 	terraform -chdir=infra/terraform validate
 
 ec2-demo-deploy:
-	./scripts/deploy_ec2_demo.sh
+	./scripts/deploy_ec2_demo.sh --public-url $(EC2_PUBLIC_URL) --collector-repo $(EC2_COLLECTOR_REPO) --frontend-repo $(EC2_FRONTEND_REPO)
 
 ec2-demo-smoke:
 	./scripts/smoke_ec2_demo.sh
