@@ -128,6 +128,28 @@ class TestIngestEndpoint:
 
 
 class TestSearchAndAnswer:
+    def test_readiness_reports_fixture_coverage(self, client):
+        project_id, headers = create_authenticated_fixture_project(client)
+        response = client.get(f"/v1/projects/{project_id}/readiness", headers=headers)
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["project_id"] == project_id
+        assert payload["score"] > 0
+        assert payload["grade"] in {"weak", "partial", "good", "excellent"}
+        assert payload["coverage"]["has_code"] is True
+        assert payload["coverage"]["has_logs"] is True
+        assert payload["coverage"]["has_deploys"] is True
+        assert payload["counts"]["documents"] > 0
+        assert payload["counts"]["chunks"] > 0
+        assert payload["latest_sync"]["status"] in {"success", "partial_success"}
+        assert payload["answerable_questions"]
+        assert "suggested_actions" in payload
+
+    def test_readiness_requires_project_membership(self, client):
+        project_id, _headers = create_authenticated_fixture_project(client)
+        response = client.get(f"/v1/projects/{project_id}/readiness")
+        assert response.status_code == 401
+
     def test_search_returns_fixture_results(self, client):
         project_id = create_fixture_project(client)
         response = client.post(

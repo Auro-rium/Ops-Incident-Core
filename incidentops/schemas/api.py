@@ -145,6 +145,59 @@ class CapabilitiesResponse(BaseModel):
     endpoints: dict[str, str]
 
 
+class ReadinessLatestSync(BaseModel):
+    sync_id: str | None = None
+    status: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    documents_received: int = 0
+    chunks_created: int = 0
+    skipped_unchanged: int = 0
+    parser_errors: int = 0
+    duration_seconds: float | None = None
+
+
+class ReadinessCoverage(BaseModel):
+    has_code: bool
+    has_docs: bool
+    has_logs: bool
+    has_deploys: bool
+    has_runbooks: bool
+    has_incidents: bool
+    has_api_docs: bool
+    has_configs: bool
+
+
+class ReadinessCounts(BaseModel):
+    documents: int = 0
+    chunks: int = 0
+    sources: int = 0
+    successful_syncs: int = 0
+    failed_syncs: int = 0
+
+
+class ReadinessResponse(BaseModel):
+    project_id: UUID
+    score: int
+    grade: str
+    summary: str
+    source_count: int
+    collector_count: int
+    latest_sync: ReadinessLatestSync
+    coverage: ReadinessCoverage
+    counts: ReadinessCounts
+    source_type_counts: dict[str, int] = Field(default_factory=dict)
+    answerable_questions: list[str] = Field(default_factory=list)
+    weak_questions: list[str] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+    observability_gaps: list[str] = Field(default_factory=list)
+    suggested_actions: list[str] = Field(default_factory=list)
+    suggested_questions: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    readiness_generated_at: datetime
+    generated_at: datetime
+
+
 class BatchDocumentRequest(BaseModel):
     external_id: str = Field(..., min_length=1, max_length=4096)
     path: str = Field(..., min_length=1, max_length=4096)
