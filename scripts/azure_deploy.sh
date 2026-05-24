@@ -25,7 +25,8 @@ AZURE_OPENAI_CHAT_DEPLOYMENT="${AZURE_OPENAI_CHAT_DEPLOYMENT:-}"
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT="${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-}"
 OUTPUT_FILE="${OUTPUT_FILE:-$ROOT_DIR/infra/azure/.last-deployment.json}"
 PARAMETERS_FILE="$(mktemp)"
-trap 'rm -f "$PARAMETERS_FILE"' EXIT
+DEPLOY_ERROR_FILE="$(mktemp)"
+trap 'rm -f "$PARAMETERS_FILE" "$DEPLOY_ERROR_FILE"' EXIT
 
 "$ROOT_DIR/scripts/azure_login_check.sh"
 
@@ -87,11 +88,27 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
 PY
 
 echo "Deploying Azure resources into resource group '$AZURE_RESOURCE_GROUP'..."
-az deployment group create \
-  --resource-group "$AZURE_RESOURCE_GROUP" \
-  --template-file "$ROOT_DIR/infra/azure/main.bicep" \
-  --parameters "@$PARAMETERS_FILE" \
-  --output json > "$OUTPUT_FILE"
+deployment_attempt=1
+deployment_max_attempts="${AZURE_DEPLOY_MAX_ATTEMPTS:-3}"
+while true; do
+  if az deployment group create \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --template-file "$ROOT_DIR/infra/azure/main.bicep" \
+    --parameters "@$PARAMETERS_FILE" \
+    --output json > "$OUTPUT_FILE" 2> "$DEPLOY_ERROR_FILE"; then
+    break
+  fi
+
+  if (( deployment_attempt >= deployment_max_attempts )) || ! grep -Eq 'ServerIsBusy|AnotherOperationInProgress|Retry later|Try again later' "$DEPLOY_ERROR_FILE"; then
+    cat "$DEPLOY_ERROR_FILE" >&2
+    exit 1
+  fi
+
+  sleep_seconds=$((30 * deployment_attempt))
+  echo "Azure deployment attempt $deployment_attempt failed with a retryable busy-state error. Retrying in ${sleep_seconds}s..." >&2
+  deployment_attempt=$((deployment_attempt + 1))
+  sleep "$sleep_seconds"
+done
 
 chmod 600 "$OUTPUT_FILE"
 
