@@ -1,6 +1,9 @@
 name: Deploy Azure Demo
 
 on:
+  push:
+    branches:
+      - core
   workflow_dispatch:
     inputs:
       image_tag:
@@ -16,6 +19,10 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: azure-demo-deploy
+  cancel-in-progress: false
+
 env:
   AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP || 'incidentops-demo-swc-rg' }}
   AZURE_LOCATION: ${{ vars.AZURE_LOCATION || 'swedencentral' }}
@@ -23,7 +30,7 @@ env:
   IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
   NAME_PREFIX: ${{ vars.AZURE_NAME_PREFIX || 'incidentops' }}
   ENVIRONMENT_NAME: ${{ vars.AZURE_ENVIRONMENT_NAME || 'demo' }}
-  CORS_ORIGINS: ${{ vars.CORS_ORIGINS || 'https://CHANGE-ME' }}
+  CORS_ORIGINS: ${{ vars.CORS_ORIGINS || 'https://incidentops-frontend.kindbush-21bd9321.swedencentral.azurecontainerapps.io' }}
 
 jobs:
   core-tests:
