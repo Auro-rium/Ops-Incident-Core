@@ -18,9 +18,9 @@ It intentionally does not use AKS, NAT Gateway, or multi-region networking. Azur
 From the Core repo:
 
 ```bash
-export AZURE_RESOURCE_GROUP=incidentops-demo-rg
-export AZURE_LOCATION=eastus
-export ACR_NAME=<globally-unique-acr-name>
+export AZURE_RESOURCE_GROUP=incidentops-demo-swc-rg
+export AZURE_LOCATION=swedencentral
+export ACR_NAME=<globally-unique-acr-name>  # live demo uses incidentopsacr6763
 export CORS_ORIGINS=https://<frontend-container-app-fqdn>
 export AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com
 export AZURE_OPENAI_API_KEY=<secret>

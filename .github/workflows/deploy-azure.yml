@@ -17,9 +17,9 @@ permissions:
   id-token: write
 
 env:
-  AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP || 'incidentops-demo-rg' }}
-  AZURE_LOCATION: ${{ vars.AZURE_LOCATION || 'eastus' }}
-  ACR_NAME: ${{ vars.ACR_NAME }}
+  AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP || 'incidentops-demo-swc-rg' }}
+  AZURE_LOCATION: ${{ vars.AZURE_LOCATION || 'swedencentral' }}
+  ACR_NAME: ${{ vars.ACR_NAME || 'incidentopsacr6763' }}
   IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
   NAME_PREFIX: ${{ vars.AZURE_NAME_PREFIX || 'incidentops' }}
   ENVIRONMENT_NAME: ${{ vars.AZURE_ENVIRONMENT_NAME || 'demo' }}
@@ -109,7 +109,6 @@ jobs:
 
       - name: Validate required variables
         run: |
-          test -n "$ACR_NAME" || { echo "ACR_NAME repo variable is required"; exit 1; }
           test -n "${{ secrets.POSTGRES_PASSWORD }}" || { echo "POSTGRES_PASSWORD secret is required"; exit 1; }
           test -n "${{ secrets.JWT_SECRET }}" || { echo "JWT_SECRET secret is required"; exit 1; }
           test -n "${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}" || { echo "BOOTSTRAP_ADMIN_EMAIL secret is required"; exit 1; }

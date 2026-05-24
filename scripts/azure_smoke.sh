@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-incidentops-demo-rg}"
+AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-incidentops-demo-swc-rg}"
 COLLECTOR_APP_NAME="${COLLECTOR_APP_NAME:-incidentops-collector}"
 MCP_APP_NAME="${MCP_APP_NAME:-incidentops-mcp}"
 API_URL="${API_URL:-}"

@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-incidentops-demo-rg}"
-AZURE_LOCATION="${AZURE_LOCATION:-eastus}"
+AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-incidentops-demo-swc-rg}"
+AZURE_LOCATION="${AZURE_LOCATION:-swedencentral}"
 NAME_PREFIX="${NAME_PREFIX:-incidentops}"
 ENVIRONMENT_NAME="${ENVIRONMENT_NAME:-demo}"
 ACR_NAME="${ACR_NAME:?ACR_NAME is required}"

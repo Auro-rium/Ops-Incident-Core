@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-incidentops-demo-rg}"
+AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-incidentops-demo-swc-rg}"
 MIGRATION_JOB_NAME="${MIGRATION_JOB_NAME:-incidentops-core-migrate}"
 CORE_API_APP_NAME="${CORE_API_APP_NAME:-incidentops-core-api}"
 CORE_WORKER_APP_NAME="${CORE_WORKER_APP_NAME:-incidentops-core-worker}"
@@ -22,11 +22,10 @@ execution_name="$(az containerapp job start \
 deadline=$((SECONDS + TIMEOUT_SECONDS))
 status=""
 while (( SECONDS < deadline )); do
-  status="$(az containerapp job execution show \
+  status="$(az containerapp job execution list \
     --resource-group "$AZURE_RESOURCE_GROUP" \
-    --job-name "$MIGRATION_JOB_NAME" \
-    --name "$execution_name" \
-    --query properties.status \
+    --name "$MIGRATION_JOB_NAME" \
+    --query "[?name=='$execution_name'].properties.status | [0]" \
     --output tsv \
     --only-show-errors 2>/dev/null || true)"
   case "$status" in

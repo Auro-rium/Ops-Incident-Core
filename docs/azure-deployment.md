@@ -34,7 +34,7 @@ Azure services intentionally not used:
 Install:
 
 - Azure CLI
-- Docker if you want local image builds, though the scripts use ACR remote builds
+- Docker for local image builds and pushes to ACR
 - GitHub CLI only if you are configuring CI/CD manually
 
 Login:
@@ -47,9 +47,9 @@ az account set --subscription <subscription-id>
 Set deployment variables:
 
 ```bash
-export AZURE_RESOURCE_GROUP=incidentops-demo-rg
-export AZURE_LOCATION=eastus
-export ACR_NAME=<globally-unique-acr-name>
+export AZURE_RESOURCE_GROUP=incidentops-demo-swc-rg
+export AZURE_LOCATION=swedencentral
+export ACR_NAME=<globally-unique-acr-name>  # live demo uses incidentopsacr6763
 export NAME_PREFIX=incidentops
 export ENVIRONMENT_NAME=demo
 export IMAGE_TAG=$(git rev-parse --short HEAD)
@@ -84,7 +84,7 @@ From Core:
 scripts/azure_build_push_images.sh
 ```
 
-This creates the resource group and ACR if needed, then pushes:
+This creates the resource group and ACR if needed, then uses local Docker builds and `docker push` to publish:
 
 - `incidentops-core:<tag>`
 - `opsincident-collector:<tag>`
@@ -218,9 +218,9 @@ Use URL-safe PostgreSQL passwords. The helper script generates hex passwords so 
 
 Required GitHub variables:
 
-- `AZURE_RESOURCE_GROUP`
-- `AZURE_LOCATION`
-- `ACR_NAME`
+- `AZURE_RESOURCE_GROUP` (live demo: `incidentops-demo-swc-rg`)
+- `AZURE_LOCATION` (live demo: `swedencentral`)
+- `ACR_NAME` (live demo: `incidentopsacr6763`)
 - `CORS_ORIGINS`
 - `AZURE_OPENAI_ENDPOINT`
 - `AZURE_OPENAI_API_VERSION`
@@ -237,8 +237,8 @@ Optional:
 ## Teardown
 
 ```bash
-CONFIRM=delete-incidentops-demo-rg \
-AZURE_RESOURCE_GROUP=incidentops-demo-rg \
+CONFIRM=delete-incidentops-demo-swc-rg \
+AZURE_RESOURCE_GROUP=incidentops-demo-swc-rg \
 scripts/azure_teardown.sh
 ```
 
