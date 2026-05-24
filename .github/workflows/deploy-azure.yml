@@ -97,6 +97,12 @@ jobs:
           cat api.log
           exit 1
       - run: uv run --extra dev python -m pytest tests/unit tests/integration -q
+      - name: Stop API
+        if: always()
+        run: |
+          if [ -f api.pid ]; then
+            kill "$(cat api.pid)" >/dev/null 2>&1 || true
+          fi
 
   deploy:
     name: Build, deploy, migrate, and smoke Azure
