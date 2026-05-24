@@ -60,7 +60,7 @@ class LLMProvider:
             "temperature": temperature,
         }
         token_limit_key = "max_completion_tokens" if self.azure_mode else "max_tokens"
-        payload[token_limit_key] = max_tokens
+        payload[token_limit_key] = max(max_tokens, 4096) if self.azure_mode else max_tokens
         if not self.azure_mode:
             payload["model"] = self.model
         if response_format:
