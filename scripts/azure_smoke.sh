@@ -48,33 +48,48 @@ from __future__ import annotations
 import json
 import sys
 import time
-
-import httpx
+import urllib.error
+import urllib.request
 
 api_url, frontend_url, email, password, work_file = sys.argv[1:6]
-with httpx.Client(base_url=api_url.rstrip("/"), timeout=30, verify=True) as client:
-    health = client.get("/health")
-    health.raise_for_status()
-    ready = client.get("/ready")
-    ready.raise_for_status()
-    caps = client.get("/v1/capabilities")
-    caps.raise_for_status()
-    login = client.post("/v1/auth/login", json={"email": email, "password": password})
-    login.raise_for_status()
-    token = login.json()["access_token"]
-    headers = {"Authorization": f"Bearer {token}"}
-    project = client.post(
-        "/v1/projects",
-        headers=headers,
-        json={"name": f"azure-smoke-{int(time.time())}", "demo_mode": False},
-    )
-    project.raise_for_status()
-    project_id = project.json()["project_id"]
-    if frontend_url:
-        front = httpx.get(frontend_url, timeout=30, verify=True)
-        front.raise_for_status()
-    with open(work_file, "w", encoding="utf-8") as handle:
-        json.dump({"token": token, "project_id": project_id}, handle)
+api_url = api_url.rstrip("/")
+
+
+def request(method: str, path_or_url: str, *, token: str | None = None, payload: dict | None = None):
+    url = path_or_url if path_or_url.startswith("http") else f"{api_url}{path_or_url}"
+    data = None
+    headers = {}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            body = response.read().decode("utf-8")
+            return json.loads(body) if body else {}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise SystemExit(f"{method} {url} failed with HTTP {exc.code}: {body[:300]}") from exc
+
+
+request("GET", "/health")
+request("GET", "/ready")
+request("GET", "/v1/capabilities")
+login = request("POST", "/v1/auth/login", payload={"email": email, "password": password})
+token = login["access_token"]
+project = request(
+    "POST",
+    "/v1/projects",
+    token=token,
+    payload={"name": f"azure-smoke-{int(time.time())}", "demo_mode": False},
+)
+project_id = project["project_id"]
+if frontend_url:
+    request("GET", frontend_url)
+with open(work_file, "w", encoding="utf-8") as handle:
+    json.dump({"token": token, "project_id": project_id}, handle)
 print("Core health/ready/capabilities/login/project checks passed.")
 PY
 
@@ -129,62 +144,75 @@ from __future__ import annotations
 import json
 import sys
 import time
-
-import httpx
+import urllib.error
+import urllib.request
 
 api_url, work_file, query, timeout_seconds = sys.argv[1:5]
+api_url = api_url.rstrip("/")
 timeout = int(timeout_seconds)
 state = json.load(open(work_file, encoding="utf-8"))
-headers = {"Authorization": f"Bearer {state['token']}"}
+token = state["token"]
 project_id = state["project_id"]
 deadline = time.time() + timeout
 latest_sync = None
 
-with httpx.Client(base_url=api_url.rstrip("/"), timeout=30, verify=True) as client:
-    while time.time() < deadline:
-        sources = client.get(f"/v1/projects/{project_id}/sources", headers=headers)
-        sources.raise_for_status()
-        for source in sources.json():
-            latest_response = client.get(f"/v1/sources/{source['id']}/syncs/latest", headers=headers)
-            if latest_response.status_code == 404:
-                continue
-            latest_response.raise_for_status()
-            latest = latest_response.json()
-            if latest.get("status") in {"success", "partial_success"}:
-                latest_sync = latest
-                break
-        if latest_sync:
+
+def request(method: str, path: str, *, payload: dict | None = None, allow_404: bool = False):
+    data = None
+    headers = {"Authorization": f"Bearer {token}"}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    url = f"{api_url}{path}"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            body = response.read().decode("utf-8")
+            return response.status, json.loads(body) if body else {}
+    except urllib.error.HTTPError as exc:
+        if allow_404 and exc.code == 404:
+            return exc.code, {}
+        body = exc.read().decode("utf-8", errors="replace")
+        raise SystemExit(f"{method} {url} failed with HTTP {exc.code}: {body[:300]}") from exc
+
+
+while time.time() < deadline:
+    _, sources = request("GET", f"/v1/projects/{project_id}/sources")
+    for source in sources:
+        status, latest = request("GET", f"/v1/sources/{source['id']}/syncs/latest", allow_404=True)
+        if status == 404:
+            continue
+        if latest.get("status") in {"success", "partial_success"}:
+            latest_sync = latest
             break
-        time.sleep(5)
+    if latest_sync:
+        break
+    time.sleep(5)
 
-    if not latest_sync:
-        raise SystemExit("Collector sync did not reach success/partial_success before timeout.")
+if not latest_sync:
+    raise SystemExit("Collector sync did not reach success/partial_success before timeout.")
 
-    search = client.post(
-        "/v1/search",
-        headers=headers,
-        json={"project_id": project_id, "query": query, "top_k": 5},
-    )
-    search.raise_for_status()
-    search_payload = search.json()
-    if search_payload.get("total", 0) <= 0:
-        raise SystemExit("Search returned zero evidence after collector sync.")
+_, search_payload = request(
+    "POST",
+    "/v1/search",
+    payload={"project_id": project_id, "query": query, "top_k": 5},
+)
+if search_payload.get("total", 0) <= 0:
+    raise SystemExit("Search returned zero evidence after collector sync.")
 
-    investigate = client.post(
-        "/v1/investigate",
-        headers=headers,
-        json={"project_id": project_id, "query": query, "top_k": 5},
-    )
-    investigate.raise_for_status()
-    readiness = client.get(f"/v1/projects/{project_id}/readiness", headers=headers)
-    readiness.raise_for_status()
+investigate_status, _ = request(
+    "POST",
+    "/v1/investigate",
+    payload={"project_id": project_id, "query": query, "top_k": 5},
+)
+_, readiness = request("GET", f"/v1/projects/{project_id}/readiness")
 
-    print("Azure Smoke Summary")
-    print(f"  api_url: {api_url}")
-    print(f"  project_id: {project_id}")
-    print(f"  sync_status: {latest_sync.get('status')}")
-    print(f"  search_results: {search_payload.get('total', 0)}")
-    print(f"  top_evidence_paths: {[r.get('document_path') for r in search_payload.get('results', [])[:3]]}")
-    print(f"  investigation_status: {investigate.status_code}")
-    print(f"  readiness_score: {readiness.json().get('score')}")
+print("Azure Smoke Summary")
+print(f"  api_url: {api_url}")
+print(f"  project_id: {project_id}")
+print(f"  sync_status: {latest_sync.get('status')}")
+print(f"  search_results: {search_payload.get('total', 0)}")
+print(f"  top_evidence_paths: {[r.get('document_path') for r in search_payload.get('results', [])[:3]]}")
+print(f"  investigation_status: {investigate_status}")
+print(f"  readiness_score: {readiness.get('score')}")
 PY
