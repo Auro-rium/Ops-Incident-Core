@@ -68,7 +68,12 @@ def request(method: str, path_or_url: str, *, token: str | None = None, payload:
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
             body = response.read().decode("utf-8")
-            return json.loads(body) if body else {}
+            if not body:
+                return {}
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError:
+                return {"_raw": body[:300]}
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise SystemExit(f"{method} {url} failed with HTTP {exc.code}: {body[:300]}") from exc
@@ -168,7 +173,12 @@ def request(method: str, path: str, *, payload: dict | None = None, allow_404: b
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
             body = response.read().decode("utf-8")
-            return response.status, json.loads(body) if body else {}
+            if not body:
+                return response.status, {}
+            try:
+                return response.status, json.loads(body)
+            except json.JSONDecodeError:
+                return response.status, {"_raw": body[:300]}
     except urllib.error.HTTPError as exc:
         if allow_404 and exc.code == 404:
             return exc.code, {}
