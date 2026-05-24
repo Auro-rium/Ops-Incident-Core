@@ -58,8 +58,9 @@ class LLMProvider:
         payload: dict[str, Any] = {
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
         }
+        token_limit_key = "max_completion_tokens" if self.azure_mode else "max_tokens"
+        payload[token_limit_key] = max_tokens
         if not self.azure_mode:
             payload["model"] = self.model
         if response_format:
@@ -77,6 +78,24 @@ class LLMProvider:
                 else:
                     url = f"{self.base_url}/chat/completions"
                 resp = await client.post(url, headers=headers, json=payload)
+                if (
+                    self.azure_mode
+                    and resp.status_code == 400
+                    and token_limit_key == "max_completion_tokens"
+                    and "max_completion_tokens" in resp.text
+                    and "Unsupported parameter" in resp.text
+                ):
+                    payload["max_tokens"] = payload.pop("max_completion_tokens")
+                    token_limit_key = "max_tokens"
+                    resp = await client.post(url, headers=headers, json=payload)
+                if (
+                    self.azure_mode
+                    and resp.status_code == 400
+                    and "temperature" in resp.text
+                    and "Unsupported value" in resp.text
+                ):
+                    payload.pop("temperature", None)
+                    resp = await client.post(url, headers=headers, json=payload)
                 latency_ms = int((time.time() - start) * 1000)
                 observe_latency("llm", latency_ms)
                 observe_latency("llm_latency", latency_ms)
