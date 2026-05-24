@@ -118,14 +118,14 @@ jobs:
       - name: Checkout Collector
         uses: actions/checkout@v4
         with:
-          repository: Auro-rium/OpsIncident-Collector
+          repository: Auro-rium/Ops-Incident-Collector
           path: OpsIncident-Collector
           token: ${{ secrets.GH_READ_TOKEN || github.token }}
 
       - name: Checkout Frontend
         uses: actions/checkout@v4
         with:
-          repository: Auro-rium/incidentops-frontend
+          repository: Auro-rium/Ops-Incident-frontend
           path: incidentops-frontend
           token: ${{ secrets.GH_READ_TOKEN || github.token }}
 
