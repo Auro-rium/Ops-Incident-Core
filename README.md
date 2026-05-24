@@ -1,324 +1,178 @@
 # IncidentOps Core
 
-IncidentOps Core is a production-style, collector-first RAG backend for incident investigation. It turns engineering evidence such as logs, code, deploy history, runbooks, API docs, database notes, and previous incident reports into searchable, cited evidence for backend and SRE teams.
+IncidentOps Core is the backend for an applied-AI incident investigation product. It receives normalized engineering evidence from the Collector, indexes it in Postgres/pgvector, and exposes cited search, investigation, readiness, workflow, eval, metrics, and MCP interfaces.
 
-The system is not a generic PDF chatbot. It is an incident investigation backend designed around source-aware ingestion, hybrid retrieval, confidence scoring, missing-data warnings, workflow runs, auditability, and deployment discipline. Fancy words, yes, but this time they map to actual running services instead of decorative README fog.
+The active deployment target is **Azure only**.
 
-## What it does
-
-IncidentOps Core answers operational questions such as:
+## System Repos
 
 ```text
-Why did /checkout latency spike after the last deploy?
-What changed before the timeout errors started?
-Which logs, deploys, docs, and previous incidents support this hypothesis?
-What evidence is missing before we can trust the root-cause claim?
+Ops-Incident-Core        FastAPI API, worker, MCP server, retrieval, investigation
+Ops-Incident-Collector   deterministic source inspection, redaction, normalization, Core sync
+Ops-Incident-frontend    operator console
 ```
 
-It returns:
-
-- cited evidence
-- likely root-cause hypothesis
-- confidence and confidence reasons
-- missing data and unknowns
-- affected services
-- timeline and hypotheses
-- workflow run events
-- report/issue draft state behind approval gates
-
-## Repository role
-
-This repository is the **Core Backend**.
-
-The full IncidentOps system is split into three repositories:
+## Production Path
 
 ```text
-Ops-Incident-Core        FastAPI backend, workers, database, retrieval, investigation
-Ops-Incident-Collector   deterministic edge collector and Core sync client
-Ops-Incident-frontend    operator console UI
+Collector
+  -> normalized document batches
+  -> Core API
+  -> Postgres + pgvector
+  -> Redis-backed worker/runtime queue
+  -> search / investigate / readiness / workflow
+  -> MCP tools over Core APIs
 ```
 
-Core owns:
+Core does not own source-folder crawling in production. Local folder ingest remains a disabled-by-default compatibility path for tests and controlled development only.
 
-- API contract
-- authentication and RBAC
-- source and collector registry
+## Azure Deployment
+
+Azure deployment assets live under:
+
+- `infra/azure/`
+- `.github/workflows/deploy-azure.yml`
+- `docs/azure-deployment.md`
+- `docs/azure-cost-guardrails.md`
+
+Azure services used:
+
+- Azure Container Registry
+- Azure Container Apps for API, worker, MCP server, Collector, frontend, migration job, bootstrap job
+- Azure Database for PostgreSQL Flexible Server with pgvector enabled by migration
+- Azure Cache for Redis
+- Azure Key Vault
+- Azure Monitor / Log Analytics
+
+Services intentionally not used:
+
+- AKS
+- NAT Gateway
+- multi-region deployment
+
+## Azure OpenAI / Foundry
+
+Production and staging require Azure OpenAI / Foundry configuration:
+
+```text
+REQUIRE_AZURE_OPENAI=true
+AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.openai.azure.com
+AZURE_OPENAI_API_KEY=...
+AZURE_OPENAI_API_VERSION=2024-10-21
+AZURE_OPENAI_CHAT_DEPLOYMENT=...
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT=...
+EMBEDDING_MODEL=azure-openai
+EMBEDDING_DIM=384
+```
+
+The database vector column is currently `Vector(384)`, so the Azure embedding deployment must support the requested `dimensions=384` parameter.
+
+Unit and integration tests still use deterministic local-hash embeddings so CI does not require paid model credentials.
+
+## MCP Server
+
+Core includes a real MCP server process:
+
+```bash
+python -m incidentops.mcp.server
+```
+
+Production Azure runs it as a separate Container App using streamable HTTP transport. The MCP server is an interface layer only. It does not ingest data, normalize files, bypass Core auth/RBAC, or diagnose locally. It delegates to Core APIs using a scoped Core access token.
+
+Supported MCP tools:
+
+- `get_capabilities`
+- `get_readiness_report`
+- `search_evidence`
+- `investigate_incident`
+- `get_sync_status`
+- `get_latest_source_sync`
+- `get_run_events`
+
+Required MCP settings:
+
+```text
+MCP_CORE_API_URL=https://YOUR-CORE-API
+MCP_TOKEN=<Core access token>
+MCP_TRANSPORT=streamable-http
+MCP_HOST=0.0.0.0
+MCP_PORT=8080
+MCP_PATH=/mcp
+```
+
+## Core API Capabilities
+
+- JWT auth and project-scoped RBAC
+- source registry
+- collector registration
 - sync lifecycle
-- normalized document batch ingestion
-- indexing and chunk storage
+- normalized batch ingestion
+- idempotent indexing by `external_id` and `content_hash`
 - hybrid retrieval
-- investigation responses
-- workflow runs and approvals
-- evals, metrics, readiness, audit events
-- production deployment assets
-
-Collector owns local data access, filtering, redaction, normalization, and upload. The frontend owns the operator experience. Splitting them is not aesthetic minimalism. It prevents the backend from becoming a junk drawer with Docker Compose wallpaper.
-
-## Core architecture
-
-```text
-Collector or local/dev ingest
-  -> NormalizedDocument[]
-  -> validation and idempotent indexer
-  -> documents + chunks in Postgres
-  -> pgvector + full-text retrieval
-  -> evidence packing + citations
-  -> investigation service
-  -> workflow runs, events, approvals, evals, metrics
-```
-
-The production ingestion path is Collector-first:
-
-1. Create a project.
-2. Create/register a source.
-3. Register a collector.
-4. Start a source sync.
-5. Send normalized document batches.
-6. Finish the sync.
-7. Search or investigate over indexed evidence.
-
-Core exposes `/v1/capabilities` so Collector and tooling can discover supported features, limits, and endpoint paths.
-
-## Normalized document contract
-
-Collector sends documents shaped like:
-
-```json
-{
-  "external_id": "logs/app.log",
-  "path": "logs/app.log",
-  "source_type": "logs",
-  "content": "timestamped log content...",
-  "content_hash": "sha256...",
-  "metadata": {
-    "service_name": "orders",
-    "endpoint": "/v1/orders",
-    "deploy_hash": "abcdef1234567890"
-  },
-  "size_bytes": 1234,
-  "modified_at": "2026-05-21T10:00:00Z"
-}
-```
-
-Batch ingestion is idempotent by source and external identity:
-
-- same external ID and same content hash -> skipped unchanged
-- same external ID and new content hash -> document updated and old chunks replaced
-- bad document -> per-document error, not whole batch failure
-- repeated sync -> no duplicate chunks
-
-## Retrieval and investigation
-
-Core uses hybrid retrieval instead of pretending embeddings alone can remember deploy hashes, endpoints, and error codes like a responsible adult.
-
-Retrieval combines:
-
-- pgvector semantic search
-- Postgres full-text search
-- metadata filters and boosts
-- optional reranking
-- evidence packing
-- citation building
-- secret redaction and prompt-injection marking
-
-Investigation then performs incident-specific reasoning over evidence:
-
-- task classification
-- entity extraction
-- evidence retrieval
-- timeline construction
-- hypothesis generation
-- confidence scoring
-- missing-data detection
-- cited answer generation
-
-When evidence is weak, Core does not fake certainty. It returns an insufficient-evidence root cause with citations and missing-data guidance.
-
-## Security model
-
-Core includes:
-
-- JWT authentication
-- bcrypt password hashing
-- explicit admin bootstrap
-- project-scoped RBAC
+- cited answers
+- incident investigation
+- readiness report
+- deterministic workflow runs and approvals
+- eval runs
 - audit events
-- source config secret rejection
-- redaction and output sanitization
-- prompt-injection inspection for retrieved content
-- request and batch limits
-- Redis-backed rate limit/queue paths for production
-- local folder ingest disabled by default in production
-- canonical allowed-root validation for local/dev ingest
+- Prometheus-style metrics
+- OpenTelemetry hooks
 
-Production must not rely on demo-mode bypasses or runtime `create_all` schema creation.
-
-## Runtime services
-
-Core can run as separate API and worker processes.
+## Required Production Settings
 
 ```text
-core-api       FastAPI API
-core-worker    background workflow/eval worker
-postgres       PostgreSQL + pgvector
-redis          queue/rate-limit/runtime backing service
-```
-
-Local/development can use inline execution:
-
-```text
-WORKER_MODE=inline
-JOB_QUEUE_BACKEND=inline
-```
-
-Production-style runtime should use queue mode:
-
-```text
+APP_ENV=production
+DB_CREATE_ALL=false
+DB_REQUIRE_MIGRATIONS=true
 WORKER_MODE=queue
 JOB_QUEUE_BACKEND=redis
 RATE_LIMIT_BACKEND=redis
+METRICS_BACKEND=prometheus
+METRICS_PUBLIC=false
+LOCAL_INGEST_ENABLED=false
+ENABLE_LOCAL_INGEST=false
+ALLOW_LOCAL_SEED_ADMIN=false
+ALLOW_DEMO_PROJECT_BYPASS=false
+DEMO_MODE_PUBLIC=false
+ALLOW_WILDCARD_CORS=false
 ```
 
-## Local quick start
+Production must run Alembic migrations before API startup. The API must not use SQLAlchemy `create_all`.
+
+## Azure Commands
 
 ```bash
-cp .env.example .env
-alembic upgrade head
-python scripts/check_migrations.py
-uvicorn apps.api.main:app --reload --port 8000
+scripts/azure_login_check.sh
+scripts/azure_build_push_images.sh
+scripts/azure_deploy.sh
+scripts/azure_run_migrations.sh
+scripts/azure_bootstrap_admin.sh
+scripts/azure_smoke.sh
 ```
 
-Start a worker separately when using queue mode:
+Teardown:
 
 ```bash
-python -m incidentops.worker
+CONFIRM=delete-$AZURE_RESOURCE_GROUP scripts/azure_teardown.sh
 ```
 
-Run tests:
+## Local Test Commands
 
-Production AWS deployment assets live under:
-
-- `infra/terraform/`
-- `.github/workflows/deploy-core.yml`
-- `docs/aws-deployment.md`
-
-The AWS deployment uses ECS Fargate for separate API and worker services, RDS PostgreSQL, ElastiCache Redis, ECR, Secrets Manager, an Application Load Balancer, CloudWatch logs, a migration one-off task, and `smoke_prod.py` after deploy.
-
-Production must run Alembic migrations before service rollout and must not use SQLAlchemy `create_all`.
-
-For a budget-safe single-instance flagship demo, see [docs/ec2-demo-deployment.md](docs/ec2-demo-deployment.md). That path runs Core, worker, Postgres pgvector, Redis, Collector, the separate `Ops-Incident-frontend` repo, and Nginx on one EC2 instance with Docker Compose and avoids RDS, ElastiCache, ALB, NAT Gateway, and ECS.
-
-Expected EC2 sibling repo layout:
-
-```text
-~/incidentops/
-  Ops-Incident-Core/
-  Ops-Incident-Collector/
-  Ops-Incident-frontend/
-```
-
-Deploy with:
+Local commands are for development and CI verification, not production deployment:
 
 ```bash
-scripts/deploy_ec2_demo.sh \
-  --public-url http://YOUR_EC2_PUBLIC_DNS_OR_IP \
-  --collector-repo ../Ops-Incident-Collector \
-  --frontend-repo ../Ops-Incident-frontend
+uv run --extra dev ruff check .
+uv run --extra dev python -m pytest tests/unit tests/integration -q
+uv run --extra dev python scripts/check_migrations.py
 ```
 
-## Frontend
+## Documentation
 
-Run a local smoke test:
-
-```bash
-python scripts/smoke_local.py \
-  --base-url http://127.0.0.1:8000 \
-  --data-path tests/fixtures/basic_incident \
-  --query "Why did GET /v1/orders slow down after deploy abc1234?" \
-  --create-run
-```
-
-Run production-style smoke:
-
-```bash
-python scripts/smoke_prod.py \
-  --base-url http://127.0.0.1:8000 \
-  --email admin@incidentops.local \
-  --password incidentops \
-  --query "What does this tiny service evidence say?"
-```
-
-## EC2 demo deployment
-
-The budget-safe demo stack runs the full system on one EC2 instance using Docker Compose:
-
-```text
-Nginx public on 80/443
-Frontend console
-Core API
-Core worker
-Postgres pgvector
-Redis
-Collector daemon
-```
-
-Expected EC2 sibling repo layout:
-
-```text
-~/incidentops/
-  Ops-Incident-Core/
-  Ops-Incident-Collector/
-  Ops-Incident-frontend/
-```
-
-Deploy with:
-
-```bash
-scripts/deploy_ec2_demo.sh \
-  --public-url http://YOUR_EC2_PUBLIC_DNS_OR_IP \
-  --collector-repo ../Ops-Incident-Collector \
-  --frontend-repo ../Ops-Incident-frontend
-```
-
-Smoke:
-
-```bash
-scripts/smoke_ec2_demo.sh
-```
-
-See [`docs/ec2-demo-deployment.md`](docs/ec2-demo-deployment.md) for the EC2 runbook.
-
-## AWS managed deployment
-
-This repository also includes deployment assets for a more production-shaped AWS path:
-
-- ECS Fargate API service
-- ECS Fargate worker service
-- RDS PostgreSQL
-- ElastiCache/Redis or Valkey
-- ECR
-- Secrets Manager
-- CloudWatch logs
-- ALB
-- migration one-off task
-- GitHub Actions CI/CD
-
-See:
-
-- [`docs/deployment-overview.md`](docs/deployment-overview.md)
-- [`docs/aws-deployment.md`](docs/aws-deployment.md)
-- [`docs/operations-runbook.md`](docs/operations-runbook.md)
-
-## Documentation map
-
-- [`docs/system-architecture.md`](docs/system-architecture.md): system design and data flow
-- [`docs/collector-core-contract.md`](docs/collector-core-contract.md): Collector to Core API contract
-- [`docs/operations-runbook.md`](docs/operations-runbook.md): operating, debugging, and demoing Core
-- [`docs/deployment-overview.md`](docs/deployment-overview.md): deployment options and promotion path
-- [`docs/ec2-demo-deployment.md`](docs/ec2-demo-deployment.md): one-box AWS EC2 demo deployment
-
-## Current maturity
-
-IncidentOps Core has been validated as a deployed AWS EC2 demo stack with Collector sync, search, investigation, citations, and workflow runs working end-to-end. It is production-style and portfolio/flagship ready. It is not yet a fully managed SaaS deployment until domain, HTTPS, managed DB, alerting, backups, and long-running CI/CD operations are completed.
-
-That distinction matters. Overclaiming is how good engineering turns into brochure fiction.
+- [Azure deployment](docs/azure-deployment.md)
+- [Azure cost guardrails](docs/azure-cost-guardrails.md)
+- [Deployment operations](docs/deployment.md)
+- [Collector/Core contract](docs/collector-core-contract.md)
+- [Security](docs/security.md)
+- [Retrieval](docs/retrieval.md)
+- [Agent workflow](docs/agent_workflow.md)
+- [Evals](docs/evals.md)

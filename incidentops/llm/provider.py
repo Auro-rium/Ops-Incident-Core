@@ -15,9 +15,28 @@ logger = logging.getLogger("incidentops.llm.provider")
 class LLMProvider:
     def __init__(self):
         settings = get_settings()
-        self.base_url = settings.llm_base_url.rstrip("/")
-        self.api_key = settings.llm_api_key
-        self.model = settings.llm_model
+        azure_key = settings.azure_openai_api_key.strip()
+        self.azure_mode = bool(
+            settings.azure_openai_endpoint
+            and azure_key
+            and azure_key != "disabled"
+            and settings.azure_openai_chat_deployment
+        )
+        if self.azure_mode:
+            self.base_url = settings.azure_openai_endpoint.rstrip("/")
+            self.api_key = settings.azure_openai_api_key
+            self.model = settings.azure_openai_chat_deployment
+            self.api_version = settings.azure_openai_api_version
+        elif not settings.is_production_like:
+            self.base_url = settings.llm_base_url.rstrip("/")
+            self.api_key = settings.llm_api_key
+            self.model = settings.llm_model
+            self.api_version = ""
+        else:
+            self.base_url = ""
+            self.api_key = ""
+            self.model = ""
+            self.api_version = ""
         self.timeout = settings.llm_timeout_seconds
         self.available = bool(self.api_key)
 
@@ -31,13 +50,18 @@ class LLMProvider:
         if not self.available:
             logger.warning("LLM not configured — skipping generation")
             return None
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json"}
+        if self.azure_mode:
+            headers["api-key"] = self.api_key
+        else:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         payload: dict[str, Any] = {
-            "model": self.model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if not self.azure_mode:
+            payload["model"] = self.model
         if response_format:
             payload["response_format"] = response_format
         try:
@@ -45,7 +69,14 @@ class LLMProvider:
                 import time
 
                 start = time.time()
-                resp = await client.post(f"{self.base_url}/chat/completions", headers=headers, json=payload)
+                if self.azure_mode:
+                    url = (
+                        f"{self.base_url}/openai/deployments/{self.model}/chat/completions"
+                        f"?api-version={self.api_version}"
+                    )
+                else:
+                    url = f"{self.base_url}/chat/completions"
+                resp = await client.post(url, headers=headers, json=payload)
                 latency_ms = int((time.time() - start) * 1000)
                 observe_latency("llm", latency_ms)
                 observe_latency("llm_latency", latency_ms)

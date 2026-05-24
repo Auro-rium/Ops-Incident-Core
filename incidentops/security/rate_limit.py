@@ -57,7 +57,7 @@ def get_rate_limiter(settings: Settings) -> RateLimiter:
     global _redis_limiter
     if settings.rate_limit_backend == "redis":
         if _redis_limiter is None:
-            _redis_limiter = RedisRateLimiter(settings.redis_url)
+            _redis_limiter = RedisRateLimiter(settings.resolved_redis_url)
         return _redis_limiter
     return _memory_limiter
 

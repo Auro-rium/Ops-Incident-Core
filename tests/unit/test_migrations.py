@@ -48,6 +48,11 @@ async def test_production_startup_does_not_call_create_all(monkeypatch):
             local_ingest_enabled=False,
             cors_allow_origins="https://incidentops.example.com",
             allow_wildcard_cors=False,
+            embedding_model="azure-openai",
+            azure_openai_endpoint="https://incidentops.openai.azure.com",
+            azure_openai_api_key="x" * 40,
+            azure_openai_chat_deployment="chat",
+            azure_openai_embedding_deployment="embeddings",
         )
     )
 
@@ -138,3 +143,4 @@ def test_production_validation_rejects_unsafe_security_defaults():
     assert any("JOB_QUEUE_BACKEND" in error for error in errors)
     assert any("METRICS_BACKEND" in error for error in errors)
     assert any("LOCAL_INGEST_ENABLED" in error for error in errors)
+    assert any("Azure OpenAI" in error for error in errors)

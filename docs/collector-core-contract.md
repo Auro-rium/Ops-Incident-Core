@@ -57,7 +57,7 @@ Core uses bearer authentication:
 Authorization: Bearer <token>
 ```
 
-For the EC2 demo, the deployment script creates a runtime token for Collector. For a long-running production setup, use scoped service credentials and rotate them. Do not put raw secrets in source configs.
+For Azure deployment, store the Collector token in Key Vault and inject it into the Collector Container App. Use scoped service credentials and rotate them. Do not put raw secrets in source configs.
 
 ## Source registration
 
@@ -71,7 +71,7 @@ Payload:
 
 ```json
 {
-  "name": "ec2-demo-fixture",
+  "name": "azure-demo-source",
   "source_type": "filesystem",
   "sync_mode": "manual",
   "config": {
@@ -94,8 +94,8 @@ Payload:
 
 ```json
 {
-  "name": "ec2-demo-collector",
-  "environment": "ec2-demo",
+  "name": "azure-demo-collector",
+  "environment": "azure-demo",
   "version": "0.1.0"
 }
 ```
@@ -270,7 +270,7 @@ Core guarantees:
 - bad documents do not fail the whole batch
 - no duplicate chunks for unchanged retries
 
-Validated EC2 demo behavior:
+Validated integration behavior:
 
 ```text
 first sync: files seen 9, documents synced 6, search results 8

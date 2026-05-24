@@ -93,7 +93,6 @@ def get_job_queue(settings: Settings) -> JobQueue:
     global _redis_queue
     if settings.job_queue_backend == "redis":
         if _redis_queue is None:
-            _redis_queue = RedisQueue(settings.redis_url)
+            _redis_queue = RedisQueue(settings.resolved_redis_url)
         return _redis_queue
     return _inline_queue
-

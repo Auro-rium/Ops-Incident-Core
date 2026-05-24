@@ -22,6 +22,8 @@ async def get_capabilities(settings: Settings = Depends(get_settings_dep)) -> Ca
             "search": True,
             "investigate": True,
             "runs": True,
+            "mcp": True,
+            "azure_openai_required": settings.is_production_like and settings.require_azure_openai,
         },
         limits={
             "max_batch_size": settings.max_batch_bytes,
@@ -40,5 +42,7 @@ async def get_capabilities(settings: Settings = Depends(get_settings_dep)) -> Ca
             "runs": "/v1/runs",
             "run_status": "/v1/runs/{run_id}",
             "run_events": "/v1/runs/{run_id}/events",
+            "readiness": "/v1/projects/{project_id}/readiness",
+            "mcp": settings.mcp_path,
         },
     )

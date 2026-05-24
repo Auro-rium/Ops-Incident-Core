@@ -4,6 +4,8 @@ Centralized application settings.
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -29,6 +31,12 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "gpt-4o"
     llm_timeout_seconds: int = 60
+    azure_openai_endpoint: str = ""
+    azure_openai_api_key: str = ""
+    azure_openai_api_version: str = "2024-10-21"
+    azure_openai_chat_deployment: str = ""
+    azure_openai_embedding_deployment: str = ""
+    require_azure_openai: bool = True
 
     vector_weight: float = 0.45
     lexical_weight: float = 0.35
@@ -56,6 +64,11 @@ class Settings(BaseSettings):
     rate_limit_backend: str = "memory"
     rate_limit_window_seconds: int = 60
     redis_url: str = "redis://localhost:6379/0"
+    redis_host: str = ""
+    redis_port: int = 6379
+    redis_password: str = ""
+    redis_ssl: bool = False
+    redis_database: int = 0
     max_query_length: int = 4096
     max_top_k: int = 20
     max_retrieved_chunks: int = 20
@@ -98,14 +111,51 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORS_ALLOW_ORIGINS", "CORS_ORIGINS"),
     )
     allow_wildcard_cors: bool = True
+    mcp_core_api_url: str = Field(
+        "http://127.0.0.1:8000",
+        validation_alias=AliasChoices("MCP_CORE_API_URL", "INCIDENTOPS_CORE_API_URL"),
+    )
+    mcp_token: str = Field("", validation_alias=AliasChoices("MCP_TOKEN", "INCIDENTOPS_MCP_TOKEN"))
+    mcp_transport: str = "stdio"
+    mcp_host: str = "127.0.0.1"
+    mcp_port: int = 8080
+    mcp_path: str = "/mcp"
 
     @property
     def llm_available(self) -> bool:
-        return bool(self.llm_api_key)
+        return self.azure_openai_configured or (not self.is_production_like and bool(self.llm_api_key))
+
+    @property
+    def azure_openai_configured(self) -> bool:
+        azure_key = self.azure_openai_api_key.strip()
+        return bool(
+            self.azure_openai_endpoint
+            and azure_key
+            and azure_key != "disabled"
+            and self.azure_openai_chat_deployment
+        )
+
+    @property
+    def azure_openai_embeddings_configured(self) -> bool:
+        azure_key = self.azure_openai_api_key.strip()
+        return bool(
+            self.azure_openai_endpoint
+            and azure_key
+            and azure_key != "disabled"
+            and self.azure_openai_embedding_deployment
+        )
 
     @property
     def supported_extensions_set(self) -> set[str]:
         return {item.strip().lower() for item in self.supported_extensions.split(",") if item.strip()}
+
+    @property
+    def resolved_redis_url(self) -> str:
+        if self.redis_host.strip() and self.redis_password.strip():
+            scheme = "rediss" if self.redis_ssl else "redis"
+            password = quote(self.redis_password, safe="")
+            return f"{scheme}://:{password}@{self.redis_host.strip()}:{self.redis_port}/{self.redis_database}"
+        return self.redis_url
 
     @property
     def normalized_app_env(self) -> str:

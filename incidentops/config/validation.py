@@ -40,7 +40,7 @@ def production_settings_errors(settings: Settings) -> list[str]:
         errors.append("WORKER_MODE=queue is required in staging/production")
     if settings.job_queue_backend != "redis":
         errors.append("JOB_QUEUE_BACKEND=redis is required in staging/production")
-    if settings.job_queue_backend == "redis" and not settings.redis_url.strip():
+    if settings.job_queue_backend == "redis" and not settings.resolved_redis_url.strip():
         errors.append("REDIS_URL is required when JOB_QUEUE_BACKEND=redis")
     if settings.metrics_backend == "memory":
         errors.append("METRICS_BACKEND=memory is not allowed as the only metrics backend in staging/production")
@@ -50,4 +50,16 @@ def production_settings_errors(settings: Settings) -> list[str]:
         errors.append("CORS wildcard is disabled but CORS_ALLOW_ORIGINS=*")
     if settings.cors_origins_list == ["*"] and settings.allow_wildcard_cors:
         errors.append("CORS wildcard is not allowed in staging/production")
+    if settings.require_azure_openai and not settings.azure_openai_configured:
+        errors.append(
+            "Azure OpenAI/Foundry chat deployment is required in staging/production "
+            "when REQUIRE_AZURE_OPENAI=true"
+        )
+    if settings.require_azure_openai and not settings.azure_openai_embeddings_configured:
+        errors.append(
+            "Azure OpenAI/Foundry embedding deployment is required in staging/production "
+            "when REQUIRE_AZURE_OPENAI=true"
+        )
+    if settings.require_azure_openai and not settings.embedding_model.startswith("azure-openai"):
+        errors.append("EMBEDDING_MODEL must be azure-openai in staging/production")
     return errors

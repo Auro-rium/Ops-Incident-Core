@@ -1,4 +1,4 @@
-.PHONY: migrate migration-check db-current db-history db-downgrade worker smoke-prod metrics-check docker-build terraform-fmt terraform-validate ec2-demo-deploy ec2-demo-smoke ec2-demo-backup ec2-demo-teardown
+.PHONY: migrate migration-check db-current db-history db-downgrade worker mcp-server smoke-prod metrics-check docker-build azure-login-check azure-build-push azure-deploy azure-migrate azure-bootstrap-admin azure-smoke azure-teardown
 
 PYTHON ?= python
 ALEMBIC ?= alembic
@@ -6,9 +6,10 @@ API_BASE_URL ?= http://127.0.0.1:8000
 SMOKE_EMAIL ?= admin@incidentops.local
 SMOKE_PASSWORD ?= incidentops
 DOCKER_IMAGE ?= incidentops-core:local
-EC2_PUBLIC_URL ?= http://127.0.0.1
-EC2_COLLECTOR_REPO ?= ../Ops-Incident-Collector
-EC2_FRONTEND_REPO ?= ../Ops-Incident-frontend
+AZURE_RESOURCE_GROUP ?= incidentops-demo-rg
+AZURE_LOCATION ?= eastus
+ACR_NAME ?=
+IMAGE_TAG ?= $(shell git rev-parse --short HEAD)
 
 migrate:
 	$(ALEMBIC) upgrade head
@@ -28,6 +29,9 @@ db-downgrade:
 worker:
 	$(PYTHON) -m incidentops.worker
 
+mcp-server:
+	$(PYTHON) -m incidentops.mcp.server
+
 smoke-prod:
 	$(PYTHON) scripts/smoke_prod.py --base-url $(API_BASE_URL) --email $(SMOKE_EMAIL) --password $(SMOKE_PASSWORD) --query "What does this tiny service evidence say?"
 
@@ -37,21 +41,23 @@ metrics-check:
 docker-build:
 	docker build -t $(DOCKER_IMAGE) .
 
-terraform-fmt:
-	terraform -chdir=infra/terraform fmt -recursive
+azure-login-check:
+	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) AZURE_LOCATION=$(AZURE_LOCATION) ./scripts/azure_login_check.sh
 
-terraform-validate:
-	terraform -chdir=infra/terraform init -backend=false
-	terraform -chdir=infra/terraform validate
+azure-build-push:
+	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) AZURE_LOCATION=$(AZURE_LOCATION) ACR_NAME=$(ACR_NAME) IMAGE_TAG=$(IMAGE_TAG) ./scripts/azure_build_push_images.sh
 
-ec2-demo-deploy:
-	./scripts/deploy_ec2_demo.sh --public-url $(EC2_PUBLIC_URL) --collector-repo $(EC2_COLLECTOR_REPO) --frontend-repo $(EC2_FRONTEND_REPO)
+azure-deploy:
+	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) AZURE_LOCATION=$(AZURE_LOCATION) ACR_NAME=$(ACR_NAME) IMAGE_TAG=$(IMAGE_TAG) ./scripts/azure_deploy.sh
 
-ec2-demo-smoke:
-	./scripts/smoke_ec2_demo.sh
+azure-migrate:
+	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) ./scripts/azure_run_migrations.sh
 
-ec2-demo-backup:
-	./scripts/backup_db.sh
+azure-bootstrap-admin:
+	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) ./scripts/azure_bootstrap_admin.sh
 
-ec2-demo-teardown:
-	./scripts/teardown_ec2_demo.sh
+azure-smoke:
+	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) ./scripts/azure_smoke.sh
+
+azure-teardown:
+	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) ./scripts/azure_teardown.sh

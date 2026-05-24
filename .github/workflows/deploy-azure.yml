@@ -1,0 +1,159 @@
+name: Deploy Azure Demo
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to build/deploy. Defaults to commit SHA."
+        required: false
+      deploy_collector:
+        description: "Collector needs INCIDENTOPS_TOKEN and INCIDENTOPS_PROJECT_ID configured."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP || 'incidentops-demo-rg' }}
+  AZURE_LOCATION: ${{ vars.AZURE_LOCATION || 'eastus' }}
+  ACR_NAME: ${{ vars.ACR_NAME }}
+  IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
+  NAME_PREFIX: ${{ vars.AZURE_NAME_PREFIX || 'incidentops' }}
+  ENVIRONMENT_NAME: ${{ vars.AZURE_ENVIRONMENT_NAME || 'demo' }}
+  CORS_ORIGINS: ${{ vars.CORS_ORIGINS || 'https://CHANGE-ME' }}
+
+jobs:
+  core-tests:
+    name: Core tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: incidentops
+          POSTGRES_PASSWORD: incidentops
+          POSTGRES_DB: incidentops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U incidentops"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    env:
+      APP_ENV: local
+      DB_CREATE_ALL: "false"
+      DB_REQUIRE_MIGRATIONS: "true"
+      DATABASE_URL: postgresql+asyncpg://incidentops:incidentops@127.0.0.1:5432/incidentops
+      REDIS_URL: redis://127.0.0.1:6379/0
+      JWT_SECRET: incidentops-local-jwt-secret-change-me
+      ALLOW_LOCAL_SEED_ADMIN: "true"
+      DEMO_MODE_PUBLIC: "false"
+      ALLOW_DEMO_PROJECT_BYPASS: "true"
+      RATE_LIMIT_BACKEND: memory
+      WORKER_MODE: inline
+      JOB_QUEUE_BACKEND: inline
+      METRICS_BACKEND: memory
+      METRICS_PUBLIC: "false"
+      LOCAL_INGEST_ENABLED: "true"
+      LOCAL_INGEST_ALLOWED_ROOTS: ${{ github.workspace }},/tmp
+      EVAL_CASES_ALLOWED_ROOTS: ${{ github.workspace }},/tmp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run --extra dev ruff check .
+      - run: uv run --extra dev alembic upgrade head
+      - run: uv run --extra dev python -m pytest tests/unit tests/integration -q
+
+  deploy:
+    name: Build, deploy, migrate, and smoke Azure
+    runs-on: ubuntu-latest
+    needs: core-tests
+    environment: azure-demo
+    steps:
+      - name: Checkout Core
+        uses: actions/checkout@v4
+        with:
+          path: Ops-Incident-Core
+
+      - name: Checkout Collector
+        uses: actions/checkout@v4
+        with:
+          repository: Auro-rium/OpsIncident-Collector
+          path: OpsIncident-Collector
+          token: ${{ secrets.GH_READ_TOKEN || github.token }}
+
+      - name: Checkout Frontend
+        uses: actions/checkout@v4
+        with:
+          repository: Auro-rium/incidentops-frontend
+          path: incidentops-frontend
+          token: ${{ secrets.GH_READ_TOKEN || github.token }}
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate required variables
+        run: |
+          test -n "$ACR_NAME" || { echo "ACR_NAME repo variable is required"; exit 1; }
+          test -n "${{ secrets.POSTGRES_PASSWORD }}" || { echo "POSTGRES_PASSWORD secret is required"; exit 1; }
+          test -n "${{ secrets.JWT_SECRET }}" || { echo "JWT_SECRET secret is required"; exit 1; }
+          test -n "${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}" || { echo "BOOTSTRAP_ADMIN_EMAIL secret is required"; exit 1; }
+          test -n "${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}" || { echo "BOOTSTRAP_ADMIN_PASSWORD secret is required"; exit 1; }
+          test -n "${{ vars.AZURE_OPENAI_ENDPOINT }}" || { echo "AZURE_OPENAI_ENDPOINT variable is required"; exit 1; }
+          test -n "${{ secrets.AZURE_OPENAI_API_KEY }}" || { echo "AZURE_OPENAI_API_KEY secret is required"; exit 1; }
+          test -n "${{ vars.AZURE_OPENAI_CHAT_DEPLOYMENT }}" || { echo "AZURE_OPENAI_CHAT_DEPLOYMENT variable is required"; exit 1; }
+          test -n "${{ vars.AZURE_OPENAI_EMBEDDING_DEPLOYMENT }}" || { echo "AZURE_OPENAI_EMBEDDING_DEPLOYMENT variable is required"; exit 1; }
+
+      - name: Build and push images
+        working-directory: Ops-Incident-Core
+        env:
+          COLLECTOR_REPO_PATH: ../OpsIncident-Collector
+          FRONTEND_REPO_PATH: ../incidentops-frontend
+        run: scripts/azure_build_push_images.sh
+
+      - name: Deploy Azure resources
+        working-directory: Ops-Incident-Core
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          BOOTSTRAP_ADMIN_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
+          BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
+          INCIDENTOPS_TOKEN: ${{ inputs.deploy_collector && secrets.INCIDENTOPS_TOKEN || '' }}
+          INCIDENTOPS_PROJECT_ID: ${{ inputs.deploy_collector && vars.INCIDENTOPS_PROJECT_ID || '' }}
+          INCIDENTOPS_MCP_TOKEN: ${{ secrets.INCIDENTOPS_MCP_TOKEN || '' }}
+          AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_API_VERSION: ${{ vars.AZURE_OPENAI_API_VERSION || '2024-10-21' }}
+          AZURE_OPENAI_CHAT_DEPLOYMENT: ${{ vars.AZURE_OPENAI_CHAT_DEPLOYMENT }}
+          AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${{ vars.AZURE_OPENAI_EMBEDDING_DEPLOYMENT }}
+        run: scripts/azure_deploy.sh
+
+      - name: Run migrations
+        working-directory: Ops-Incident-Core
+        run: scripts/azure_run_migrations.sh
+
+      - name: Bootstrap admin
+        working-directory: Ops-Incident-Core
+        run: scripts/azure_bootstrap_admin.sh
+
+      - name: Azure smoke
+        working-directory: Ops-Incident-Core
+        env:
+          SMOKE_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
+          SMOKE_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
+        run: scripts/azure_smoke.sh

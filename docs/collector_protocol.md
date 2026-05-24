@@ -90,6 +90,6 @@ Coverage reports whether the sync saw usable logs, code, deploy metadata, previo
 
 Coverage warnings are advisory, not failures.
 
-## Local Ingest
+## Non-Production Compatibility Ingest
 
-`POST /v1/projects/{project_id}/ingest` remains for local development and smoke tests. It is disabled in staging/production, requires an authenticated project admin, only accepts canonical paths under `LOCAL_INGEST_ALLOWED_ROOTS`, reads a server-visible folder, converts files into `NormalizedDocument` objects, and uses the same central indexer as collector batch ingest.
+`POST /v1/projects/{project_id}/ingest` is a compatibility endpoint for controlled tests only. It is disabled in staging/production, requires an authenticated project admin, only accepts canonical paths under `LOCAL_INGEST_ALLOWED_ROOTS`, reads a server-visible folder, converts files into `NormalizedDocument` objects, and uses the same central indexer as collector batch ingest. Production ingestion must use Collector batch sync.

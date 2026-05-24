@@ -2,7 +2,6 @@
 .env.*
 !.env.example
 !.env.production.example
-!deploy/ec2/.env.demo.example
 
 .venv/
 venv/
@@ -33,16 +32,17 @@ apps/web/.next/
 .cache/
 tmp/
 temp/
-deploy/ec2/.env.demo
-deploy/ec2/.env.runtime
-deploy/ec2/backups/
-deploy/ec2/nginx/certs/
+infra/terraform/
 
-# Terraform local state and private variables
+# Local state and private variables
 .terraform/
 *.tfstate
 *.tfstate.*
 terraform.tfvars
 *.auto.tfvars
+infra/azure/.last-deployment.json
+infra/azure/*.parameters.local.json
+.env.azure
+.azure/
 
 .DS_Store

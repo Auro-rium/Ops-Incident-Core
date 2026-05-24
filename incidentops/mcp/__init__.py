@@ -1,0 +1,2 @@
+"""IncidentOps MCP interface."""
+

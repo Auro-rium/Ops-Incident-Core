@@ -67,7 +67,7 @@ collector
   Separate runtime from the Collector repo. Sends normalized evidence to Core.
 
 frontend
-  Separate operator console from the frontend repo in the EC2 demo path.
+  Separate operator console from the frontend repo in the Azure deployment path.
 ```
 
 ## Data model overview
@@ -223,8 +223,8 @@ Readiness is intentionally stricter than liveness. A process being alive is not 
 
 Recommended path:
 
-1. Local development with Docker Compose or direct API/worker.
-2. Budget-safe EC2 demo stack for public demo.
-3. Managed AWS deployment with ECS/RDS/Redis/ALB when budget and operational needs justify it.
+1. CI/local tests for deterministic validation.
+2. Azure demo or staging with Container Apps.
+3. Azure production with the same service split, stronger networking, backups, and monitoring.
 
-The EC2 demo stack is public-demo friendly and budget controlled. The ECS/RDS path is more production-shaped but costs more and should not be left running casually.
+Azure is the only active deployment target.

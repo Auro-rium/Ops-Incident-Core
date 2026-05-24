@@ -1,244 +1,135 @@
 # Operations Runbook
 
-This runbook covers operating and debugging IncidentOps Core in local, EC2 demo, and production-style environments.
+This runbook covers IncidentOps Core on Azure Container Apps.
 
-## Golden rule
-
-Do not change product logic during an incident or demo failure unless the system is genuinely broken and the fix is understood. Most demo failures are configuration, secrets, ports, containers, migrations, or stale volumes. Software loves making small mistakes look like philosophical problems.
-
-## Basic health checks
-
-Liveness:
+## Health Checks
 
 ```bash
-curl http://HOST/health
+curl https://CORE_API_URL/health
+curl https://CORE_API_URL/ready
+curl https://CORE_API_URL/v1/capabilities
 ```
 
-Readiness:
-
-```bash
-curl http://HOST/ready
-```
-
-Capabilities:
-
-```bash
-curl http://HOST/api/v1/capabilities
-```
-
-Direct local API may use `/v1/capabilities`; EC2 demo through Nginx uses `/api/v1/capabilities`.
-
-Expected readiness includes:
+Expected readiness:
 
 - database reachable
 - pgvector extension available
 - required tables and columns present
 - Alembic revision at head
 
-## EC2 demo checks
-
-SSH:
+## Azure Checks
 
 ```bash
-ssh -i ~/.ssh/YOUR_KEY.pem ubuntu@EC2_PUBLIC_IP
+scripts/azure_login_check.sh
+scripts/azure_smoke.sh
 ```
 
-Stack status:
+Container App status:
 
 ```bash
-cd ~/incidentops/Ops-Incident-Core
-docker compose -f docker-compose.ec2-demo.yml ps
-```
-
-Smoke:
-
-```bash
-scripts/smoke_ec2_demo.sh
+az containerapp list \
+  --resource-group "$AZURE_RESOURCE_GROUP" \
+  --query "[].{name:name,provisioningState:properties.provisioningState,runningStatus:properties.runningStatus}" \
+  --output table
 ```
 
 Logs:
 
 ```bash
-docker compose -f docker-compose.ec2-demo.yml logs nginx --tail=100
-docker compose -f docker-compose.ec2-demo.yml logs api --tail=150
-docker compose -f docker-compose.ec2-demo.yml logs core-worker --tail=150
-docker compose -f docker-compose.ec2-demo.yml logs collector --tail=150
-docker compose -f docker-compose.ec2-demo.yml logs postgres --tail=100
-docker compose -f docker-compose.ec2-demo.yml logs redis --tail=100
-docker compose -f docker-compose.ec2-demo.yml logs frontend --tail=100
+az containerapp logs show --resource-group "$AZURE_RESOURCE_GROUP" --name incidentops-core-api --follow
+az containerapp logs show --resource-group "$AZURE_RESOURCE_GROUP" --name incidentops-core-worker --follow
+az containerapp logs show --resource-group "$AZURE_RESOURCE_GROUP" --name incidentops-mcp --follow
+az containerapp logs show --resource-group "$AZURE_RESOURCE_GROUP" --name incidentops-collector --follow
+az containerapp logs show --resource-group "$AZURE_RESOURCE_GROUP" --name incidentops-frontend --follow
 ```
 
-## Common failures
-
-### Frontend loads wrong UI
-
-Cause: EC2 stack built from Core `./apps/web` instead of separate `Ops-Incident-frontend`.
-
-Fix:
-
-```bash
-scripts/deploy_ec2_demo.sh \
-  --public-url http://EC2_PUBLIC_IP \
-  --collector-repo ../Ops-Incident-Collector \
-  --frontend-repo ../Ops-Incident-frontend
-```
-
-Check compose uses:
-
-```text
-${FRONTEND_REPO_PATH:-../Ops-Incident-frontend}
-```
+## Common Failures
 
 ### `/ready` fails
 
-Check migrations:
+Run migrations:
 
 ```bash
-docker compose -f docker-compose.ec2-demo.yml run --rm migrate
+scripts/azure_run_migrations.sh
 ```
 
-Then:
+Then inspect API logs.
 
-```bash
-docker compose -f docker-compose.ec2-demo.yml logs api --tail=150
-```
+### API startup fails with unsafe production configuration
 
-If readiness reports missing columns, the database schema is drifted. For disposable demo DBs, recreate the volume only after backing up. For production, use migrations or restore from known-good backup. No, dropping production DBs is not a migration strategy.
-
-### Collector cannot reach Core
-
-Check Collector health:
-
-```bash
-curl http://HOST/collector/health
-```
-
-Inside EC2:
-
-```bash
-docker compose -f docker-compose.ec2-demo.yml logs collector --tail=150
-```
-
-Verify env files:
-
-- `deploy/ec2/.env.demo`
-- `deploy/ec2/.env.runtime`
-
-Verify Collector uses internal Core URL:
+Check that production does not use local/demo settings:
 
 ```text
-INCIDENTOPS_API_URL=http://api:8000
+DB_CREATE_ALL=false
+LOCAL_INGEST_ENABLED=false
+ALLOW_LOCAL_SEED_ADMIN=false
+ALLOW_DEMO_PROJECT_BYPASS=false
+DEMO_MODE_PUBLIC=false
+WORKER_MODE=queue
+JOB_QUEUE_BACKEND=redis
+RATE_LIMIT_BACKEND=redis
+METRICS_BACKEND=prometheus
+ALLOW_WILDCARD_CORS=false
 ```
 
-### Search returns zero results
+### Azure OpenAI / Foundry errors
 
-Check sync status:
+Verify:
 
-```bash
-scripts/smoke_ec2_demo.sh
+- endpoint has no trailing deployment path
+- API key is stored in Key Vault
+- chat deployment name is correct
+- embedding deployment name is correct
+- embedding deployment supports `dimensions=384`
+- `EMBEDDING_MODEL=azure-openai`
+
+### Collector sync does not complete
+
+Verify Collector has:
+
+- Core API URL
+- Core access token
+- project ID
+- allowed source path
+- source registration permission
+
+Then inspect Core source sync diagnostics.
+
+### MCP tools fail
+
+Verify MCP Container App has:
+
+```text
+MCP_TRANSPORT=streamable-http
+MCP_CORE_API_URL=https://CORE_API_URL
+MCP_TOKEN=<valid Core token>
 ```
 
-Inspect Collector logs and Core source sync diagnostics. Common causes:
+The MCP server calls Core APIs and therefore fails if the token is expired, lacks project membership, or Core is not ready.
 
-- Collector did not sync
-- token missing/invalid
-- source registration failed
-- batch ingest failed
-- documents were skipped due to policy
-- wrong project ID
+## Release Checklist
 
-### Investigation says evidence is insufficient
-
-This may be correct. The system should not invent root causes. Check evidence count, citations, missing data, and fixture quality before blaming the investigation code like a ritual sacrifice.
-
-### Workflow stuck awaiting approval
-
-This can be expected if risky action drafts are approval-gated. Check run events:
-
-```http
-GET /v1/runs/{run_id}/events
-```
-
-Through Nginx:
-
-```http
-GET /api/v1/runs/{run_id}/events
-```
-
-## Backup and teardown
-
-Backup DB:
-
-```bash
-scripts/backup_db.sh
-```
-
-Stop stack:
-
-```bash
-scripts/teardown_ec2_demo.sh
-```
-
-Stop EC2:
-
-```bash
-aws ec2 stop-instances --instance-ids INSTANCE_ID --region us-east-1
-```
-
-Terminate EC2 when done:
-
-```bash
-aws ec2 terminate-instances --instance-ids INSTANCE_ID --region us-east-1
-```
-
-## Security checks
-
-For EC2 demo, confirm only public ports are exposed:
-
-- `22/tcp` from operator IP only
-- `80/tcp` public
-- `443/tcp` public when configured
-
-Do not expose:
-
-- `5432` Postgres
-- `6379` Redis
-- `8000/8001` Core API direct
-- `8686` Collector direct
-- `3000` frontend direct
-
-Generated secrets live in EC2 env files and must not be committed.
-
-## Release checklist
-
-Before declaring a release/demo ready:
-
-- tests pass
-- Docker build passes
+- Core tests pass
+- Collector tests pass
+- Frontend build passes
+- images pushed to ACR
+- Bicep deployment succeeds
 - migrations pass
+- admin bootstrap succeeds
 - `/health` passes
 - `/ready` passes
 - capabilities endpoint works
-- Collector health is healthy
-- Collector core reachable is true
-- sync succeeds
+- Collector sync succeeds
 - search returns evidence
 - investigate returns cited response or honest insufficient-evidence response
-- workflow run reaches valid state
-- frontend is from `Ops-Incident-frontend`
-- internal ports are closed externally
-- DB backup command works
+- readiness endpoint works
+- workflow run reaches a valid state
+- MCP server starts and can call Core with a valid token
 
-## Demo script
+## Teardown
 
-1. Open public frontend URL.
-2. Show Core status/readiness.
-3. Show Collector health and sync status.
-4. Ask an incident question.
-5. Show evidence and citations.
-6. Show investigation result, confidence, missing data.
-7. Show workflow run events/approval state.
-8. Mention Collector/Core/frontend split.
-9. Mention that weak evidence is handled honestly.
+Azure resources can keep billing after the demo. To delete the resource group:
 
-That is the product story. Not a chatbot. Not a screenshot factory. An evidence-backed incident investigation system.
+```bash
+CONFIRM=delete-$AZURE_RESOURCE_GROUP scripts/azure_teardown.sh
+```

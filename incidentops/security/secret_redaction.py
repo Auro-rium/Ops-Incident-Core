@@ -6,7 +6,7 @@ SECRET_PATTERNS = [
     (re.compile(r"\b(sk-[a-zA-Z0-9_-]{20,})\b"), "[REDACTED_API_KEY]"),
     (re.compile(r"\b(ghp_[a-zA-Z0-9_]{20,})\b"), "[REDACTED_GITHUB_TOKEN]"),
     (re.compile(r"\b(github_pat_[a-zA-Z0-9_]{20,})\b"), "[REDACTED_GITHUB_TOKEN]"),
-    (re.compile(r"\b(AKIA[0-9A-Z]{16})\b"), "[REDACTED_AWS_ACCESS_KEY]"),
+    (re.compile(r"\b(AKIA[0-9A-Z]{16})\b"), "[REDACTED_CLOUD_ACCESS_KEY]"),
     (
         re.compile(r"\b(api[_-]?key\s*[:=]\s*['\"]?)([a-zA-Z0-9_\-]{16,})(['\"]?)", re.IGNORECASE),
         r"\1[REDACTED_API_KEY]\3",
