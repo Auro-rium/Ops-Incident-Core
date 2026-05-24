@@ -80,6 +80,22 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv run --extra dev ruff check .
       - run: uv run --extra dev alembic upgrade head
+      - name: Bootstrap local CI admin
+        run: uv run --extra dev python -m incidentops.security.bootstrap_admin --email admin@incidentops.local --password incidentops
+      - name: Start API for integration tests
+        run: |
+          uv run --extra dev uvicorn apps.api.main:app --host 127.0.0.1 --port 8000 > api.log 2>&1 &
+          echo "$!" > api.pid
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/health >/dev/null; then
+              echo "API is ready."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "API failed to start."
+          cat api.log
+          exit 1
       - run: uv run --extra dev python -m pytest tests/unit tests/integration -q
 
   deploy:
