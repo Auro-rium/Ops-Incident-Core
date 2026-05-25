@@ -20,7 +20,14 @@ from incidentops.ingestion.normalized import (
     NormalizedDocument,
     validate_normalized_document,
 )
-from incidentops.ingestion.parsers.code_parser import parse_go, parse_proto, parse_python
+from incidentops.ingestion.parsers.code_parser import (
+    parse_go,
+    parse_java,
+    parse_jsts,
+    parse_proto,
+    parse_python,
+    parse_structured_config,
+)
 from incidentops.ingestion.parsers.deploy_parser import parse_deploy_history, parse_patch_file
 from incidentops.ingestion.parsers.incident_parser import parse_incident
 from incidentops.ingestion.parsers.log_parser import parse_logs
@@ -191,9 +198,9 @@ async def _index_one_document(
                 "project_id": project_id,
                 "source_id": source_id,
                 "chunk_type": raw_chunk.chunk_type,
-                "service_name": raw_chunk.service_name or service_name,
-                "endpoint": raw_chunk.endpoint,
-                "deploy_hash": raw_chunk.deploy_hash,
+                "service_name": raw_chunk.service_name or service_name or normalized.metadata.get("service_name"),
+                "endpoint": raw_chunk.endpoint or normalized.metadata.get("endpoint"),
+                "deploy_hash": raw_chunk.deploy_hash or normalized.metadata.get("deploy_hash") or normalized.metadata.get("commit_sha"),
                 "timestamp_start": raw_chunk.timestamp_start,
                 "timestamp_end": raw_chunk.timestamp_end,
                 "section_title": raw_chunk.section_title,
@@ -201,11 +208,7 @@ async def _index_one_document(
                 "end_line": raw_chunk.end_line,
                 "text": sub_text,
                 "token_count": count_tokens(sub_text),
-                "metadata_json": (raw_chunk.metadata or {})
-                | {
-                    "source_type": raw_chunk.source_type,
-                    "document_path": raw_chunk.document_path,
-                },
+                "metadata_json": _build_chunk_metadata(normalized, raw_chunk),
             }
             chunk_payloads.append(chunk_payload)
             embedding_texts.append(sub_text)
@@ -311,13 +314,20 @@ def _parse_normalized_document(
         return parse_python(document.content, document.path, service_name=service_name), None
     if suffix == ".go":
         return parse_go(document.content, document.path, service_name=service_name), None
+    if suffix in {".js", ".ts", ".jsx", ".tsx"}:
+        language = suffix.lstrip(".") if suffix != ".tsx" else "ts"
+        return parse_jsts(document.content, document.path, service_name=service_name, language=language), None
+    if suffix == ".java":
+        return parse_java(document.content, document.path, service_name=service_name), None
     if suffix == ".proto":
         return parse_proto(document.content, document.path, service_name=service_name), None
     if source_type == "code":
         return _parse_generic_code(document.content, document.path, service_name=service_name), None
-    if suffix in {".yaml", ".yml"}:
+    if suffix in {".yaml", ".yml", ".toml", ".ini"}:
         hinted_source_type = "api_doc" if source_type == "api_doc" else source_type
-        return parse_markdown(document.content, document.path, source_type=hinted_source_type, service_name=service_name), None
+        return parse_structured_config(document.content, document.path, source_type=hinted_source_type, service_name=service_name), None
+    if suffix == ".json" and source_type in {"config", "api_doc"}:
+        return parse_structured_config(document.content, document.path, source_type=source_type, service_name=service_name), None
     if suffix in {".md", ".txt", ".json"}:
         hinted_source_type = source_type or classify_source_type(document.path)
         return parse_markdown(document.content, document.path, source_type=hinted_source_type, service_name=service_name), None
@@ -345,3 +355,52 @@ def _parse_generic_code(content: str, path: str, *, service_name: str | None) ->
             metadata={"parser": "generic_code"},
         )
     ]
+
+
+_CHUNK_METADATA_KEYS = {
+    "language",
+    "file_language",
+    "repo_name",
+    "branch",
+    "commit_sha",
+    "commit_shas",
+    "deploy_hash",
+    "deploy_hashes",
+    "module_path",
+    "package_path",
+    "symbol_names",
+    "function_names",
+    "class_names",
+    "headings",
+    "endpoint",
+    "endpoint_candidates",
+    "api_paths",
+    "service_name",
+    "log_levels",
+    "timestamp_start",
+    "timestamp_end",
+    "error_codes",
+    "trace_ids",
+    "request_ids",
+    "config_keys_summary",
+    "release_markers",
+    "title",
+    "severity",
+}
+
+
+def _build_chunk_metadata(normalized: NormalizedDocument, raw_chunk: RawChunk) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "source_type": raw_chunk.source_type,
+        "document_path": raw_chunk.document_path,
+    }
+    for key in _CHUNK_METADATA_KEYS:
+        value = normalized.metadata.get(key)
+        if value in (None, "", []):
+            continue
+        metadata[key] = value
+    for key, value in (raw_chunk.metadata or {}).items():
+        if value in (None, "", []):
+            continue
+        metadata[key] = value
+    return metadata

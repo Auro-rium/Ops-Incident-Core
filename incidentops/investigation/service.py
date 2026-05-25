@@ -18,6 +18,7 @@ from incidentops.investigation.timeline_builder import build_timeline
 from incidentops.observability.metrics import incr, observe_latency
 from incidentops.retrieval.citation_builder import build_citations
 from incidentops.retrieval.evidence_packer import pack_evidence
+from incidentops.retrieval.query_intent import classify_query_intent, investigate_supported
 from incidentops.retrieval.hybrid_search import hybrid_search, hybrid_search_with_debug
 from incidentops.retrieval.reranker import rerank
 
@@ -32,6 +33,7 @@ async def investigate(
 ) -> tuple[InvestigationResult, int]:
     start = time.time()
     task_type = classify_task(query)
+    query_intent = classify_query_intent(query)
     entities = extract_entities(query)
     scope = resolve_scope(entities)
     if debug:
@@ -84,7 +86,12 @@ async def investigate(
     if not any(item.get("source_type") in {"runbook", "api_doc"} for item in evidence):
         missing_data.append("no service ownership docs")
 
+    available_source_types = {item.get("source_type") for item in evidence if item.get("source_type")}
+    supported, support_reasons = investigate_supported(query_intent, available_source_types)
     confidence, confidence_reasons = _score_confidence(
+        query_intent=query_intent.intent,
+        supported=supported,
+        support_reasons=support_reasons,
         entities=entities,
         evidence=evidence,
         log_findings=log_findings,
@@ -93,14 +100,20 @@ async def investigate(
         missing_data=missing_data,
     )
     selected.confidence = confidence
+    if not supported and query_intent.intent in {"code_location", "config_api_doc", "architecture_docs"}:
+        selected.summary = "This query is better handled as cited evidence lookup than as a runtime root-cause investigation."
 
     suggested_fix = None
-    if confidence != "low":
+    if not supported:
+        suggested_fix = _unsupported_investigation_guidance(query_intent.intent, missing_data)
+    elif confidence != "low":
         suggested_fix = "Validate the leading hypothesis against deploy history, recent logs, and ownership documentation before taking action."
 
     result = InvestigationResult(
         question=query,
         task_type=task_type,
+        query_intent=query_intent.intent,
+        investigation_supported=supported,
         entities=entities,
         timeline=timeline,
         hypotheses=hypotheses,
@@ -115,6 +128,9 @@ async def investigate(
         evidence=evidence,
         debug={
             **retrieval_debug,
+            "query_intent": query_intent.as_dict(),
+            "investigation_supported": supported,
+            "investigation_support_reasons": support_reasons,
             "applied_filters": scope["filters"] or {},
             "reranked_count": len(reranked),
         }
@@ -131,6 +147,9 @@ async def investigate(
 
 def _score_confidence(
     *,
+    query_intent: str,
+    supported: bool,
+    support_reasons: list[str],
     entities,
     evidence: list[dict],
     log_findings: dict,
@@ -138,7 +157,7 @@ def _score_confidence(
     previous_incidents: list[dict],
     missing_data: list[str],
 ) -> tuple[str, list[str]]:
-    reasons: list[str] = []
+    reasons: list[str] = list(support_reasons)
     source_types = {item.get("source_type") for item in evidence if item.get("source_type")}
     strong_deploy_match = bool(
         entities.deploy_hash
@@ -151,6 +170,17 @@ def _score_confidence(
     has_logs = "logs" in source_types
     has_code = "code" in source_types
     has_deploys = "deploy" in source_types
+
+    if not supported:
+        if not reasons:
+            reasons.append("investigation evidence class is not supported for this query")
+        if len(missing_data) > 1:
+            reasons.append("multiple operational evidence sources are missing")
+        return "low", reasons
+
+    if query_intent in {"runtime_logs", "deploy_change", "incident_history", "root_cause_investigation"} and not has_logs:
+        reasons.append("runtime investigation is missing timestamped logs")
+        return "low", reasons
 
     if len(source_types) >= 3:
         reasons.append("multiple source types agree on relevant context")
@@ -174,3 +204,15 @@ def _score_confidence(
     if len(missing_data) > 2:
         reasons.append("multiple key evidence sources are missing")
     return "low", reasons
+
+
+def _unsupported_investigation_guidance(query_intent: str, missing_data: list[str]) -> str:
+    if query_intent == "code_location":
+        return "Use cited evidence search or answer mode for code-location questions; incident investigation is not the right mode for this query."
+    if query_intent == "config_api_doc":
+        return "Use cited evidence search or answer mode for config and API-documentation questions; incident investigation requires runtime evidence."
+    if query_intent == "architecture_docs":
+        return "Use cited evidence search or answer mode for architecture questions; incident investigation requires runtime or change evidence."
+    if missing_data:
+        return "Add the missing runtime, deploy, or incident evidence before expecting a confident root-cause investigation."
+    return "Incident investigation is not supported for this evidence mix."

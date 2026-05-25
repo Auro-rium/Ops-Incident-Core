@@ -288,6 +288,8 @@ class SearchResponse(BaseModel):
     results: list[SearchHit]
     total: int
     latency_ms: int
+    query_intent: str | None = None
+    evidence_mix: dict[str, dict[str, int]] = Field(default_factory=dict)
     debug: dict[str, Any] | None = None
 
 
@@ -328,10 +330,12 @@ class EvidenceItem(BaseModel):
 
 class AnswerResponse(BaseModel):
     question: str
+    query_intent: str | None = None
     answer: AnswerBody | None = None
     message: str | None = None
     evidence: list[EvidenceItem]
     latency_ms: int
+    warnings: list[str] = Field(default_factory=list)
 
 
 class InvestigationRequest(BaseModel):
@@ -376,6 +380,8 @@ class RootCauseResponse(BaseModel):
 class InvestigationResponse(BaseModel):
     question: str
     task_type: str
+    query_intent: str
+    investigation_supported: bool = True
     entities: InvestigationEntityResponse
     timeline: list[TimelineEventResponse]
     hypotheses: list[HypothesisResponse]

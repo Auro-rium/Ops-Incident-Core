@@ -14,6 +14,7 @@ from incidentops.observability.metrics import incr, observe_latency
 from incidentops.retrieval.citation_builder import build_citations
 from incidentops.retrieval.evidence_packer import pack_evidence
 from incidentops.retrieval.hybrid_search import hybrid_search
+from incidentops.retrieval.query_intent import classify_query_intent, investigate_supported
 from incidentops.retrieval.reranker import rerank
 from incidentops.schemas.api import (
     AnswerBody,
@@ -49,6 +50,7 @@ async def answer(
         )
     await ensure_project_access(db, body.project_id, user, settings, minimum_role=ProjectRole.investigator)
     start = time.time()
+    query_intent = classify_query_intent(body.query)
     raw_results = await hybrid_search(db, body.project_id, body.query, top_k=max(body.top_k * 3, 30))
     reranked = rerank(body.query, raw_results, model_name=settings.reranker_model, top_k=body.top_k)
     evidence = pack_evidence(reranked, max_evidence=body.top_k)
@@ -69,8 +71,15 @@ async def answer(
     llm = get_llm_provider()
     answer_body = None
     message = None
-    if llm.available:
-        messages = build_answer_prompt(body.query, evidence)
+    warnings = _answer_warnings(query_intent.intent, evidence)
+    supported, support_reasons = investigate_supported(
+        query_intent,
+        {item.get("source_type") for item in evidence if item.get("source_type")},
+    )
+    if query_intent.is_incident_like and not supported:
+        answer_body = _insufficient_evidence_answer(body.query, evidence, warnings + support_reasons)
+    elif llm.available:
+        messages = build_answer_prompt(body.query, evidence, query_intent=query_intent.intent, warnings=warnings)
         llm_response = await llm.chat(messages, temperature=0.1, max_tokens=1024, response_format={"type": "json_object"})
         if llm_response and "raw_response" not in llm_response:
             answer_body = AnswerBody(
@@ -100,8 +109,45 @@ async def answer(
     observe_latency("answer_latency", latency_ms)
     return AnswerResponse(
         question=body.query,
+        query_intent=query_intent.intent,
         answer=answer_body,
         message=message,
         evidence=evidence_items,
         latency_ms=latency_ms,
+        warnings=warnings,
+    )
+
+
+def _answer_warnings(query_intent: str, evidence: list[dict]) -> list[str]:
+    source_types = {item.get("source_type") for item in evidence if item.get("source_type")}
+    warnings: list[str] = []
+    if query_intent in {"runtime_logs", "deploy_change", "incident_history", "root_cause_investigation"}:
+        if "logs" not in source_types:
+            warnings.append("runtime logs are missing from the retrieved evidence")
+        if "deploy" not in source_types:
+            warnings.append("deploy history or diffs are missing from the retrieved evidence")
+        if "incident" not in source_types:
+            warnings.append("previous incident reports are missing from the retrieved evidence")
+    return warnings
+
+
+def _insufficient_evidence_answer(question: str, evidence: list[dict], warnings: list[str]) -> AnswerBody:
+    services = sorted({item.get("service_name") for item in evidence if item.get("service_name")})
+    return AnswerBody(
+        summary="Operational evidence is insufficient to answer this incident question confidently.",
+        likely_root_cause="The current evidence is missing key runtime, deploy, or incident context, so a confident root-cause explanation is not supported.",
+        confidence="low",
+        affected_services=services,
+        reasoning="The retrieved evidence does not include enough operational context to justify a causal incident explanation. Use the cited evidence for repo context and add the missing operational evidence before drawing RCA conclusions.",
+        suggested_fix="Add timestamped logs, deploy history or diffs, and previous incident or runbook evidence before using answer synthesis for runtime RCA.",
+        unknowns=list(dict.fromkeys(warnings)),
+        citations=[
+            AnswerCitation(
+                label=item["citation"]["label"],
+                document_path=item.get("document_path", ""),
+                lines=item["citation"]["lines"],
+                chunk_id=item["chunk_id"],
+            )
+            for item in evidence
+        ],
     )

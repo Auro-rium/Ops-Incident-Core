@@ -1,48 +1,48 @@
-"""
-Python code parser — extracts functions and classes using AST.
-"""
+"""Code and structured config parsers used by the central indexer."""
 
 from __future__ import annotations
 
 import ast
+from configparser import ConfigParser
+import json
 import re
+import tomllib
+
+import yaml
 
 from incidentops.ingestion.schemas import RawChunk
 
 GO_DECL_RE = re.compile(r"^(func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)|type\s+([A-Za-z_]\w*)\s+(?:struct|interface|func|\w+))\b")
 PROTO_DECL_RE = re.compile(r"^\s*(service|message|enum)\s+([A-Za-z_]\w*)\s*\{?")
+JS_DECL_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:(class)\s+([A-Za-z_]\w*)|(async\s+)?function\s+([A-Za-z_]\w*)|const\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\(|let\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\(|var\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\()"
+)
+JAVA_DECL_RE = re.compile(
+    r"^\s*(?:(?:public|private|protected|static|final|abstract)\s+)*(class|interface|enum|record|void|[A-Za-z_][\w<>\[\]]+)\s+([A-Za-z_]\w*)\s*(?:\(|\{)"
+)
 
 
-def parse_python(
-    content: str,
-    file_path: str,
-    service_name: str | None = None,
-) -> list[RawChunk]:
-    """
-    Parse a Python file into chunks — one per function/class.
-    Falls back to whole-file chunk if AST parsing fails.
-    """
+def parse_python(content: str, file_path: str, service_name: str | None = None) -> list[RawChunk]:
     try:
         tree = ast.parse(content)
     except SyntaxError:
-        # Unparseable — return whole file as one chunk
         return [
             RawChunk(
                 text=content,
-                chunk_type="function",
+                chunk_type="code_file",
                 source_type="code",
                 document_path=file_path,
                 doc_type="code",
                 service_name=service_name,
                 start_line=1,
                 end_line=content.count("\n") + 1,
+                metadata={"language": "py", "kind": "file"},
             )
         ]
 
     lines = content.split("\n")
     chunks: list[RawChunk] = []
 
-    # Collect module-level docstring / imports as a preamble chunk
     first_def_line = None
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -55,7 +55,7 @@ def parse_python(
             chunks.append(
                 RawChunk(
                     text=preamble,
-                    chunk_type="function",
+                    chunk_type="module",
                     source_type="code",
                     document_path=file_path,
                     doc_type="code",
@@ -63,57 +63,51 @@ def parse_python(
                     section_title="module preamble",
                     start_line=1,
                     end_line=first_def_line - 1,
+                    metadata={"language": "py", "kind": "preamble"},
                 )
             )
 
-    # Extract each top-level function/class
     for node in ast.iter_child_nodes(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            start = node.lineno
-            end = node.end_lineno or start
-            text = "\n".join(lines[start - 1 : end])
-
-            chunk_type = "function"
-            section_title = f"{'class' if isinstance(node, ast.ClassDef) else 'def'} {node.name}"
-
-            chunks.append(
-                RawChunk(
-                    text=text,
-                    chunk_type=chunk_type,
-                    source_type="code",
-                    document_path=file_path,
-                    doc_type="code",
-                    service_name=service_name,
-                    section_title=section_title,
-                    start_line=start,
-                    end_line=end,
-                )
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        start = node.lineno
+        end = node.end_lineno or start
+        text = "\n".join(lines[start - 1 : end])
+        is_class = isinstance(node, ast.ClassDef)
+        chunks.append(
+            RawChunk(
+                text=text,
+                chunk_type="class" if is_class else "function",
+                source_type="code",
+                document_path=file_path,
+                doc_type="code",
+                service_name=service_name,
+                section_title=f"{'class' if is_class else 'def'} {node.name}",
+                start_line=start,
+                end_line=end,
+                metadata={"language": "py", "symbol": node.name, "kind": "class" if is_class else "function"},
             )
+        )
 
-    # If no functions/classes found, return whole file
     if not chunks:
         chunks.append(
             RawChunk(
                 text=content,
-                chunk_type="function",
+                chunk_type="code_file",
                 source_type="code",
                 document_path=file_path,
                 doc_type="code",
                 service_name=service_name,
                 start_line=1,
                 end_line=len(lines),
+                metadata={"language": "py", "kind": "file"},
             )
         )
 
     return chunks
 
 
-def parse_go(
-    content: str,
-    file_path: str,
-    service_name: str | None = None,
-) -> list[RawChunk]:
-    """Parse Go source into package/import and top-level declaration chunks."""
+def parse_go(content: str, file_path: str, service_name: str | None = None) -> list[RawChunk]:
     return _parse_declaration_language(
         content,
         file_path,
@@ -125,12 +119,7 @@ def parse_go(
     )
 
 
-def parse_proto(
-    content: str,
-    file_path: str,
-    service_name: str | None = None,
-) -> list[RawChunk]:
-    """Parse protobuf files into service/message/enum chunks."""
+def parse_proto(content: str, file_path: str, service_name: str | None = None) -> list[RawChunk]:
     return _parse_declaration_language(
         content,
         file_path,
@@ -140,6 +129,90 @@ def parse_proto(
         declaration_re=PROTO_DECL_RE,
         language="proto",
     )
+
+
+def parse_jsts(
+    content: str,
+    file_path: str,
+    *,
+    service_name: str | None = None,
+    language: str,
+) -> list[RawChunk]:
+    return _parse_regex_language(
+        content,
+        file_path,
+        service_name=service_name,
+        source_type="code",
+        fallback_chunk_type="code_file",
+        declaration_re=JS_DECL_RE,
+        language=language,
+    )
+
+
+def parse_java(content: str, file_path: str, *, service_name: str | None = None) -> list[RawChunk]:
+    return _parse_regex_language(
+        content,
+        file_path,
+        service_name=service_name,
+        source_type="code",
+        fallback_chunk_type="code_file",
+        declaration_re=JAVA_DECL_RE,
+        language="java",
+    )
+
+
+def parse_structured_config(
+    content: str,
+    file_path: str,
+    *,
+    source_type: str,
+    service_name: str | None = None,
+) -> list[RawChunk]:
+    lower = file_path.lower()
+    if source_type == "api_doc":
+        api_chunks = _parse_openapi_like(content, file_path, service_name=service_name)
+        if api_chunks:
+            return api_chunks
+
+    data = _load_structured_data(content, lower)
+    lines = content.splitlines() or [content]
+    if isinstance(data, dict) and data:
+        chunks: list[RawChunk] = []
+        for key, value in list(data.items())[:50]:
+            text = _render_structured_section(key, value)
+            if not text.strip():
+                continue
+            chunks.append(
+                RawChunk(
+                    text=text,
+                    chunk_type="config_section",
+                    source_type=source_type,
+                    document_path=file_path,
+                    doc_type="api_doc" if source_type == "api_doc" else "markdown",
+                    service_name=service_name,
+                    section_title=f"config {key}",
+                    start_line=1,
+                    end_line=len(lines),
+                    metadata={"language": _language_from_path(lower), "config_key": key, "kind": "config"},
+                )
+            )
+        if chunks:
+            return chunks
+
+    return [
+        RawChunk(
+            text=content,
+            chunk_type="config_section",
+            source_type=source_type,
+            document_path=file_path,
+            doc_type="api_doc" if source_type == "api_doc" else "markdown",
+            service_name=service_name,
+            section_title=file_path.rsplit("/", 1)[-1],
+            start_line=1,
+            end_line=len(lines),
+            metadata={"language": _language_from_path(lower), "kind": "config_file"},
+        )
+    ]
 
 
 def _parse_declaration_language(
@@ -177,7 +250,7 @@ def _parse_declaration_language(
             chunks.append(
                 RawChunk(
                     text=preamble,
-                    chunk_type=f"{language}_preamble",
+                    chunk_type="module" if source_type == "code" else f"{language}_preamble",
                     source_type=source_type,
                     document_path=file_path,
                     doc_type="code" if source_type == "code" else "api_doc",
@@ -194,10 +267,13 @@ def _parse_declaration_language(
         text = "\n".join(lines[start_line - 1 : end_line]).strip()
         if not text:
             continue
+        chunk_type = "function" if source_type == "code" else _proto_chunk_type(kind)
+        if source_type == "code" and kind == "type":
+            chunk_type = "class"
         chunks.append(
             RawChunk(
                 text=text,
-                chunk_type="function" if source_type == "code" else "api_endpoint",
+                chunk_type=chunk_type,
                 source_type=source_type,
                 document_path=file_path,
                 doc_type="code" if source_type == "code" else "api_doc",
@@ -226,3 +302,170 @@ def _parse_declaration_language(
             metadata={"language": language, "kind": "file"},
         )
     ]
+
+
+def _parse_regex_language(
+    content: str,
+    file_path: str,
+    *,
+    service_name: str | None,
+    source_type: str,
+    fallback_chunk_type: str,
+    declaration_re: re.Pattern[str],
+    language: str,
+) -> list[RawChunk]:
+    lines = content.splitlines()
+    if not lines:
+        return []
+
+    declarations: list[tuple[int, str, str]] = []
+    for index, line in enumerate(lines, start=1):
+        match = declaration_re.match(line)
+        if not match:
+            continue
+        groups = [group for group in match.groups() if group]
+        if not groups:
+            continue
+        kind, symbol = _resolve_regex_declaration(groups, language)
+        declarations.append((index, kind, symbol))
+
+    if not declarations:
+        return [
+            RawChunk(
+                text=content,
+                chunk_type=fallback_chunk_type,
+                source_type=source_type,
+                document_path=file_path,
+                doc_type="code",
+                service_name=service_name,
+                section_title=file_path.rsplit("/", 1)[-1],
+                start_line=1,
+                end_line=len(lines),
+                metadata={"language": language, "kind": "file"},
+            )
+        ]
+
+    chunks: list[RawChunk] = []
+    first_line = declarations[0][0]
+    if first_line > 1:
+        preamble = "\n".join(lines[: first_line - 1]).strip()
+        if preamble:
+            chunks.append(
+                RawChunk(
+                    text=preamble,
+                    chunk_type="module",
+                    source_type=source_type,
+                    document_path=file_path,
+                    doc_type="code",
+                    service_name=service_name,
+                    section_title="module preamble",
+                    start_line=1,
+                    end_line=first_line - 1,
+                    metadata={"language": language, "kind": "preamble"},
+                )
+            )
+
+    for idx, (start_line, kind, symbol) in enumerate(declarations):
+        end_line = declarations[idx + 1][0] - 1 if idx + 1 < len(declarations) else len(lines)
+        text = "\n".join(lines[start_line - 1 : end_line]).strip()
+        if not text:
+            continue
+        chunks.append(
+            RawChunk(
+                text=text,
+                chunk_type="class" if kind in {"class", "interface", "enum", "record"} else "function",
+                source_type=source_type,
+                document_path=file_path,
+                doc_type="code",
+                service_name=service_name,
+                section_title=f"{kind} {symbol}",
+                start_line=start_line,
+                end_line=end_line,
+                metadata={"language": language, "symbol": symbol, "kind": kind},
+            )
+        )
+    return chunks
+
+
+def _resolve_regex_declaration(groups: list[str], language: str) -> tuple[str, str]:
+    if language in {"js", "ts"}:
+        if groups[0] == "class":
+            return "class", groups[1]
+        for symbol in groups[3:]:
+            if symbol:
+                return "function", symbol
+        return "function", groups[-1]
+    kind = groups[0].lower()
+    symbol = groups[1]
+    if kind not in {"class", "interface", "enum", "record"}:
+        kind = "function"
+    return kind, symbol
+
+
+def _parse_openapi_like(content: str, file_path: str, *, service_name: str | None) -> list[RawChunk]:
+    data = _load_structured_data(content, file_path.lower())
+    if not isinstance(data, dict):
+        return []
+    paths = data.get("paths")
+    if not isinstance(paths, dict) or not paths:
+        return []
+    lines = content.splitlines() or [content]
+    chunks: list[RawChunk] = []
+    for endpoint, value in list(paths.items())[:100]:
+        methods: list[str] = []
+        if isinstance(value, dict):
+            methods = [method.upper() for method in value.keys() if method.lower() in {"get", "post", "put", "patch", "delete"}]
+        label = ", ".join(methods) + f" {endpoint}" if methods else str(endpoint)
+        chunks.append(
+            RawChunk(
+                text=_render_structured_section(str(endpoint), value),
+                chunk_type="api_endpoint",
+                source_type="api_doc",
+                document_path=file_path,
+                doc_type="api_doc",
+                service_name=service_name,
+                section_title=label,
+                endpoint=label if methods else str(endpoint),
+                start_line=1,
+                end_line=len(lines),
+                metadata={"language": _language_from_path(file_path.lower()), "endpoint": str(endpoint), "methods": methods, "kind": "openapi_path"},
+            )
+        )
+    return chunks
+
+
+def _load_structured_data(content: str, lower_path: str):
+    try:
+        if lower_path.endswith(".json"):
+            return json.loads(content)
+        if lower_path.endswith(".toml"):
+            return tomllib.loads(content)
+        if lower_path.endswith(".ini"):
+            parser = ConfigParser()
+            parser.read_string(content)
+            return {section: dict(parser.items(section)) for section in parser.sections()}
+        if lower_path.endswith((".yaml", ".yml")):
+            return yaml.safe_load(content)
+    except Exception:
+        return None
+    return None
+
+
+def _render_structured_section(key: str, value) -> str:
+    try:
+        rendered = json.dumps(value, indent=2, sort_keys=True)
+    except TypeError:
+        rendered = str(value)
+    return f"{key}\n{rendered}".strip()
+
+
+def _language_from_path(lower_path: str) -> str:
+    return lower_path.rsplit(".", 1)[-1] if "." in lower_path else "text"
+
+
+def _proto_chunk_type(kind: str) -> str:
+    if kind == "service":
+        return "proto_service"
+    if kind == "message":
+        return "proto_message"
+    return "api_endpoint"

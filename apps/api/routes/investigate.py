@@ -65,6 +65,8 @@ async def investigate(
     return InvestigationResponse(
         question=investigation.question,
         task_type=investigation.task_type,
+        query_intent=investigation.query_intent,
+        investigation_supported=investigation.investigation_supported,
         entities=InvestigationEntityResponse(
             service_name=investigation.entities.service_name,
             endpoint=investigation.entities.endpoint,

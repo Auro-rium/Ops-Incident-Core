@@ -79,7 +79,7 @@ def extract_endpoints(text: str) -> list[str]:
 
 def classify_source_type(path: str) -> str:
     lower = path.lower()
-    if lower.endswith((".py", ".js", ".ts", ".go", ".java", ".rb")):
+    if lower.endswith((".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".rb")):
         return "code"
     if lower.endswith(".proto"):
         return "api_doc"
@@ -94,15 +94,23 @@ def classify_source_type(path: str) -> str:
     if "openapi" in lower or "swagger" in lower:
         return "api_doc"
     if lower.endswith((".yaml", ".yml")):
+        if "openapi" in lower or "swagger" in lower:
+            return "api_doc"
+        return "config"
+    if lower.endswith((".toml", ".ini")):
+        return "config"
+    if lower.endswith(".json") and any(token in lower for token in ("openapi", "swagger")):
         return "api_doc"
-    if lower.endswith((".md", ".txt", ".json")):
+    if lower.endswith((".md", ".txt")):
         return "runbook"
+    if lower.endswith(".json"):
+        return "config"
     return "unknown"
 
 
 def classify_doc_type(path: str) -> str:
     lower = path.lower()
-    if lower.endswith((".py", ".js", ".ts", ".go", ".java", ".rb")):
+    if lower.endswith((".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".rb")):
         return "code"
     if lower.endswith(".proto"):
         return "api_doc"
@@ -115,5 +123,11 @@ def classify_doc_type(path: str) -> str:
     if "incident" in lower or "postmortem" in lower:
         return "incident"
     if lower.endswith((".yaml", ".yml")):
-        return "api_doc"
+        if "openapi" in lower or "swagger" in lower:
+            return "api_doc"
+        return "config"
+    if lower.endswith((".toml", ".ini", ".json")):
+        if "openapi" in lower or "swagger" in lower:
+            return "api_doc"
+        return "config"
     return "markdown"

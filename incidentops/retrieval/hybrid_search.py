@@ -1,6 +1,4 @@
-"""
-Hybrid search with generic entity extraction from arbitrary user queries.
-"""
+"""Intent-aware hybrid search with metadata-driven score fusion."""
 
 from __future__ import annotations
 
@@ -15,6 +13,7 @@ from incidentops.config.settings import get_settings
 from incidentops.ingestion.chunking.metadata import extract_deploy_hash
 from incidentops.retrieval.embeddings import embed_query
 from incidentops.retrieval.lexical_search import lexical_search
+from incidentops.retrieval.query_intent import QueryIntent, classify_query_intent
 from incidentops.retrieval.vector_search import vector_search
 
 logger = logging.getLogger("incidentops.retrieval.hybrid")
@@ -47,8 +46,6 @@ SERVICE_STOPWORDS = {
     "errors",
     "rate",
     "question",
-    "question",
-    "after",
     "deploy",
     "release",
     "incident",
@@ -56,18 +53,47 @@ SERVICE_STOPWORDS = {
     "query",
     "logs",
     "docs",
+    "config",
     "get",
     "post",
     "put",
     "delete",
     "patch",
+    "which",
+    "parts",
+    "repo",
+}
+README_PATH_TOKENS = ("readme.md", "/readme.md")
+
+_SOURCE_TYPE_ALIASES = {
+    "deploy_history": "deploy",
+    "patch": "deploy",
+    "incident_report": "incident",
+    "markdown": "runbook",
+    "unknown": "unknown_text",
+}
+_CHUNK_TYPE_BOOSTS = {
+    "function": 0.12,
+    "class": 0.12,
+    "module": 0.08,
+    "code_file": 0.05,
+    "config_section": 0.12,
+    "api_endpoint": 0.10,
+    "proto_service": 0.12,
+    "proto_message": 0.08,
+    "markdown_section": 0.08,
+    "log_window": 0.12,
+    "error_cluster": 0.12,
+    "deploy_diff": 0.12,
+    "incident_section": 0.12,
+    "release_note": 0.10,
 }
 
 
-def analyze_query(query: str) -> dict:
+def analyze_query(query: str) -> dict[str, Any]:
     lower = query.lower()
     endpoints = ENDPOINT_RE.findall(query)
-    deploy_hashes = []
+    deploy_hashes: list[str] = []
     explicit = extract_deploy_hash(query)
     if explicit:
         deploy_hashes.append(explicit)
@@ -84,25 +110,13 @@ def analyze_query(query: str) -> dict:
         if candidate in endpoints or candidate in deploy_hashes:
             continue
         services.append(candidate)
-    services = list(dict.fromkeys(services))[:5]
-
-    source_hints = []
-    if any(word in lower for word in ("log", "logs", "trace", "warning")):
-        source_hints.append("logs")
-    if any(word in lower for word in ("deploy", "release", "commit", "diff", "rollback")):
-        source_hints.append("deploy")
-    if any(word in lower for word in ("incident", "postmortem", "previous")):
-        source_hints.append("incident")
-    if any(word in lower for word in ("code", "function", "module", "stack")):
-        source_hints.append("code")
-    if any(word in lower for word in ("runbook", "owner", "ownership", "docs")):
-        source_hints.append("runbook")
-
+    intent = classify_query_intent(query)
     return {
-        "services": services,
+        "services": list(dict.fromkeys(services))[:5],
         "deploy_hashes": deploy_hashes,
         "endpoints": endpoints,
-        "source_hints": source_hints,
+        "query_intent": intent.as_dict(),
+        "query_terms": intent.query_terms,
     }
 
 
@@ -126,13 +140,14 @@ async def hybrid_search_with_debug(
 ) -> tuple[list[dict], dict]:
     settings = get_settings()
     query_info = analyze_query(query)
+    intent = classify_query_intent(query)
     logger.info("Query analysis: %s", query_info)
     query_embedding = embed_query(query, settings.embedding_model)
     fetch_k = max(top_k * 3, 30)
     vec_results = await vector_search(db, project_id, query_embedding, top_k=fetch_k, filters=filters)
     lex_results = await lexical_search(db, project_id, query, top_k=fetch_k, filters=filters)
 
-    scores: dict[uuid.UUID, dict] = {}
+    scores: dict[uuid.UUID, dict[str, Any]] = {}
     vec_max = max((result["score"] for result in vec_results), default=1.0)
     for result in vec_results:
         chunk_id = result["chunk"].id
@@ -158,26 +173,9 @@ async def hybrid_search_with_debug(
             }
 
     for entry in scores.values():
-        chunk = entry["chunk"]
-        boost = 0.0
-        boost_reasons: list[str] = []
-        if chunk.deploy_hash and chunk.deploy_hash.lower() in query_info["deploy_hashes"]:
-            boost += 0.15
-            boost_reasons.append("deploy_hash_match")
-        if chunk.service_name and chunk.service_name.lower() in query_info["services"]:
-            boost += 0.1
-            boost_reasons.append("service_name_match")
-        if chunk.endpoint:
-            for endpoint in query_info["endpoints"]:
-                if endpoint in chunk.endpoint or chunk.endpoint in endpoint:
-                    boost += 0.1
-                    boost_reasons.append("endpoint_match")
-                    break
-        if _chunk_source_type(chunk) in query_info["source_hints"]:
-            boost += 0.05
-            boost_reasons.append("source_hint_match")
-        entry["metadata_boost"] = min(boost, 0.3)
-        entry["metadata_boost_reasons"] = boost_reasons
+        boost, reasons = _metadata_boost(entry["chunk"], query_info, intent)
+        entry["metadata_boost"] = min(boost, 0.45)
+        entry["metadata_boost_reasons"] = reasons
         entry["fused_score"] = (
             settings.vector_weight * entry["vector_score"]
             + settings.lexical_weight * entry["lexical_score"]
@@ -198,34 +196,159 @@ async def hybrid_search_with_debug(
         for item in ranked
     ]
     debug = {
+        "query_intent": intent.as_dict(),
         "extracted_entities": query_info,
         "applied_filters": filters or {},
         "vector_candidates_count": len(vec_results),
         "lexical_candidates_count": len(lex_results),
         "merged_candidates_count": len(scores),
         "metadata_boosts_used": _summarize_boosts(ranked_all[: min(10, len(ranked_all))]),
+        "evidence_mix": _evidence_mix(ranked),
         "top_rejected": _top_rejected_candidates(ranked_all, top_k),
     }
     return results, debug
 
 
+def _metadata_boost(chunk, query_info: dict[str, Any], intent: QueryIntent) -> tuple[float, list[str]]:
+    boost = 0.0
+    reasons: list[str] = []
+    source_type = _chunk_source_type(chunk)
+    chunk_type = (chunk.chunk_type or "").lower()
+    metadata = chunk.metadata_json or {}
+    document_path = getattr(getattr(chunk, "document", None), "path", "") or metadata.get("document_path", "") or ""
+    lower_path = document_path.lower()
+
+    if chunk.deploy_hash and chunk.deploy_hash.lower() in query_info["deploy_hashes"]:
+        boost += 0.18
+        reasons.append("deploy_hash_match")
+    if chunk.service_name and chunk.service_name.lower() in query_info["services"]:
+        boost += 0.12
+        reasons.append("service_name_match")
+    if chunk.endpoint:
+        for endpoint in query_info["endpoints"]:
+            if endpoint in chunk.endpoint or chunk.endpoint in endpoint:
+                boost += 0.12
+                reasons.append("endpoint_match")
+                break
+
+    if source_type in intent.preferred_source_types:
+        boost += 0.16
+        reasons.append(f"intent_source:{source_type}")
+    if chunk_type in intent.preferred_chunk_types:
+        boost += _CHUNK_TYPE_BOOSTS.get(chunk_type, 0.08)
+        reasons.append(f"intent_chunk:{chunk_type}")
+
+    query_terms = set(query_info.get("query_terms") or [])
+    metadata_terms = set(_metadata_terms(metadata))
+    if query_terms and metadata_terms:
+        matched = sorted(query_terms & metadata_terms)[:4]
+        if matched:
+            boost += 0.05 * min(len(matched), 3)
+            reasons.append(f"metadata_terms:{','.join(matched)}")
+
+    if intent.intent == "config_api_doc":
+        if any(token in lower_path for token in ("docker", "compose", "helm", "openapi", "swagger", "config", ".env", ".yaml", ".yml", ".toml", ".ini", ".json")):
+            boost += 0.12
+            reasons.append("config_path_match")
+    if intent.intent == "architecture_docs":
+        if any(token in lower_path for token in ("docs/", "/docs", "architecture", "design", "overview", "readme")):
+            boost += 0.10
+            reasons.append("architecture_doc_match")
+    if intent.intent == "code_location":
+        if any(token in lower_path for token in ("service/", "services/", "src/", "pkg/", "internal/", "cmd/", "app/")):
+            boost += 0.06
+            reasons.append("code_path_match")
+    if intent.intent == "runtime_logs" and source_type == "logs":
+        if metadata.get("timestamp_start") or metadata.get("log_levels") or metadata.get("trace_ids"):
+            boost += 0.08
+            reasons.append("runtime_log_metadata")
+    if intent.intent == "incident_history" and source_type == "incident":
+        if metadata.get("incident_date") or metadata.get("has_root_cause"):
+            boost += 0.08
+            reasons.append("incident_metadata")
+
+    if _should_penalize_readme(intent, lower_path):
+        boost -= 0.10
+        reasons.append("readme_penalty")
+
+    return boost, reasons
+
+
 def _chunk_source_type(chunk) -> str:
-    chunk_type = chunk.chunk_type or ""
-    if chunk_type == "log_window":
-        return "logs"
+    metadata = chunk.metadata_json or {}
+    raw = metadata.get("source_type")
+    if isinstance(raw, str):
+        return _SOURCE_TYPE_ALIASES.get(raw, raw)
+    chunk_type = (chunk.chunk_type or "").lower()
     if chunk_type == "deploy_diff":
         return "deploy"
+    if chunk_type == "log_window":
+        return "logs"
+    if chunk_type in {"function", "class", "module", "code_file"}:
+        return "code"
     if chunk_type == "incident_section":
         return "incident"
-    if chunk_type == "function":
-        return "code"
+    if chunk_type in {"api_endpoint", "proto_service", "proto_message"}:
+        return "api_doc"
+    if chunk_type == "config_section":
+        return "config"
     if chunk_type == "markdown_section":
+        doc_path = getattr(getattr(chunk, "document", None), "path", "") or metadata.get("document_path", "")
+        lower_path = str(doc_path).lower()
+        if "api" in lower_path or "openapi" in lower_path or "swagger" in lower_path:
+            return "api_doc"
         return "runbook"
-    return ""
+    return "unknown_text"
 
 
-def _summarize_boosts(ranked: list[dict]) -> list[dict]:
-    summary = []
+def _metadata_terms(metadata: dict[str, Any]) -> list[str]:
+    terms: list[str] = []
+    for key in ("language", "service_name", "module_path", "package_path", "title", "severity", "config_key", "symbol", "kind"):
+        value = metadata.get(key)
+        if isinstance(value, str):
+            terms.extend(_tokenize(value))
+    for key in ("symbol_names", "function_names", "class_names", "headings", "endpoint_candidates", "api_paths", "log_levels", "error_codes", "config_keys_summary", "release_markers"):
+        value = metadata.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, str):
+                    terms.extend(_tokenize(item))
+    return terms
+
+
+def _tokenize(value: str) -> list[str]:
+    return [token for token in re.split(r"[^a-z0-9_./-]+", value.lower()) if len(token) >= 3]
+
+
+def _should_penalize_readme(intent: QueryIntent, lower_path: str) -> bool:
+    if intent.intent == "architecture_docs":
+        return False
+    if any(token in lower_path for token in README_PATH_TOKENS):
+        return intent.intent in {
+            "code_location",
+            "config_api_doc",
+            "runtime_logs",
+            "deploy_change",
+            "incident_history",
+            "root_cause_investigation",
+        }
+    return False
+
+
+def _evidence_mix(ranked: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    source_types: dict[str, int] = {}
+    chunk_types: dict[str, int] = {}
+    for item in ranked:
+        chunk = item["chunk"]
+        source_type = _chunk_source_type(chunk)
+        source_types[source_type] = source_types.get(source_type, 0) + 1
+        chunk_type = chunk.chunk_type or "unknown"
+        chunk_types[chunk_type] = chunk_types.get(chunk_type, 0) + 1
+    return {"source_types": source_types, "chunk_types": chunk_types}
+
+
+def _summarize_boosts(ranked: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
     for item in ranked:
         chunk = item["chunk"]
         reasons = item.get("metadata_boost_reasons") or []
@@ -235,6 +358,7 @@ def _summarize_boosts(ranked: list[dict]) -> list[dict]:
             {
                 "document_path": getattr(getattr(chunk, "document", None), "path", "") or "",
                 "chunk_id": str(chunk.id),
+                "source_type": _chunk_source_type(chunk),
                 "metadata_boost": round(item.get("metadata_boost", 0.0), 4),
                 "reasons": reasons,
             }
@@ -242,7 +366,7 @@ def _summarize_boosts(ranked: list[dict]) -> list[dict]:
     return summary
 
 
-def _top_rejected_candidates(ranked_all: list[dict], top_k: int) -> list[dict]:
+def _top_rejected_candidates(ranked_all: list[dict[str, Any]], top_k: int) -> list[dict[str, Any]]:
     rejected = []
     for item in ranked_all[top_k : top_k + 5]:
         chunk = item["chunk"]

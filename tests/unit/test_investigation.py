@@ -14,6 +14,7 @@ def test_classifier_supports_generic_task_types():
     assert classify_task("Why did latency increase after the last deploy?") == "latency_investigation"
     assert classify_task("Did a deploy cause this regression?") == "deploy_regression"
     assert classify_task("Have we seen this before?") == "generic_incident_question"
+    assert classify_task("Where is the history service implemented?") == "generic_incident_question"
 
 
 def test_entity_extractor_detects_generic_entities():
@@ -53,6 +54,9 @@ def test_weak_evidence_response_is_honest():
 def test_confidence_scoring_is_low_when_key_sources_missing():
     entities = extract_entities("Why did latency increase after deploy abc1234?")
     confidence, reasons = _score_confidence(
+        query_intent="root_cause_investigation",
+        supported=False,
+        support_reasons=["root-cause investigation requires logs or deploy/change evidence"],
         entities=entities,
         evidence=[{"source_type": "runbook", "deploy_hash": None, "endpoint": None}],
         log_findings={"timestamped_logs": False},

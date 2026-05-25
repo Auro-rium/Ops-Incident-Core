@@ -35,6 +35,7 @@ def test_investigate_returns_generic_shape(project_id):
     assert response.status_code == 200
     payload = response.json()
     assert payload["task_type"] == "latency_investigation"
+    assert payload["query_intent"] == "root_cause_investigation"
     assert payload["evidence"]
     assert "likely_root_cause" in payload
     assert payload["confidence"] in {"low", "medium", "high"}
@@ -58,6 +59,8 @@ def test_investigate_debug_returns_diagnostics(project_id):
     debug = response.json()["debug"]
     assert debug["vector_candidates_count"] >= 0
     assert debug["lexical_candidates_count"] >= 0
+    assert debug["query_intent"]["intent"] == "root_cause_investigation"
+    assert "investigation_supported" in debug
     assert "applied_filters" in debug
     assert "metadata_boosts_used" in debug
     assert "top_rejected" in debug

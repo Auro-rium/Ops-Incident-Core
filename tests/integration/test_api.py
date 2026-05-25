@@ -175,7 +175,9 @@ class TestSearchAndAnswer:
         assert debug["vector_candidates_count"] >= 0
         assert debug["lexical_candidates_count"] >= 0
         assert "merged_candidates_count" in debug
+        assert debug["query_intent"]["intent"] == "root_cause_investigation"
         assert "metadata_boosts_used" in debug
+        assert "evidence_mix" in debug
         assert "top_rejected" in debug
 
     def test_answer_returns_evidence_without_llm(self, client):
@@ -185,6 +187,8 @@ class TestSearchAndAnswer:
             json={"project_id": project_id, "query": "Why did GET /v1/orders slow down after deploy abc1234?", "top_k": 8},
         )
         assert response.status_code == 200
+        assert response.json()["query_intent"] == "root_cause_investigation"
+        assert "warnings" in response.json()
         assert response.json()["evidence"]
 
 

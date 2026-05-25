@@ -12,28 +12,44 @@ SOURCE_PRIORITY = {
     "logs": 1,
     "code": 2,
     "incident": 3,
-    "runbook": 4,
+    "config": 4,
     "api_doc": 5,
+    "runbook": 6,
 }
 
 
 def _source_type_from_chunk(chunk) -> str:
+    metadata = chunk.metadata_json or {}
+    raw_source_type = metadata.get("source_type")
+    if raw_source_type in {"deploy", "logs", "code", "incident", "runbook", "api_doc", "config"}:
+        return raw_source_type
+    if raw_source_type == "incident_report":
+        return "incident"
+    if raw_source_type == "deploy_history":
+        return "deploy"
     ct = chunk.chunk_type or ""
     if ct == "deploy_diff":
         return "deploy"
     if ct == "log_window":
         return "logs"
-    if ct == "function":
+    if ct in {"function", "class", "module", "code_file"}:
         return "code"
     if ct == "incident_section":
         return "incident"
-    if ct in ("markdown_section", "api_endpoint"):
-        doc_path = chunk.metadata_json.get("document_path", "") if chunk.metadata_json else ""
+    if ct in ("api_endpoint", "proto_service", "proto_message", "proto_preamble"):
+        return "api_doc"
+    if ct == "config_section":
+        return "config"
+    if ct in ("markdown_section",):
+        doc_path = metadata.get("document_path", "")
         path = getattr(chunk, "document_path", doc_path) or ""
+        lower_path = path.lower()
         if "runbook" in path.lower():
             return "runbook"
-        if "api" in path.lower() or "openapi" in path.lower():
+        if "api" in lower_path or "openapi" in lower_path or "swagger" in lower_path:
             return "api_doc"
+        if lower_path.endswith((".yaml", ".yml", ".json", ".toml", ".ini")):
+            return "config"
         return "runbook"
     return "runbook"
 

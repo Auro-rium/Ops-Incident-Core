@@ -39,6 +39,8 @@ class Hypothesis:
 class InvestigationResult:
     question: str
     task_type: str
+    query_intent: str
+    investigation_supported: bool
     entities: InvestigationEntities
     timeline: list[TimelineEvent]
     hypotheses: list[Hypothesis]

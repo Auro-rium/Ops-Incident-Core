@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     allow_demo_project_bypass: bool = True
     max_ingest_file_bytes: int = 2_000_000
     max_chunk_tokens: int = 512
-    supported_extensions: str = ".md,.txt,.log,.json,.yaml,.yml,.py,.patch,.diff"
+    supported_extensions: str = ".md,.txt,.log,.json,.yaml,.yml,.toml,.ini,.py,.js,.ts,.jsx,.tsx,.go,.java,.proto,.patch,.diff"
     cors_allow_origins: str = Field(
         "*",
         validation_alias=AliasChoices("CORS_ALLOW_ORIGINS", "CORS_ORIGINS"),

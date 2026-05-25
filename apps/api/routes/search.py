@@ -11,6 +11,7 @@ from incidentops.observability.metrics import incr, observe_latency
 from incidentops.retrieval.citation_builder import build_citations
 from incidentops.retrieval.evidence_packer import pack_evidence
 from incidentops.retrieval.hybrid_search import hybrid_search, hybrid_search_with_debug
+from incidentops.retrieval.query_intent import classify_query_intent
 from incidentops.retrieval.reranker import rerank
 from incidentops.schemas.api import CitationInfo, SearchHit, SearchRequest, SearchResponse
 
@@ -38,6 +39,7 @@ async def search(
         )
     await ensure_project_access(db, body.project_id, user, settings)
     start = time.time()
+    query_intent = classify_query_intent(body.query)
     if body.debug:
         raw_results, retrieval_debug = await hybrid_search_with_debug(
             db,
@@ -80,4 +82,23 @@ async def search(
     if body.debug:
         debug = retrieval_debug or {}
         debug["reranked_count"] = len(reranked)
-    return SearchResponse(query=body.query, results=hits, total=len(hits), latency_ms=latency_ms, debug=debug)
+    evidence_mix = {
+        "source_types": _count_values(item["source_type"] for item in evidence),
+        "chunk_types": _count_values(item.get("chunk_type") or "unknown" for item in evidence),
+    }
+    return SearchResponse(
+        query=body.query,
+        results=hits,
+        total=len(hits),
+        latency_ms=latency_ms,
+        query_intent=query_intent.intent,
+        evidence_mix=evidence_mix,
+        debug=debug,
+    )
+
+
+def _count_values(values) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return counts

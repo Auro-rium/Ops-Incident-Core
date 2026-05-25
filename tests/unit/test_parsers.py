@@ -5,7 +5,14 @@ Unit tests for parsers — markdown, code, log, deploy, incident.
 from __future__ import annotations
 
 from incidentops.ingestion.parsers.markdown_parser import parse_markdown
-from incidentops.ingestion.parsers.code_parser import parse_go, parse_proto, parse_python
+from incidentops.ingestion.parsers.code_parser import (
+    parse_go,
+    parse_java,
+    parse_jsts,
+    parse_proto,
+    parse_python,
+    parse_structured_config,
+)
 from incidentops.ingestion.parsers.log_parser import parse_logs
 from incidentops.ingestion.parsers.deploy_parser import parse_deploy_history, parse_patch_file
 from incidentops.ingestion.parsers.incident_parser import parse_incident
@@ -74,6 +81,7 @@ class MyClass:
         chunks = parse_python(code, "test.py")
         class_chunks = [c for c in chunks if "class " in (c.section_title or "")]
         assert len(class_chunks) >= 1
+        assert any(chunk.chunk_type == "class" for chunk in class_chunks)
 
     def test_preserves_line_numbers(self):
         code = "def foo():\n    pass\n\ndef bar():\n    pass"
@@ -113,6 +121,7 @@ func (h *Handler) StartWorkflowTask() error {
         assert all(chunk.source_type == "code" for chunk in chunks)
         assert all(chunk.start_line is not None and chunk.end_line is not None for chunk in chunks)
         assert chunks[-1].metadata["language"] == "go"
+        assert any(chunk.chunk_type == "class" for chunk in chunks if chunk.section_title == "type Handler")
 
     def test_extracts_proto_services_and_messages(self):
         proto = """syntax = "proto3";
@@ -132,7 +141,30 @@ message StartWorkflowExecutionRequest {
         assert "service HistoryService" in titles
         assert "message StartWorkflowExecutionRequest" in titles
         assert all(chunk.source_type == "api_doc" for chunk in chunks)
-        assert all(chunk.chunk_type == "api_endpoint" or chunk.chunk_type == "proto_preamble" for chunk in chunks)
+        assert {"proto_service", "proto_message"} <= {chunk.chunk_type for chunk in chunks}
+
+    def test_extracts_ts_functions_and_classes(self):
+        code = """export class Worker {\n  start() {}\n}\n\nexport async function buildHistory() {\n  return true\n}\n"""
+        chunks = parse_jsts(code, "src/worker.ts", language="ts")
+        assert any(chunk.section_title == "class Worker" for chunk in chunks)
+        assert any(chunk.section_title == "function buildHistory" for chunk in chunks)
+
+    def test_extracts_java_classes_and_methods(self):
+        code = """package io.temporal;\n\npublic class HistoryService {\n  public void startWorkflow() {}\n}\n"""
+        chunks = parse_java(code, "src/main/java/io/temporal/HistoryService.java")
+        assert any(chunk.section_title == "class HistoryService" for chunk in chunks)
+        assert any(chunk.section_title == "function startWorkflow" for chunk in chunks)
+
+    def test_parses_structured_config_sections(self):
+        yaml_text = "database:\n  host: db\nserver:\n  port: 7233\n"
+        chunks = parse_structured_config(yaml_text, "config/app.yaml", source_type="config")
+        assert {chunk.section_title for chunk in chunks} >= {"config database", "config server"}
+
+    def test_parses_openapi_paths(self):
+        yaml_text = "openapi: 3.0.0\npaths:\n  /api/orders:\n    get:\n      responses: {}\n"
+        chunks = parse_structured_config(yaml_text, "openapi.yaml", source_type="api_doc")
+        assert any(chunk.chunk_type == "api_endpoint" for chunk in chunks)
+        assert any(chunk.endpoint == "GET /api/orders" for chunk in chunks)
 
 
 # ── Log parser ────────────────────────────────
