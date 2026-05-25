@@ -122,13 +122,6 @@ jobs:
           path: OpsIncident-Collector
           token: ${{ secrets.GH_READ_TOKEN || github.token }}
 
-      - name: Checkout Frontend
-        uses: actions/checkout@v4
-        with:
-          repository: Auro-rium/Ops-Incident-frontend
-          path: incidentops-frontend
-          token: ${{ secrets.GH_READ_TOKEN || github.token }}
-
       - name: Validate Azure login secrets
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -166,12 +159,13 @@ jobs:
         working-directory: Ops-Incident-Core
         env:
           COLLECTOR_REPO_PATH: ../OpsIncident-Collector
-          FRONTEND_REPO_PATH: ../incidentops-frontend
+          BUILD_FRONTEND: "false"
         run: scripts/azure_build_push_images.sh
 
       - name: Deploy Azure resources
         working-directory: Ops-Incident-Core
         env:
+          DEPLOY_FRONTEND: "false"
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           BOOTSTRAP_ADMIN_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
@@ -197,6 +191,7 @@ jobs:
       - name: Azure smoke
         working-directory: Ops-Incident-Core
         env:
+          FRONTEND_URL: ""
           SMOKE_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
           SMOKE_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
         run: scripts/azure_smoke.sh

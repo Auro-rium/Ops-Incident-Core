@@ -21,6 +21,9 @@ param collectorImageTag string = 'latest'
 @description('Frontend image tag already pushed to ACR.')
 param frontendImageTag string = 'latest'
 
+@description('Whether to deploy the frontend Container App.')
+param deployFrontend bool = false
+
 @secure()
 @description('PostgreSQL admin password.')
 param postgresAdminPassword string
@@ -671,7 +674,7 @@ resource coreMcp 'Microsoft.App/containerApps@2024-03-01' = {
   ]
 }
 
-resource frontend 'Microsoft.App/containerApps@2024-03-01' = {
+resource frontend 'Microsoft.App/containerApps@2024-03-01' = if (deployFrontend) {
   name: frontendContainerAppName
   location: location
   identity: {
@@ -1128,7 +1131,7 @@ output acrLoginServer string = containerRegistry.properties.loginServer
 output keyVaultName string = keyVault.name
 output containerAppsEnvironmentName string = containerAppsEnvironment.name
 output coreApiUrl string = 'https://${coreApi.properties.configuration.ingress.fqdn}'
-output frontendUrl string = 'https://${frontend.properties.configuration.ingress.fqdn}'
+output frontendUrl string = deployFrontend ? 'https://${frontend!.properties.configuration.ingress.fqdn}' : ''
 output mcpAppName string = coreMcp.name
 output collectorAppName string = collector.name
 output benchmarkJobName string = benchmarkJob.name
