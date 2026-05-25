@@ -78,11 +78,17 @@ param_names = {
     "azureOpenAIEmbeddingDeployment": "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
 }
 
+def coerce_value(env_name: str):
+    value = os.environ.get(env_name, "")
+    if env_name == "DEPLOY_FRONTEND":
+        return value.lower() == "true"
+    return value
+
 payload = {
     "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
     "contentVersion": "1.0.0.0",
     "parameters": {
-        bicep_name: {"value": os.environ.get(env_name, "")}
+        bicep_name: {"value": coerce_value(env_name)}
         for bicep_name, env_name in param_names.items()
     },
 }
