@@ -95,6 +95,7 @@ from apps.api.routes import (  # noqa: E402
     investigate,
     metrics,
     readiness,
+    runtime,
     runs,
     search,
     sources,
@@ -110,5 +111,6 @@ app.include_router(investigate.router)
 app.include_router(runs.router)
 app.include_router(metrics.router)
 app.include_router(readiness.router)
+app.include_router(runtime.router)
 app.include_router(evals.router)
 app.include_router(sources.router)

@@ -8,6 +8,7 @@ This folder contains technical documentation for IncidentOps Core.
 - [Deployment](./deployment.md) — Azure production boot sequence, secure configuration, runtime operations.
 - [Azure Deployment](./azure-deployment.md) — Azure Container Apps, ACR, PostgreSQL, Redis, Key Vault, Log Analytics, CI/CD.
 - [Azure Cost Guardrails](./azure-cost-guardrails.md) — budget alerts, teardown, cost risks.
+- [Cloud-Only User E2E Runbook](./user-e2e-runbook.md) — real Azure user proof with benchmark ingestion, runtime status, and MCP smoke.
 - [Security](./security.md) — threat model, trust boundaries, control matrix, incident response and verification.
 - [Retrieval](./retrieval.md) — indexing/search design and evidence retrieval behavior.
 - [Agent Workflow](./agent_workflow.md) — deterministic execution graph, approvals, event persistence.

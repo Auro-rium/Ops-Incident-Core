@@ -57,6 +57,8 @@ class TestMetadata:
 
     def test_classify_source_type(self):
         assert classify_source_type("service.py") == "code"
+        assert classify_source_type("service/history/handler.go") == "code"
+        assert classify_source_type("proto/history/service.proto") == "api_doc"
         assert classify_source_type("app.log") == "logs"
         assert classify_source_type("diff-abc.patch") == "deploy"
         assert classify_source_type("deploy-history.json") == "deploy"
@@ -65,6 +67,8 @@ class TestMetadata:
 
     def test_classify_doc_type(self):
         assert classify_doc_type("service.py") == "code"
+        assert classify_doc_type("service/history/handler.go") == "code"
+        assert classify_doc_type("proto/history/service.proto") == "api_doc"
         assert classify_doc_type("errors.log") == "log"
         assert classify_doc_type("openapi.yaml") == "api_doc"
         assert classify_doc_type("incidents/report.md") == "incident"

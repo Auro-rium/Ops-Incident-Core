@@ -90,6 +90,7 @@ var workerContainerAppName = '${namePrefix}-core-worker'
 var mcpContainerAppName = '${namePrefix}-mcp'
 var collectorContainerAppName = '${namePrefix}-collector'
 var frontendContainerAppName = '${namePrefix}-frontend'
+var benchmarkJobName = '${namePrefix}-benchmark-job'
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: logName
@@ -353,6 +354,10 @@ var sharedCoreEnv = [
   {
     name: 'METRICS_PUBLIC'
     value: 'false'
+  }
+  {
+    name: 'MCP_ENABLED'
+    value: 'true'
   }
   {
     name: 'CORS_ALLOW_ORIGINS'
@@ -862,6 +867,165 @@ exec opsincident-collector daemon run --config /tmp/collector.yaml
   ]
 }
 
+
+resource benchmarkJob 'Microsoft.App/jobs@2024-03-01' = {
+  name: benchmarkJobName
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${appIdentity.id}': {}
+    }
+  }
+  properties: {
+    environmentId: containerAppsEnvironment.id
+    configuration: {
+      triggerType: 'Manual'
+      replicaTimeout: 7200
+      replicaRetryLimit: 0
+      registries: [
+        {
+          server: containerRegistry.properties.loginServer
+          identity: appIdentity.id
+        }
+      ]
+      secrets: [
+        {
+          name: 'incidentops-token'
+          keyVaultUrl: collectorTokenSecret.properties.secretUri
+          identity: appIdentity.id
+        }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: 'benchmark'
+          image: collectorImage
+          command: [
+            '/bin/sh'
+            '-c'
+            '''
+set -eu
+: "${INCIDENTOPS_API_URL:?INCIDENTOPS_API_URL is required}"
+: "${INCIDENTOPS_PROJECT_ID:?INCIDENTOPS_PROJECT_ID is required}"
+: "${INCIDENTOPS_TOKEN:?INCIDENTOPS_TOKEN is required}"
+REPORT="/tmp/incidentops-benchmark-report.json"
+WORKDIR="/tmp/incidentops-benchmark"
+REPO_URL="${REPO_URL:-https://github.com/temporalio/temporal.git}"
+SOURCE_NAME="${SOURCE_NAME:-temporal}"
+MAX_FILES="${MAX_FILES:-1500}"
+BATCH_SIZE="${BATCH_SIZE:-100}"
+CHANGED_FILE_TARGET="${CHANGED_FILE_TARGET:-README.md}"
+set -- benchmark \
+  --repo-url "$REPO_URL" \
+  --core-url "$INCIDENTOPS_API_URL" \
+  --project-id "$INCIDENTOPS_PROJECT_ID" \
+  --source-name "$SOURCE_NAME" \
+  --output "$REPORT" \
+  --workdir "$WORKDIR" \
+  --max-files "$MAX_FILES" \
+  --batch-size "$BATCH_SIZE" \
+  --changed-file-target "$CHANGED_FILE_TARGET" \
+  --include-path README.md \
+  --include-path docs/** \
+  --include-path api/** \
+  --include-path proto/** \
+  --include-path schema/** \
+  --include-path service/** \
+  --include-path common/** \
+  --include-path temporal/** \
+  --include-path cmd/** \
+  --include-path config/** \
+  --include-path develop/** \
+  --exclude-path .git/** \
+  --exclude-path .github/** \
+  --exclude-path temporaltest/** \
+  --exclude-path tools/** \
+  --exclude-path bin/** \
+  --exclude-path dist/** \
+  --exclude-path coverage/**
+for key in QUERY_1 QUERY_2 QUERY_3 QUERY_4 QUERY_5; do
+  eval value="\${$key:-}"
+  if [ -n "$value" ]; then
+    set -- "$@" --query "$value"
+  fi
+done
+opsincident-collector "$@"
+python - "$REPORT" <<'INNERPY'
+import json, sys
+report = json.load(open(sys.argv[1], encoding='utf-8'))
+print('IncidentOps Azure Benchmark Summary')
+print(f"repo_url: {report.get('repo_url')}")
+print(f"files_seen: {report.get('files_seen')}")
+print(f"documents_synced: {report.get('documents_synced')}")
+print(f"chunks_created: {report.get('chunks_created')}")
+print(f"sync_status: {report.get('latest_core_sync_status')}")
+print(f"repeat_sync_skipped_unchanged: {report.get('repeat_sync_skipped_unchanged')}")
+print(f"changed_file_update_detected: {report.get('changed_file_update_detected')}")
+print(f"duplicate_chunks_after_update: {report.get('duplicate_chunks_after_update')}")
+print(f"search_pass: {report.get('search_pass')}")
+for item in report.get('search_queries', []):
+    print(f"query={item.get('query')!r} results={item.get('search_result_count')} paths={item.get('top_evidence_paths', [])[:3]}")
+INNERPY
+'''
+          ]
+          env: [
+            {
+              name: 'INCIDENTOPS_API_URL'
+              value: 'https://${coreApi.properties.configuration.ingress.fqdn}'
+            }
+            {
+              name: 'INCIDENTOPS_TOKEN'
+              secretRef: 'incidentops-token'
+            }
+            {
+              name: 'INCIDENTOPS_PROJECT_ID'
+              value: incidentopsProjectId
+            }
+            {
+              name: 'REPO_URL'
+              value: 'https://github.com/temporalio/temporal.git'
+            }
+            {
+              name: 'SOURCE_NAME'
+              value: 'temporal'
+            }
+            {
+              name: 'MAX_FILES'
+              value: '1500'
+            }
+            {
+              name: 'BATCH_SIZE'
+              value: '100'
+            }
+            {
+              name: 'CHANGED_FILE_TARGET'
+              value: 'README.md'
+            }
+            {
+              name: 'QUERY_1'
+              value: 'Where is the history service implemented?'
+            }
+            {
+              name: 'QUERY_2'
+              value: 'Which parts of the Temporal repo are relevant to investigating workflow task latency?'
+            }
+          ]
+          resources: {
+            cpu: json('1.0')
+            memory: '2Gi'
+          }
+        }
+      ]
+    }
+  }
+  dependsOn: [
+    coreApi
+    keyVaultSecretsAssignment
+  ]
+}
+
 resource migrationJob 'Microsoft.App/jobs@2024-03-01' = {
   name: '${namePrefix}-core-migrate'
   location: location
@@ -967,6 +1131,7 @@ output coreApiUrl string = 'https://${coreApi.properties.configuration.ingress.f
 output frontendUrl string = 'https://${frontend.properties.configuration.ingress.fqdn}'
 output mcpAppName string = coreMcp.name
 output collectorAppName string = collector.name
+output benchmarkJobName string = benchmarkJob.name
 output migrationJobName string = migrationJob.name
 output bootstrapJobName string = bootstrapJob.name
 output postgresServerName string = postgresServer.name

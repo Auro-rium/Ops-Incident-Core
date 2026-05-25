@@ -5,7 +5,7 @@ Unit tests for parsers — markdown, code, log, deploy, incident.
 from __future__ import annotations
 
 from incidentops.ingestion.parsers.markdown_parser import parse_markdown
-from incidentops.ingestion.parsers.code_parser import parse_python
+from incidentops.ingestion.parsers.code_parser import parse_go, parse_proto, parse_python
 from incidentops.ingestion.parsers.log_parser import parse_logs
 from incidentops.ingestion.parsers.deploy_parser import parse_deploy_history, parse_patch_file
 from incidentops.ingestion.parsers.incident_parser import parse_incident
@@ -89,6 +89,50 @@ class MyClass:
         code = "this is not valid python {{{}"
         chunks = parse_python(code, "broken.py")
         assert len(chunks) == 1  # fallback whole-file chunk
+
+    def test_extracts_go_functions_and_types(self):
+        code = """package history
+
+type Handler struct {
+    store Store
+}
+
+func NewHandler(store Store) *Handler {
+    return &Handler{store: store}
+}
+
+func (h *Handler) StartWorkflowTask() error {
+    return nil
+}
+"""
+        chunks = parse_go(code, "service/history/handler.go", service_name="history")
+        titles = [chunk.section_title for chunk in chunks]
+        assert "type Handler" in titles
+        assert "function NewHandler" in titles
+        assert "function StartWorkflowTask" in titles
+        assert all(chunk.source_type == "code" for chunk in chunks)
+        assert all(chunk.start_line is not None and chunk.end_line is not None for chunk in chunks)
+        assert chunks[-1].metadata["language"] == "go"
+
+    def test_extracts_proto_services_and_messages(self):
+        proto = """syntax = "proto3";
+
+package temporal.server.api.historyservice.v1;
+
+service HistoryService {
+  rpc StartWorkflowExecution(StartWorkflowExecutionRequest) returns (StartWorkflowExecutionResponse);
+}
+
+message StartWorkflowExecutionRequest {
+  string namespace = 1;
+}
+"""
+        chunks = parse_proto(proto, "proto/temporal/server/api/historyservice/v1/service.proto")
+        titles = [chunk.section_title for chunk in chunks]
+        assert "service HistoryService" in titles
+        assert "message StartWorkflowExecutionRequest" in titles
+        assert all(chunk.source_type == "api_doc" for chunk in chunks)
+        assert all(chunk.chunk_type == "api_endpoint" or chunk.chunk_type == "proto_preamble" for chunk in chunks)
 
 
 # ── Log parser ────────────────────────────────

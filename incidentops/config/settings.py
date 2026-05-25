@@ -111,6 +111,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORS_ALLOW_ORIGINS", "CORS_ORIGINS"),
     )
     allow_wildcard_cors: bool = True
+    mcp_enabled: bool = False
     mcp_core_api_url: str = Field(
         "http://127.0.0.1:8000",
         validation_alias=AliasChoices("MCP_CORE_API_URL", "INCIDENTOPS_CORE_API_URL"),

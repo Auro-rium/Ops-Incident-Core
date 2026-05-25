@@ -81,6 +81,8 @@ def classify_source_type(path: str) -> str:
     lower = path.lower()
     if lower.endswith((".py", ".js", ".ts", ".go", ".java", ".rb")):
         return "code"
+    if lower.endswith(".proto"):
+        return "api_doc"
     if lower.endswith(".log") or "/logs/" in lower:
         return "logs"
     if lower.endswith((".patch", ".diff")):
@@ -102,6 +104,8 @@ def classify_doc_type(path: str) -> str:
     lower = path.lower()
     if lower.endswith((".py", ".js", ".ts", ".go", ".java", ".rb")):
         return "code"
+    if lower.endswith(".proto"):
+        return "api_doc"
     if lower.endswith(".log") or "/logs/" in lower:
         return "log"
     if lower.endswith((".patch", ".diff")) or (

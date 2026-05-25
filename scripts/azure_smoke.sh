@@ -91,11 +91,14 @@ project = request(
     payload={"name": f"azure-smoke-{int(time.time())}", "demo_mode": False},
 )
 project_id = project["project_id"]
+runtime = request("GET", "/v1/runtime/status", token=token)
+if runtime.get("local_fallback_active"):
+    raise SystemExit(f"Runtime status reports local_fallback_active=true: {runtime}")
 if frontend_url:
     request("GET", frontend_url)
 with open(work_file, "w", encoding="utf-8") as handle:
     json.dump({"token": token, "project_id": project_id}, handle)
-print("Core health/ready/capabilities/login/project checks passed.")
+print("Core health/ready/capabilities/login/project/runtime checks passed.")
 PY
 
 TOKEN="$(python3 - "$WORK_FILE" <<'PY'

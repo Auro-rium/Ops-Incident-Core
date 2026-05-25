@@ -145,6 +145,21 @@ class CapabilitiesResponse(BaseModel):
     endpoints: dict[str, str]
 
 
+class RuntimeStatusResponse(BaseModel):
+    app_env: str
+    llm_provider: str
+    embedding_backend: str
+    retrieval_backend: str
+    worker_mode: str
+    rate_limit_backend: str
+    mcp_enabled: bool
+    azure_openai_configured: bool
+    azure_ai_search_configured: bool
+    local_fallback_active: bool
+    chat_deployment: str | None = None
+    embedding_deployment: str | None = None
+
+
 class ReadinessLatestSync(BaseModel):
     sync_id: str | None = None
     status: str | None = None

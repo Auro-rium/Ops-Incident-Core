@@ -20,11 +20,12 @@ from incidentops.ingestion.normalized import (
     NormalizedDocument,
     validate_normalized_document,
 )
-from incidentops.ingestion.parsers.code_parser import parse_python
+from incidentops.ingestion.parsers.code_parser import parse_go, parse_proto, parse_python
 from incidentops.ingestion.parsers.deploy_parser import parse_deploy_history, parse_patch_file
 from incidentops.ingestion.parsers.incident_parser import parse_incident
 from incidentops.ingestion.parsers.log_parser import parse_logs
 from incidentops.ingestion.parsers.markdown_parser import parse_markdown
+from incidentops.ingestion.schemas import RawChunk
 
 logger = logging.getLogger("incidentops.ingestion.indexer")
 
@@ -308,6 +309,12 @@ def _parse_normalized_document(
         return parse_python(document.content, document.path, service_name=service_name), None
     if suffix == ".py":
         return parse_python(document.content, document.path, service_name=service_name), None
+    if suffix == ".go":
+        return parse_go(document.content, document.path, service_name=service_name), None
+    if suffix == ".proto":
+        return parse_proto(document.content, document.path, service_name=service_name), None
+    if source_type == "code":
+        return _parse_generic_code(document.content, document.path, service_name=service_name), None
     if suffix in {".yaml", ".yml"}:
         hinted_source_type = "api_doc" if source_type == "api_doc" else source_type
         return parse_markdown(document.content, document.path, source_type=hinted_source_type, service_name=service_name), None
@@ -318,3 +325,23 @@ def _parse_normalized_document(
         return parse_markdown(document.content, document.path, source_type=source_type, service_name=service_name), None
     logger.info("No parser configured for normalized document %s", document.path)
     return [], "no parser configured"
+
+
+def _parse_generic_code(content: str, path: str, *, service_name: str | None) -> list[RawChunk]:
+    lines = content.splitlines()
+    if not lines:
+        return []
+    return [
+        RawChunk(
+            text=content,
+            chunk_type="code_file",
+            source_type="code",
+            document_path=path,
+            doc_type="code",
+            service_name=service_name,
+            section_title=PurePosixPath(path).name,
+            start_line=1,
+            end_line=len(lines),
+            metadata={"parser": "generic_code"},
+        )
+    ]

@@ -12,6 +12,7 @@ from sqlalchemy.pool import NullPool
 
 from incidentops.config.settings import get_settings
 from incidentops.db.models import AuditEvent, ProjectMember, ProjectRole, User
+from incidentops.security.auth import create_access_token
 from incidentops.security.passwords import hash_password
 
 BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
@@ -64,6 +65,16 @@ async def _audit_count(action: str) -> int:
         count = int(result.scalar_one())
     await engine.dispose()
     return count
+
+
+async def _admin_auth_header_from_db() -> dict[str, str]:
+    factory, engine = _test_session_factory()
+    async with factory() as db:
+        result = await db.execute(select(User).where(User.email == "admin@incidentops.local"))
+        user = result.scalar_one()
+        token, _ = create_access_token(user, get_settings())
+    await engine.dispose()
+    return {"Authorization": f"Bearer {token}"}
 
 
 def test_login_returns_jwt_and_auth_me_accepts_it():
@@ -294,3 +305,28 @@ async def _remove_membership(project_id: str, email: str) -> None:
 def _test_session_factory():
     engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
     return async_sessionmaker(engine, expire_on_commit=False), engine
+
+
+def test_runtime_status_requires_auth_and_returns_safe_cloud_fields():
+    client = httpx.Client(base_url=BASE_URL, timeout=120.0)
+    unauthenticated = client.get("/v1/runtime/status")
+    assert unauthenticated.status_code == 401
+
+    response = client.get("/v1/runtime/status", headers=asyncio.run(_admin_auth_header_from_db()))
+    assert response.status_code == 200
+    payload = response.json()
+    assert "app_env" in payload
+    assert "llm_provider" in payload
+    assert "embedding_backend" in payload
+    assert "retrieval_backend" in payload
+    assert "worker_mode" in payload
+    assert "rate_limit_backend" in payload
+    assert "mcp_enabled" in payload
+    assert "azure_openai_configured" in payload
+    assert "local_fallback_active" in payload
+    serialized = response.text.lower()
+    assert "api_key" not in serialized
+    assert "password" not in serialized
+    assert "secret" not in serialized
+    assert "token" not in serialized
+    assert "database_url" not in serialized

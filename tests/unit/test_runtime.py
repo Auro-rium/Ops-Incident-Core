@@ -118,3 +118,51 @@ async def _job(job_type: str, payload: dict):
     job = await queue.dequeue()
     assert job is not None
     return job
+
+
+def test_runtime_status_reports_cloud_mode_without_secret_values():
+    from apps.api.routes.runtime import build_runtime_status
+
+    status = build_runtime_status(
+        Settings(
+            app_env="production",
+            embedding_model="azure-openai",
+            worker_mode="queue",
+            rate_limit_backend="redis",
+            azure_openai_endpoint="https://example.openai.azure.com",
+            azure_openai_api_key="not-a-real-secret",
+            azure_openai_chat_deployment="incidentops-chat",
+            azure_openai_embedding_deployment="incidentops-embed",
+            mcp_token="token-value",
+            mcp_transport="streamable-http",
+        )
+    )
+
+    data = status.model_dump()
+    assert data["app_env"] == "production"
+    assert data["llm_provider"] == "azure_openai"
+    assert data["embedding_backend"] == "azure_openai"
+    assert data["retrieval_backend"] == "postgres_pgvector"
+    assert data["mcp_enabled"] is True
+    assert data["azure_openai_configured"] is True
+    assert data["local_fallback_active"] is False
+    assert data["chat_deployment"] == "incidentops-chat"
+    assert data["embedding_deployment"] == "incidentops-embed"
+    assert "not-a-real-secret" not in repr(data)
+
+
+def test_runtime_status_flags_production_fallback():
+    from apps.api.routes.runtime import build_runtime_status
+
+    status = build_runtime_status(
+        Settings(
+            app_env="production",
+            embedding_model="local-hash-v1",
+            worker_mode="inline",
+            rate_limit_backend="memory",
+            azure_openai_api_key="disabled",
+        )
+    )
+
+    assert status.local_fallback_active is True
+    assert status.llm_provider == "none"
