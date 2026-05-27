@@ -196,14 +196,12 @@ uv run --extra dev python scripts/check_migrations.py
 
 ## Documentation
 
+- [Architecture](docs/architecture.md)
 - [Azure deployment](docs/azure-deployment.md)
 - [Azure cost guardrails](docs/azure-cost-guardrails.md)
+- [Cloud-only user E2E runbook](docs/user-e2e-runbook.md)
 - [Product proof](docs/product-proof.md)
 - [Temporal benchmark](docs/temporal-benchmark.md)
 - [MCP architecture](docs/mcp-architecture.md)
 - [Collector/Core contract](docs/collector-core-contract.md)
-- [Deployment operations](docs/deployment.md)
 - [Security](docs/security.md)
-- [Retrieval](docs/retrieval.md)
-- [Agent workflow](docs/agent_workflow.md)
-- [Evals](docs/evals.md)
