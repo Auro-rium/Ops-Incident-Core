@@ -1,33 +1,48 @@
 # Documentation Index
 
-This folder contains technical documentation for IncidentOps Core.
+This folder contains the current documentation for IncidentOps Core.
 
-## Documentation Map
+The active product story is Azure-first:
 
-- [Architecture](./architecture.md) — system topology, component responsibilities, data flows, failure modes.
-- [Deployment](./deployment.md) — Azure production boot sequence, secure configuration, runtime operations.
-- [Azure Deployment](./azure-deployment.md) — Azure Container Apps, ACR, PostgreSQL, Redis, Key Vault, Log Analytics, CI/CD.
-- [Azure Cost Guardrails](./azure-cost-guardrails.md) — budget alerts, teardown, cost risks.
-- [Cloud-Only User E2E Runbook](./user-e2e-runbook.md) — real Azure user proof with benchmark ingestion, runtime status, and MCP smoke.
-- [Security](./security.md) — threat model, trust boundaries, control matrix, incident response and verification.
-- [Retrieval](./retrieval.md) — indexing/search design and evidence retrieval behavior.
-- [Agent Workflow](./agent_workflow.md) — deterministic execution graph, approvals, event persistence.
-- [Evals](./evals.md) — evaluation strategy and runtime behavior.
-- [Collector Protocol](./collector_protocol.md) — collector/sync/document ingestion APIs and constraints.
-- [Collector/Core Contract](./collector-core-contract.md) — versioned Core contract used by Collector.
-- [Sample Output](./sample_output.md) — representative answer/report format.
-- [Demo Script](./demo_script.md) — product demonstration walkthrough.
+```text
+Collector -> Core API -> PostgreSQL/pgvector -> Azure OpenAI -> readiness/search/investigate -> Core MCP -> frontend
+```
 
-## Audience & Purpose
+Local execution is kept only for deterministic development and CI safety. It is not the flagship product proof path.
 
-| Doc | Primary audience | Purpose |
-|---|---|---|
-| architecture.md | Developers, SREs | Understand end-to-end system design and reliability behavior |
-| deployment.md | SREs, platform engineers | Operate safely in Azure staging/production |
-| azure-deployment.md | Platform engineers | Provision and deploy Azure resources |
-| azure-cost-guardrails.md | Operators | Avoid accidental Azure spend |
-| security.md | Security reviewers, operators | Validate controls and run security operations |
-| retrieval.md | Developers, ML engineers | Understand retrieval mechanics and constraints |
-| agent_workflow.md | Developers, operators | Understand workflow nodes and approval mechanics |
-| evals.md | ML engineers, QA | Evaluate and track quality regression |
-| collector_protocol.md | Integrators | Implement compliant ingestion clients |
+## Current Documentation Map
+
+- [Architecture](./architecture.md) — system topology, component responsibilities, Azure runtime split, and failure modes.
+- [Azure deployment](./azure-deployment.md) — Azure Container Apps, ACR, PostgreSQL, Redis, Key Vault, Log Analytics, Azure OpenAI, and CI/CD.
+- [Azure cost guardrails](./azure-cost-guardrails.md) — budget alerts, teardown, and cloud cost risks.
+- [Cloud-only user E2E runbook](./user-e2e-runbook.md) — real Azure user proof with benchmark ingestion, runtime status, and MCP smoke.
+- [Product proof](./product-proof.md) — what counts as product proof, current metrics, and what not to overclaim.
+- [Temporal benchmark](./temporal-benchmark.md) — current beast-repo benchmark, first-run bottleneck, and rerun criteria.
+- [MCP architecture](./mcp-architecture.md) — Core MCP as the product MCP and Collector MCP as local/private operator tooling only.
+- [Collector/Core contract](./collector-core-contract.md) — versioned Collector-to-Core ingestion contract.
+- [Security](./security.md) — threat model, trust boundaries, controls, and verification checklist.
+
+## Documentation Cleanup Result
+
+Kept:
+
+- `architecture.md`
+- `azure-deployment.md`
+- `azure-cost-guardrails.md`
+- `user-e2e-runbook.md`
+- `product-proof.md`
+- `temporal-benchmark.md`
+- `mcp-architecture.md`
+- `collector-core-contract.md`
+- `security.md`
+
+Removed as stale or redundant:
+
+- `retrieval.md` — too thin and superseded by architecture/product-proof until a real retrieval design doc is written.
+- `agent_workflow.md` — too thin and superseded by architecture/deployment workflow notes.
+- `evals.md` — too thin and not useful without a proper benchmark/eval strategy doc.
+- `collector_protocol.md` — redundant with `collector-core-contract.md`.
+- `sample_output.md` — stale sample, replaced by product proof and actual benchmark/report expectations.
+- `demo_script.md` — stale local/demo flow, replaced by cloud-only user E2E runbook.
+
+If those topics need dedicated docs later, recreate them with real detail and current Azure assumptions. Do not revive tiny placeholder docs merely so the docs folder can cosplay as comprehensive. Tiny docs lie by omission, which is rude even by software standards.
