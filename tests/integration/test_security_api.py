@@ -77,6 +77,16 @@ async def _admin_auth_header_from_db() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+async def _auth_header_for_email_from_db(email: str) -> dict[str, str]:
+    factory, engine = _test_session_factory()
+    async with factory() as db:
+        result = await db.execute(select(User).where(User.email == email))
+        user = result.scalar_one()
+        token, _ = create_access_token(user, get_settings())
+    await engine.dispose()
+    return {"Authorization": f"Bearer {token}"}
+
+
 def test_login_returns_jwt_and_auth_me_accepts_it():
     client = httpx.Client(base_url=BASE_URL, timeout=120.0)
     headers = _login(client)
@@ -125,7 +135,7 @@ def test_viewer_cannot_create_source_and_permission_denied_is_audited():
 
 def test_viewer_cannot_delete_project_or_source():
     client = httpx.Client(base_url=BASE_URL, timeout=120.0)
-    admin_headers = _login(client)
+    admin_headers = asyncio.run(_admin_auth_header_from_db())
     project_id = _create_project(client, admin_headers)
     source_id = client.post(
         f"/v1/projects/{project_id}/sources",
@@ -133,7 +143,8 @@ def test_viewer_cannot_delete_project_or_source():
         json={"name": "logs", "source_type": "filesystem", "sync_mode": "manual", "config": {}},
     ).json()["id"]
     viewer_email, viewer_password = asyncio.run(_create_user_member(project_id, ProjectRole.viewer))
-    viewer_headers = _login(client, viewer_email, viewer_password)
+    assert viewer_password
+    viewer_headers = asyncio.run(_auth_header_for_email_from_db(viewer_email))
 
     source_delete = client.delete(f"/v1/projects/{project_id}/sources/{source_id}", headers=viewer_headers)
     project_delete = client.delete(f"/v1/projects/{project_id}", headers=viewer_headers)
