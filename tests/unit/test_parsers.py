@@ -117,11 +117,14 @@ func (h *Handler) StartWorkflowTask() error {
         titles = [chunk.section_title for chunk in chunks]
         assert "type Handler" in titles
         assert "function NewHandler" in titles
-        assert "function StartWorkflowTask" in titles
+        assert "method StartWorkflowTask" in titles
         assert all(chunk.source_type == "code" for chunk in chunks)
         assert all(chunk.start_line is not None and chunk.end_line is not None for chunk in chunks)
         assert chunks[-1].metadata["language"] == "go"
-        assert any(chunk.chunk_type == "class" for chunk in chunks if chunk.section_title == "type Handler")
+        assert any(chunk.chunk_type == "go_type" for chunk in chunks if chunk.section_title == "type Handler")
+        assert any(chunk.chunk_type == "go_function" for chunk in chunks if chunk.section_title == "function NewHandler")
+        assert any(chunk.chunk_type == "go_method" for chunk in chunks if chunk.section_title == "method StartWorkflowTask")
+        assert any(chunk.metadata.get("package_name") == "history" for chunk in chunks)
 
     def test_extracts_proto_services_and_messages(self):
         proto = """syntax = "proto3";
@@ -132,6 +135,10 @@ service HistoryService {
   rpc StartWorkflowExecution(StartWorkflowExecutionRequest) returns (StartWorkflowExecutionResponse);
 }
 
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+}
+
 message StartWorkflowExecutionRequest {
   string namespace = 1;
 }
@@ -139,9 +146,12 @@ message StartWorkflowExecutionRequest {
         chunks = parse_proto(proto, "proto/temporal/server/api/historyservice/v1/service.proto")
         titles = [chunk.section_title for chunk in chunks]
         assert "service HistoryService" in titles
+        assert "rpc StartWorkflowExecution" in titles
+        assert "enum EventType" in titles
         assert "message StartWorkflowExecutionRequest" in titles
         assert all(chunk.source_type == "api_doc" for chunk in chunks)
-        assert {"proto_service", "proto_message"} <= {chunk.chunk_type for chunk in chunks}
+        assert {"proto_service", "proto_rpc", "proto_enum", "proto_message"} <= {chunk.chunk_type for chunk in chunks}
+        assert any(chunk.metadata.get("package_name") == "temporal.server.api.historyservice.v1" for chunk in chunks)
 
     def test_extracts_ts_functions_and_classes(self):
         code = """export class Worker {\n  start() {}\n}\n\nexport async function buildHistory() {\n  return true\n}\n"""

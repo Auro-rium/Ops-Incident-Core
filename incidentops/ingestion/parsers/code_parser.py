@@ -13,7 +13,12 @@ import yaml
 from incidentops.ingestion.schemas import RawChunk
 
 GO_DECL_RE = re.compile(r"^(func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)|type\s+([A-Za-z_]\w*)\s+(?:struct|interface|func|\w+))\b")
+GO_PACKAGE_RE = re.compile(r"^\s*package\s+([A-Za-z_]\w*)\b", re.MULTILINE)
+GO_FUNC_RE = re.compile(r"^\s*func\s+(?P<receiver>\([^)]*\)\s*)?(?P<name>[A-Za-z_]\w*)\s*\(")
+GO_TYPE_RE = re.compile(r"^\s*type\s+(?P<name>[A-Za-z_]\w*)\s+(?P<kind>struct|interface|func|\w+)\b")
 PROTO_DECL_RE = re.compile(r"^\s*(service|message|enum)\s+([A-Za-z_]\w*)\s*\{?")
+PROTO_RPC_RE = re.compile(r"^\s*rpc\s+([A-Za-z_]\w*)\s*\(")
+PROTO_PACKAGE_RE = re.compile(r"^\s*package\s+([A-Za-z_][\w.]*)\s*;", re.MULTILINE)
 JS_DECL_RE = re.compile(
     r"^\s*(?:export\s+)?(?:(class)\s+([A-Za-z_]\w*)|(async\s+)?function\s+([A-Za-z_]\w*)|const\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\(|let\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\(|var\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\()"
 )
@@ -108,27 +113,74 @@ def parse_python(content: str, file_path: str, service_name: str | None = None) 
 
 
 def parse_go(content: str, file_path: str, service_name: str | None = None) -> list[RawChunk]:
-    return _parse_declaration_language(
+    lines = content.splitlines()
+    if not lines:
+        return []
+
+    package_name = _match_first(GO_PACKAGE_RE, content)
+    declarations: list[tuple[int, str, str]] = []
+    for index, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        function_match = GO_FUNC_RE.match(stripped)
+        if function_match:
+            kind = "method" if function_match.group("receiver") else "function"
+            declarations.append((index, kind, function_match.group("name")))
+            continue
+        type_match = GO_TYPE_RE.match(stripped)
+        if type_match:
+            declarations.append((index, "type", type_match.group("name")))
+
+    chunks = _declaration_chunks(
         content,
         file_path,
+        declarations,
         service_name=service_name,
         source_type="code",
+        doc_type="code",
+        preamble_chunk_type="go_module",
         fallback_chunk_type="code_file",
-        declaration_re=GO_DECL_RE,
         language="go",
+        chunk_type_for_kind={"function": "go_function", "method": "go_method", "type": "go_type"},
+        package_name=package_name,
     )
+    return chunks
 
 
 def parse_proto(content: str, file_path: str, service_name: str | None = None) -> list[RawChunk]:
-    return _parse_declaration_language(
+    lines = content.splitlines()
+    if not lines:
+        return []
+
+    package_name = _match_first(PROTO_PACKAGE_RE, content)
+    declarations: list[tuple[int, str, str]] = []
+    for index, line in enumerate(lines, start=1):
+        decl_match = PROTO_DECL_RE.match(line)
+        if decl_match:
+            declarations.append((index, decl_match.group(1), decl_match.group(2)))
+            continue
+        rpc_match = PROTO_RPC_RE.match(line)
+        if rpc_match:
+            declarations.append((index, "rpc", rpc_match.group(1)))
+
+    chunks = _declaration_chunks(
         content,
         file_path,
+        declarations,
         service_name=service_name,
         source_type="api_doc",
+        doc_type="api_doc",
+        preamble_chunk_type="proto_preamble",
         fallback_chunk_type="api_endpoint",
-        declaration_re=PROTO_DECL_RE,
         language="proto",
+        chunk_type_for_kind={
+            "service": "proto_service",
+            "rpc": "proto_rpc",
+            "message": "proto_message",
+            "enum": "proto_enum",
+        },
+        package_name=package_name,
     )
+    return chunks
 
 
 def parse_jsts(
@@ -211,6 +263,93 @@ def parse_structured_config(
             start_line=1,
             end_line=len(lines),
             metadata={"language": _language_from_path(lower), "kind": "config_file"},
+        )
+    ]
+
+
+def _declaration_chunks(
+    content: str,
+    file_path: str,
+    declarations: list[tuple[int, str, str]],
+    *,
+    service_name: str | None,
+    source_type: str,
+    doc_type: str,
+    preamble_chunk_type: str,
+    fallback_chunk_type: str,
+    language: str,
+    chunk_type_for_kind: dict[str, str],
+    package_name: str | None = None,
+) -> list[RawChunk]:
+    lines = content.splitlines()
+    chunks: list[RawChunk] = []
+    if declarations and declarations[0][0] > 1:
+        preamble = "\n".join(lines[: declarations[0][0] - 1]).strip()
+        if preamble:
+            chunks.append(
+                RawChunk(
+                    text=preamble,
+                    chunk_type=preamble_chunk_type,
+                    source_type=source_type,
+                    document_path=file_path,
+                    doc_type=doc_type,
+                    service_name=service_name,
+                    section_title="module preamble",
+                    start_line=1,
+                    end_line=declarations[0][0] - 1,
+                    metadata={
+                        "language": language,
+                        "kind": "preamble",
+                        **({"package_name": package_name} if package_name else {}),
+                    },
+                )
+            )
+
+    for idx, (start_line, kind, symbol) in enumerate(declarations):
+        end_line = declarations[idx + 1][0] - 1 if idx + 1 < len(declarations) else len(lines)
+        text = "\n".join(lines[start_line - 1 : end_line]).strip()
+        if not text:
+            continue
+        chunks.append(
+            RawChunk(
+                text=text,
+                chunk_type=chunk_type_for_kind.get(kind, fallback_chunk_type),
+                source_type=source_type,
+                document_path=file_path,
+                doc_type=doc_type,
+                service_name=service_name,
+                section_title=f"{kind} {symbol}",
+                start_line=start_line,
+                end_line=end_line,
+                metadata={
+                    "language": language,
+                    "symbol": symbol,
+                    "symbol_name": symbol,
+                    "kind": kind,
+                    **({"package_name": package_name} if package_name else {}),
+                },
+            )
+        )
+
+    if chunks:
+        return chunks
+
+    return [
+        RawChunk(
+            text=content,
+            chunk_type=fallback_chunk_type,
+            source_type=source_type,
+            document_path=file_path,
+            doc_type=doc_type,
+            service_name=service_name,
+            section_title=file_path.rsplit("/", 1)[-1],
+            start_line=1,
+            end_line=len(lines),
+            metadata={
+                "language": language,
+                "kind": "file",
+                **({"package_name": package_name} if package_name else {}),
+            },
         )
     ]
 
@@ -302,6 +441,11 @@ def _parse_declaration_language(
             metadata={"language": language, "kind": "file"},
         )
     ]
+
+
+def _match_first(pattern: re.Pattern[str], content: str) -> str | None:
+    match = pattern.search(content)
+    return match.group(1) if match else None
 
 
 def _parse_regex_language(

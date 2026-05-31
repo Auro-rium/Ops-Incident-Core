@@ -88,6 +88,16 @@ _SOURCE_TYPE_ALIASES = {
     "unknown": "unknown_text",
 }
 _CHUNK_TYPE_BOOSTS = {
+    "go_function": 0.14,
+    "go_method": 0.14,
+    "go_type": 0.12,
+    "go_module": 0.08,
+    "python_function": 0.14,
+    "python_class": 0.12,
+    "ts_function": 0.14,
+    "ts_class": 0.12,
+    "java_function": 0.14,
+    "java_class": 0.12,
     "function": 0.12,
     "class": 0.12,
     "module": 0.08,
@@ -95,7 +105,9 @@ _CHUNK_TYPE_BOOSTS = {
     "config_section": 0.12,
     "api_endpoint": 0.10,
     "proto_service": 0.12,
+    "proto_rpc": 0.14,
     "proto_message": 0.08,
+    "proto_enum": 0.08,
     "markdown_section": 0.08,
     "log_window": 0.12,
     "error_cluster": 0.12,
@@ -358,11 +370,26 @@ def _chunk_source_type(chunk) -> str:
         return "deploy"
     if chunk_type == "log_window":
         return "logs"
-    if chunk_type in {"function", "class", "module", "code_file"}:
+    if chunk_type in {
+        "function",
+        "class",
+        "module",
+        "code_file",
+        "go_function",
+        "go_method",
+        "go_type",
+        "go_module",
+        "python_function",
+        "python_class",
+        "ts_function",
+        "ts_class",
+        "java_function",
+        "java_class",
+    }:
         return "code"
     if chunk_type == "incident_section":
         return "incident"
-    if chunk_type in {"api_endpoint", "proto_service", "proto_message"}:
+    if chunk_type in {"api_endpoint", "proto_service", "proto_rpc", "proto_message", "proto_enum"}:
         return "api_doc"
     if chunk_type == "config_section":
         return "config"
@@ -377,7 +404,19 @@ def _chunk_source_type(chunk) -> str:
 
 def _metadata_terms(metadata: dict[str, Any]) -> list[str]:
     terms: list[str] = []
-    for key in ("language", "service_name", "module_path", "package_path", "title", "severity", "config_key", "symbol", "kind"):
+    for key in (
+        "language",
+        "service_name",
+        "module_path",
+        "package_path",
+        "package_name",
+        "title",
+        "severity",
+        "config_key",
+        "symbol",
+        "symbol_name",
+        "kind",
+    ):
         value = metadata.get(key)
         if isinstance(value, str):
             terms.extend(_tokenize(value))

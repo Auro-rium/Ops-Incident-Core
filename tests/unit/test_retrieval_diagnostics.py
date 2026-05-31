@@ -34,6 +34,13 @@ def test_code_location_boosts_code_and_penalizes_readme():
     assert code_boost > readme_boost
 
 
+def test_code_location_with_latency_symbol_does_not_become_runtime_query():
+    intent = classify_query_intent("Where is HistoryServiceLatencyProbe implemented?")
+
+    assert intent.intent == "code_location"
+    assert "go_function" in intent.preferred_chunk_types
+
+
 def test_runtime_query_warns_when_runtime_evidence_missing():
     intent = classify_query_intent("Why did workflow latency spike?")
     boost, reasons = _metadata_boost(

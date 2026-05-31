@@ -385,6 +385,8 @@ _CHUNK_METADATA_KEYS = {
     "deploy_hashes",
     "module_path",
     "package_path",
+    "package_name",
+    "symbol_name",
     "symbol_names",
     "function_names",
     "class_names",

@@ -193,6 +193,33 @@ def classify_query_intent(query: str) -> QueryIntent:
             query_terms=query_terms,
             explanation="query asks for runbooks, remediation, or operational procedures",
         )
+    if _looks_like_code_location(lower):
+        return QueryIntent(
+            intent=INTENT_CODE_LOCATION,
+            preferred_source_types=["code", "api_doc", "config", "runbook"],
+            preferred_chunk_types=[
+                "go_function",
+                "go_method",
+                "go_type",
+                "python_function",
+                "python_class",
+                "ts_function",
+                "ts_class",
+                "java_function",
+                "java_class",
+                "function",
+                "class",
+                "module",
+                "go_module",
+                "code_file",
+                "api_endpoint",
+                "proto_service",
+                "proto_rpc",
+                "proto_message",
+            ],
+            query_terms=query_terms,
+            explanation="query asks where behavior, modules, or symbols are implemented",
+        )
     if _contains_any(lower, _ROOT_CAUSE_TERMS):
         return QueryIntent(
             intent=INTENT_RUNTIME_INCIDENT,
@@ -206,7 +233,7 @@ def classify_query_intent(query: str) -> QueryIntent:
                 if _contains_any(lower, terms)
             ],
             preferred_source_types=["logs", "deploy", "incident", "runbook", "code"],
-            preferred_chunk_types=["log_window", "deploy_diff", "incident_section", "function", "markdown_section"],
+            preferred_chunk_types=["log_window", "deploy_diff", "incident_section", "go_function", "function", "markdown_section"],
             query_terms=query_terms,
             explanation="query asks for incident explanation, causality, or investigation support",
         )
@@ -214,7 +241,7 @@ def classify_query_intent(query: str) -> QueryIntent:
         return QueryIntent(
             intent=INTENT_DEPLOY_REGRESSION,
             preferred_source_types=["deploy", "logs", "incident", "code"],
-            preferred_chunk_types=["deploy_diff", "release_note", "log_window", "function", "config_section"],
+            preferred_chunk_types=["deploy_diff", "release_note", "log_window", "go_function", "function", "config_section"],
             query_terms=query_terms,
             explanation="query asks about deploys, releases, diffs, or changes before an incident",
         )
@@ -231,7 +258,7 @@ def classify_query_intent(query: str) -> QueryIntent:
             intent=INTENT_API_CONTRACT,
             secondary_intents=[INTENT_CODE_LOCATION] if "implemented" in lower else [],
             preferred_source_types=["api_doc", "code", "runbook", "config"],
-            preferred_chunk_types=["api_endpoint", "proto_service", "proto_message", "function", "markdown_section"],
+            preferred_chunk_types=["api_endpoint", "proto_service", "proto_rpc", "proto_message", "proto_enum", "go_function", "function", "markdown_section"],
             query_terms=query_terms,
             explanation="query asks about API, route, RPC, protobuf, or endpoint contracts",
         )
@@ -240,7 +267,7 @@ def classify_query_intent(query: str) -> QueryIntent:
             intent=INTENT_CONFIG_LOOKUP,
             secondary_intents=[INTENT_CODE_LOCATION] if "implemented" in lower else [],
             preferred_source_types=["config", "deploy", "runbook", "code"],
-            preferred_chunk_types=["config_section", "deploy_diff", "markdown_section", "function"],
+            preferred_chunk_types=["config_section", "deploy_diff", "markdown_section", "go_function", "function"],
             query_terms=query_terms,
             explanation="query asks about configuration, deployment config, environment, or dependency settings",
         )
@@ -248,22 +275,14 @@ def classify_query_intent(query: str) -> QueryIntent:
         return QueryIntent(
             intent=INTENT_ARCHITECTURE,
             preferred_source_types=["runbook", "api_doc", "code", "config"],
-            preferred_chunk_types=["markdown_section", "module", "proto_service", "config_section"],
+            preferred_chunk_types=["markdown_section", "module", "go_module", "proto_service", "proto_message", "config_section"],
             query_terms=query_terms,
             explanation="query asks for architecture, boundaries, or design context",
-        )
-    if _looks_like_code_location(lower):
-        return QueryIntent(
-            intent=INTENT_CODE_LOCATION,
-            preferred_source_types=["code", "api_doc", "config", "runbook"],
-            preferred_chunk_types=["function", "class", "module", "code_file", "api_endpoint", "proto_service"],
-            query_terms=query_terms,
-            explanation="query asks where behavior, modules, or symbols are implemented",
         )
     return QueryIntent(
         intent=INTENT_GENERIC,
         preferred_source_types=["runbook", "code", "config", "api_doc"],
-        preferred_chunk_types=["markdown_section", "module", "function", "config_section"],
+        preferred_chunk_types=["markdown_section", "module", "go_module", "go_function", "function", "config_section"],
         query_terms=query_terms,
         explanation="balanced retrieval because query intent is ambiguous",
     )
