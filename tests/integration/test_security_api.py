@@ -117,10 +117,11 @@ def test_failed_and_successful_login_write_audit_events():
 
 def test_viewer_cannot_create_source_and_permission_denied_is_audited():
     client = httpx.Client(base_url=BASE_URL, timeout=120.0)
-    admin_headers = _login(client)
+    admin_headers = asyncio.run(_admin_auth_header_from_db())
     project_id = _create_project(client, admin_headers)
     viewer_email, viewer_password = asyncio.run(_create_user_member(project_id, ProjectRole.viewer))
-    viewer_headers = _login(client, viewer_email, viewer_password)
+    assert viewer_password
+    viewer_headers = asyncio.run(_auth_header_for_email_from_db(viewer_email))
 
     before = asyncio.run(_audit_count("permission_denied"))
     response = client.post(
@@ -155,10 +156,11 @@ def test_viewer_cannot_delete_project_or_source():
 
 def test_viewer_cannot_batch_ingest():
     client = httpx.Client(base_url=BASE_URL, timeout=120.0)
-    admin_headers = _login(client)
+    admin_headers = asyncio.run(_admin_auth_header_from_db())
     project_id = _create_project(client, admin_headers)
     viewer_email, viewer_password = asyncio.run(_create_user_member(project_id, ProjectRole.viewer))
-    viewer_headers = _login(client, viewer_email, viewer_password)
+    assert viewer_password
+    viewer_headers = asyncio.run(_auth_header_for_email_from_db(viewer_email))
 
     source = client.post(
         f"/v1/projects/{project_id}/sources",
@@ -180,10 +182,11 @@ def test_viewer_cannot_batch_ingest():
 
 def test_viewer_cannot_use_local_path_ingest():
     client = httpx.Client(base_url=BASE_URL, timeout=120.0)
-    admin_headers = _login(client)
+    admin_headers = asyncio.run(_admin_auth_header_from_db())
     project_id = _create_project(client, admin_headers)
     viewer_email, viewer_password = asyncio.run(_create_user_member(project_id, ProjectRole.viewer))
-    viewer_headers = _login(client, viewer_email, viewer_password)
+    assert viewer_password
+    viewer_headers = asyncio.run(_auth_header_for_email_from_db(viewer_email))
 
     denied = client.post(
         f"/v1/projects/{project_id}/ingest",
@@ -198,14 +201,14 @@ def test_metrics_require_authentication_by_default():
     unauthenticated = client.get("/metrics")
     assert unauthenticated.status_code == 401
 
-    authenticated = client.get("/metrics", headers=_login(client))
+    authenticated = client.get("/metrics", headers=asyncio.run(_admin_auth_header_from_db()))
     assert authenticated.status_code == 200
     assert "http_requests_total" in authenticated.text or "app_startups_total" in authenticated.text
 
 
 def test_batch_ingest_oversized_document_is_per_doc_error_and_audited():
     client = httpx.Client(base_url=BASE_URL, timeout=120.0)
-    admin_headers = _login(client)
+    admin_headers = asyncio.run(_admin_auth_header_from_db())
     project_id = _create_project(client, admin_headers)
     source = client.post(
         f"/v1/projects/{project_id}/sources",
@@ -245,7 +248,7 @@ def test_batch_ingest_oversized_document_is_per_doc_error_and_audited():
 
 def test_source_config_rejects_secret_values_without_echoing_secret():
     client = httpx.Client(base_url=BASE_URL, timeout=120.0)
-    headers = _login(client)
+    headers = asyncio.run(_admin_auth_header_from_db())
     project_id = _create_project(client, headers)
     secret = "ghp_abcdefghijklmnopqrstuvwxyz123456"
     response = client.post(
@@ -264,7 +267,7 @@ def test_source_config_rejects_secret_values_without_echoing_secret():
 
 def test_investigator_cannot_approve_but_approver_can():
     client = httpx.Client(base_url=BASE_URL, timeout=120.0)
-    admin_headers = _login(client)
+    admin_headers = asyncio.run(_admin_auth_header_from_db())
     project_id = _create_project(client, admin_headers)
     run = client.post(
         "/v1/runs",
@@ -275,22 +278,25 @@ def test_investigator_cannot_approve_but_approver_can():
     run_id = run.json()["run_id"]
 
     investigator_email, investigator_password = asyncio.run(_create_user_member(project_id, ProjectRole.investigator))
-    investigator_headers = _login(client, investigator_email, investigator_password)
+    assert investigator_password
+    investigator_headers = asyncio.run(_auth_header_for_email_from_db(investigator_email))
     denied = client.post(f"/v1/runs/{run_id}/approve", headers=investigator_headers, json={"rationale": "ok"})
     assert denied.status_code == 403
 
     approver_email, approver_password = asyncio.run(_create_user_member(project_id, ProjectRole.approver))
-    approver_headers = _login(client, approver_email, approver_password)
+    assert approver_password
+    approver_headers = asyncio.run(_auth_header_for_email_from_db(approver_email))
     approved = client.post(f"/v1/runs/{run_id}/approve", headers=approver_headers, json={"rationale": "ok"})
     assert approved.status_code == 200
 
 
 def test_non_member_cannot_search_project_and_limits_are_rejected():
     client = httpx.Client(base_url=BASE_URL, timeout=120.0)
-    admin_headers = _login(client)
+    admin_headers = asyncio.run(_admin_auth_header_from_db())
     project_id = _create_project(client, admin_headers)
     outsider_email, outsider_password = asyncio.run(_create_user_member(project_id, ProjectRole.viewer))
-    outsider_headers = _login(client, outsider_email, outsider_password)
+    assert outsider_password
+    outsider_headers = asyncio.run(_auth_header_for_email_from_db(outsider_email))
     asyncio.run(_remove_membership(project_id, outsider_email))
 
     forbidden = client.post(
