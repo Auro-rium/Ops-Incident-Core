@@ -123,6 +123,25 @@ def test_viewer_cannot_create_source_and_permission_denied_is_audited():
     assert after == before + 1
 
 
+def test_viewer_cannot_delete_project_or_source():
+    client = httpx.Client(base_url=BASE_URL, timeout=120.0)
+    admin_headers = _login(client)
+    project_id = _create_project(client, admin_headers)
+    source_id = client.post(
+        f"/v1/projects/{project_id}/sources",
+        headers=admin_headers,
+        json={"name": "logs", "source_type": "filesystem", "sync_mode": "manual", "config": {}},
+    ).json()["id"]
+    viewer_email, viewer_password = asyncio.run(_create_user_member(project_id, ProjectRole.viewer))
+    viewer_headers = _login(client, viewer_email, viewer_password)
+
+    source_delete = client.delete(f"/v1/projects/{project_id}/sources/{source_id}", headers=viewer_headers)
+    project_delete = client.delete(f"/v1/projects/{project_id}", headers=viewer_headers)
+
+    assert source_delete.status_code == 403
+    assert project_delete.status_code == 403
+
+
 def test_viewer_cannot_batch_ingest():
     client = httpx.Client(base_url=BASE_URL, timeout=120.0)
     admin_headers = _login(client)

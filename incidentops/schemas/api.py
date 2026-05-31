@@ -93,6 +93,21 @@ class SourceResponse(BaseModel):
     updated_at: datetime | None = None
 
 
+class PurgeResponse(BaseModel):
+    deleted: bool
+    resource_type: str
+    resource_id: UUID
+    counts: dict[str, int] = Field(default_factory=dict)
+
+
+class ReindexResponse(BaseModel):
+    source_id: UUID
+    documents_reindexed: int
+    chunks_reindexed: int
+    chunks_created: int = 0
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+
+
 class CollectorRegisterRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=256)
     environment: str | None = Field(default=None, max_length=256)

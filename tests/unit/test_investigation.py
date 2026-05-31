@@ -54,7 +54,7 @@ def test_weak_evidence_response_is_honest():
 def test_confidence_scoring_is_low_when_key_sources_missing():
     entities = extract_entities("Why did latency increase after deploy abc1234?")
     confidence, reasons = _score_confidence(
-        query_intent="root_cause_investigation",
+        query_intent="runtime_incident",
         supported=False,
         support_reasons=["root-cause investigation requires logs or deploy/change evidence"],
         entities=entities,

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from incidentops.config.settings import Settings
 from incidentops.ingestion.chunking.metadata import classify_source_type
+from incidentops.ingestion.failure_taxonomy import normalize_failure_code
 
 SHA256_RE = re.compile(r"^(?:sha256:)?[a-fA-F0-9]{64}$")
 CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -212,10 +213,11 @@ def _normalize_content_hash(content_hash: str) -> str:
 
 
 def _error(document: NormalizedDocument, code: str, message: str) -> DocumentBatchError:
+    public_code = normalize_failure_code(code)
     return DocumentBatchError(
         external_id=(document.external_id or None),
         path=(document.path or None),
-        code=code,
+        code=public_code,
         error=message,
         message=message,
     )

@@ -18,7 +18,18 @@ from incidentops.investigation.timeline_builder import build_timeline
 from incidentops.observability.metrics import incr, observe_latency
 from incidentops.retrieval.citation_builder import build_citations
 from incidentops.retrieval.evidence_packer import pack_evidence
-from incidentops.retrieval.query_intent import classify_query_intent, investigate_supported
+from incidentops.retrieval.query_intent import (
+    INTENT_API_CONTRACT,
+    INTENT_ARCHITECTURE,
+    INTENT_CODE_LOCATION,
+    INTENT_CONFIG_LOOKUP,
+    INTENT_DEPLOY_REGRESSION,
+    INTENT_GENERIC,
+    INTENT_PREVIOUS_INCIDENT,
+    INTENT_RUNTIME_INCIDENT,
+    classify_query_intent,
+    investigate_supported,
+)
 from incidentops.retrieval.hybrid_search import hybrid_search, hybrid_search_with_debug
 from incidentops.retrieval.reranker import rerank
 
@@ -100,7 +111,13 @@ async def investigate(
         missing_data=missing_data,
     )
     selected.confidence = confidence
-    if not supported and query_intent.intent in {"code_location", "config_api_doc", "architecture_docs"}:
+    if not supported and query_intent.intent in {
+        INTENT_CODE_LOCATION,
+        INTENT_CONFIG_LOOKUP,
+        INTENT_ARCHITECTURE,
+        INTENT_API_CONTRACT,
+        INTENT_GENERIC,
+    }:
         selected.summary = "This query is better handled as cited evidence lookup than as a runtime root-cause investigation."
 
     suggested_fix = None
@@ -178,7 +195,7 @@ def _score_confidence(
             reasons.append("multiple operational evidence sources are missing")
         return "low", reasons
 
-    if query_intent in {"runtime_logs", "deploy_change", "incident_history", "root_cause_investigation"} and not has_logs:
+    if query_intent in {INTENT_RUNTIME_INCIDENT, INTENT_DEPLOY_REGRESSION, INTENT_PREVIOUS_INCIDENT} and not has_logs:
         reasons.append("runtime investigation is missing timestamped logs")
         return "low", reasons
 
@@ -209,9 +226,9 @@ def _score_confidence(
 def _unsupported_investigation_guidance(query_intent: str, missing_data: list[str]) -> str:
     if query_intent == "code_location":
         return "Use cited evidence search or answer mode for code-location questions; incident investigation is not the right mode for this query."
-    if query_intent == "config_api_doc":
-        return "Use cited evidence search or answer mode for config and API-documentation questions; incident investigation requires runtime evidence."
-    if query_intent == "architecture_docs":
+    if query_intent in {INTENT_CONFIG_LOOKUP, INTENT_API_CONTRACT}:
+        return "Use cited evidence search or answer mode for config/API questions; incident investigation requires runtime evidence."
+    if query_intent == INTENT_ARCHITECTURE:
         return "Use cited evidence search or answer mode for architecture questions; incident investigation requires runtime or change evidence."
     if missing_data:
         return "Add the missing runtime, deploy, or incident evidence before expecting a confident root-cause investigation."

@@ -5,12 +5,22 @@ import re
 
 
 INTENT_CODE_LOCATION = "code_location"
-INTENT_CONFIG_API_DOC = "config_api_doc"
-INTENT_ARCHITECTURE_DOCS = "architecture_docs"
-INTENT_RUNTIME_LOGS = "runtime_logs"
-INTENT_DEPLOY_CHANGE = "deploy_change"
-INTENT_INCIDENT_HISTORY = "incident_history"
-INTENT_ROOT_CAUSE = "root_cause_investigation"
+INTENT_ARCHITECTURE = "architecture"
+INTENT_CONFIG_LOOKUP = "config_lookup"
+INTENT_API_CONTRACT = "api_contract"
+INTENT_RUNTIME_INCIDENT = "runtime_incident"
+INTENT_DEPLOY_REGRESSION = "deploy_regression"
+INTENT_PREVIOUS_INCIDENT = "previous_incident"
+INTENT_RUNBOOK_LOOKUP = "runbook_lookup"
+INTENT_GENERIC = "generic"
+
+# Backward-compatible aliases for older callers/tests.
+INTENT_CONFIG_API_DOC = INTENT_CONFIG_LOOKUP
+INTENT_ARCHITECTURE_DOCS = INTENT_ARCHITECTURE
+INTENT_RUNTIME_LOGS = INTENT_RUNTIME_INCIDENT
+INTENT_DEPLOY_CHANGE = INTENT_DEPLOY_REGRESSION
+INTENT_INCIDENT_HISTORY = INTENT_PREVIOUS_INCIDENT
+INTENT_ROOT_CAUSE = INTENT_RUNTIME_INCIDENT
 
 _CONFIG_TERMS = {
     "config",
@@ -26,10 +36,21 @@ _CONFIG_TERMS = {
     "compose",
     "helm",
     "kustomize",
+}
+_API_TERMS = {
+    "api",
+    "apis",
     "openapi",
     "swagger",
     "endpoint",
     "endpoints",
+    "route",
+    "routes",
+    "rpc",
+    "proto",
+    "protobuf",
+    "contract",
+    "schema",
 }
 _CODE_TERMS = {
     "implemented",
@@ -76,6 +97,12 @@ _RUNTIME_TERMS = {
     "runtime",
     "symptom",
     "symptoms",
+    "latency",
+    "spike",
+    "slow",
+    "slower",
+    "slowdown",
+    "outage",
 }
 _DEPLOY_TERMS = {
     "deploy",
@@ -97,6 +124,15 @@ _INCIDENT_HISTORY_TERMS = {
     "postmortems",
     "seen this before",
 }
+_RUNBOOK_TERMS = {
+    "runbook",
+    "playbook",
+    "remediation",
+    "mitigation",
+    "rollback steps",
+    "fix steps",
+    "operator guide",
+}
 _ROOT_CAUSE_TERMS = {
     "why did",
     "root cause",
@@ -105,12 +141,6 @@ _ROOT_CAUSE_TERMS = {
     "investigate",
     "caused by",
     "cause of",
-    "latency",
-    "spike",
-    "slow",
-    "slower",
-    "slowdown",
-    "outage",
 }
 _TOKEN_RE = re.compile(r"[a-z0-9_./-]+")
 
@@ -127,10 +157,9 @@ class QueryIntent:
     @property
     def is_incident_like(self) -> bool:
         return self.intent in {
-            INTENT_RUNTIME_LOGS,
-            INTENT_DEPLOY_CHANGE,
-            INTENT_INCIDENT_HISTORY,
-            INTENT_ROOT_CAUSE,
+            INTENT_RUNTIME_INCIDENT,
+            INTENT_DEPLOY_REGRESSION,
+            INTENT_PREVIOUS_INCIDENT,
         }
 
     def as_dict(self) -> dict[str, object]:
@@ -150,21 +179,29 @@ def classify_query_intent(query: str) -> QueryIntent:
 
     if _contains_any(lower, _INCIDENT_HISTORY_TERMS):
         return QueryIntent(
-            intent=INTENT_INCIDENT_HISTORY,
+            intent=INTENT_PREVIOUS_INCIDENT,
             preferred_source_types=["incident", "runbook", "logs"],
             preferred_chunk_types=["incident_section", "markdown_section", "log_window"],
             query_terms=query_terms,
             explanation="query asks for previous incidents or historical comparisons",
         )
+    if _contains_any(lower, _RUNBOOK_TERMS):
+        return QueryIntent(
+            intent=INTENT_RUNBOOK_LOOKUP,
+            preferred_source_types=["runbook", "incident", "deploy", "config"],
+            preferred_chunk_types=["markdown_section", "incident_section", "deploy_diff", "config_section"],
+            query_terms=query_terms,
+            explanation="query asks for runbooks, remediation, or operational procedures",
+        )
     if _contains_any(lower, _ROOT_CAUSE_TERMS):
         return QueryIntent(
-            intent=INTENT_ROOT_CAUSE,
+            intent=INTENT_RUNTIME_INCIDENT,
             secondary_intents=[
                 intent
                 for intent, terms in (
-                    (INTENT_RUNTIME_LOGS, _RUNTIME_TERMS),
-                    (INTENT_DEPLOY_CHANGE, _DEPLOY_TERMS),
-                    (INTENT_INCIDENT_HISTORY, _INCIDENT_HISTORY_TERMS),
+                    (INTENT_RUNTIME_INCIDENT, _RUNTIME_TERMS),
+                    (INTENT_DEPLOY_REGRESSION, _DEPLOY_TERMS),
+                    (INTENT_PREVIOUS_INCIDENT, _INCIDENT_HISTORY_TERMS),
                 )
                 if _contains_any(lower, terms)
             ],
@@ -175,7 +212,7 @@ def classify_query_intent(query: str) -> QueryIntent:
         )
     if _contains_any(lower, _DEPLOY_TERMS) and not _contains_any(lower, {"where is", "where are"}):
         return QueryIntent(
-            intent=INTENT_DEPLOY_CHANGE,
+            intent=INTENT_DEPLOY_REGRESSION,
             preferred_source_types=["deploy", "logs", "incident", "code"],
             preferred_chunk_types=["deploy_diff", "release_note", "log_window", "function", "config_section"],
             query_terms=query_terms,
@@ -183,24 +220,33 @@ def classify_query_intent(query: str) -> QueryIntent:
         )
     if _contains_any(lower, _RUNTIME_TERMS):
         return QueryIntent(
-            intent=INTENT_RUNTIME_LOGS,
+            intent=INTENT_RUNTIME_INCIDENT,
             preferred_source_types=["logs", "runbook", "deploy", "incident"],
             preferred_chunk_types=["log_window", "error_cluster", "markdown_section", "deploy_diff"],
             query_terms=query_terms,
             explanation="query asks for runtime symptoms, errors, traces, or timeouts",
         )
+    if _contains_any(lower, _API_TERMS):
+        return QueryIntent(
+            intent=INTENT_API_CONTRACT,
+            secondary_intents=[INTENT_CODE_LOCATION] if "implemented" in lower else [],
+            preferred_source_types=["api_doc", "code", "runbook", "config"],
+            preferred_chunk_types=["api_endpoint", "proto_service", "proto_message", "function", "markdown_section"],
+            query_terms=query_terms,
+            explanation="query asks about API, route, RPC, protobuf, or endpoint contracts",
+        )
     if _contains_any(lower, _CONFIG_TERMS):
         return QueryIntent(
-            intent=INTENT_CONFIG_API_DOC,
+            intent=INTENT_CONFIG_LOOKUP,
             secondary_intents=[INTENT_CODE_LOCATION] if "implemented" in lower else [],
-            preferred_source_types=["config", "api_doc", "code", "runbook"],
-            preferred_chunk_types=["config_section", "api_endpoint", "proto_service", "function", "markdown_section"],
+            preferred_source_types=["config", "deploy", "runbook", "code"],
+            preferred_chunk_types=["config_section", "deploy_diff", "markdown_section", "function"],
             query_terms=query_terms,
-            explanation="query asks about configuration, API definitions, or endpoint documentation",
+            explanation="query asks about configuration, deployment config, environment, or dependency settings",
         )
     if _contains_any(lower, _ARCHITECTURE_TERMS):
         return QueryIntent(
-            intent=INTENT_ARCHITECTURE_DOCS,
+            intent=INTENT_ARCHITECTURE,
             preferred_source_types=["runbook", "api_doc", "code", "config"],
             preferred_chunk_types=["markdown_section", "module", "proto_service", "config_section"],
             query_terms=query_terms,
@@ -215,32 +261,28 @@ def classify_query_intent(query: str) -> QueryIntent:
             explanation="query asks where behavior, modules, or symbols are implemented",
         )
     return QueryIntent(
-        intent=INTENT_ARCHITECTURE_DOCS,
+        intent=INTENT_GENERIC,
         preferred_source_types=["runbook", "code", "config", "api_doc"],
         preferred_chunk_types=["markdown_section", "module", "function", "config_section"],
         query_terms=query_terms,
-        explanation="default to architecture/docs retrieval when intent is ambiguous",
+        explanation="balanced retrieval because query intent is ambiguous",
     )
 
 
 def investigate_supported(intent: QueryIntent, available_source_types: set[str]) -> tuple[bool, list[str]]:
     reasons: list[str] = []
-    if intent.intent in {INTENT_CODE_LOCATION, INTENT_CONFIG_API_DOC, INTENT_ARCHITECTURE_DOCS}:
+    if intent.intent in {INTENT_CODE_LOCATION, INTENT_CONFIG_LOOKUP, INTENT_ARCHITECTURE, INTENT_API_CONTRACT, INTENT_GENERIC}:
         reasons.append("query intent is repo lookup rather than runtime incident investigation")
         return False, reasons
-    if intent.intent == INTENT_RUNTIME_LOGS and "logs" not in available_source_types:
+    if intent.intent == INTENT_RUNTIME_INCIDENT and "logs" not in available_source_types:
         reasons.append("runtime investigation requires logs")
         return False, reasons
-    if intent.intent == INTENT_DEPLOY_CHANGE and "deploy" not in available_source_types:
+    if intent.intent == INTENT_DEPLOY_REGRESSION and "deploy" not in available_source_types:
         reasons.append("deploy analysis requires deploy history or diffs")
         return False, reasons
-    if intent.intent == INTENT_INCIDENT_HISTORY and "incident" not in available_source_types:
+    if intent.intent == INTENT_PREVIOUS_INCIDENT and "incident" not in available_source_types:
         reasons.append("incident history lookup requires incident reports or postmortems")
         return False, reasons
-    if intent.intent == INTENT_ROOT_CAUSE:
-        if "logs" not in available_source_types and "deploy" not in available_source_types:
-            reasons.append("root-cause investigation requires logs or deploy/change evidence")
-            return False, reasons
     return True, reasons
 
 

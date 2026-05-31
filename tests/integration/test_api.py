@@ -175,7 +175,13 @@ class TestSearchAndAnswer:
         assert debug["vector_candidates_count"] >= 0
         assert debug["lexical_candidates_count"] >= 0
         assert "merged_candidates_count" in debug
-        assert debug["query_intent"]["intent"] == "root_cause_investigation"
+        assert debug["query_intent"]["intent"] == "runtime_incident"
+        assert "source_type_distribution" in debug
+        assert "chunk_type_distribution" in debug
+        assert "applied_boosts" in debug
+        assert "applied_penalties" in debug
+        assert "retrieval_branch_latencies" in debug
+        assert "total_retrieval_latency_ms" in debug
         assert "metadata_boosts_used" in debug
         assert "evidence_mix" in debug
         assert "top_rejected" in debug
@@ -187,7 +193,7 @@ class TestSearchAndAnswer:
             json={"project_id": project_id, "query": "Why did GET /v1/orders slow down after deploy abc1234?", "top_k": 8},
         )
         assert response.status_code == 200
-        assert response.json()["query_intent"] == "root_cause_investigation"
+        assert response.json()["query_intent"] == "runtime_incident"
         assert "warnings" in response.json()
         assert response.json()["evidence"]
 

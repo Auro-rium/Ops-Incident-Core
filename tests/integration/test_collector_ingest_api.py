@@ -423,7 +423,8 @@ def test_batch_errors_do_not_fail_whole_request():
     assert payload["created"] == 1
     assert payload["skipped_invalid"] == 1
     assert len(payload["errors"]) == 1
-    assert payload["errors"][0]["code"] == "parse_error"
+    assert payload["errors"][0]["code"] == "parser_exception"
+    assert payload["diagnostics"]["parser_error_reasons"]["parser_exception"] == 1
 
     finish = client.post(
         f"/v1/sources/{source_id}/syncs/{sync_id}/finish",
@@ -507,7 +508,8 @@ def test_batch_validation_errors_are_isolated_and_do_not_echo_content():
     payload = response.json()
     assert payload["created"] == 1
     assert payload["skipped_invalid"] == 1
-    assert payload["errors"][0]["code"] in {"unsafe_external_id", "unsafe_path"}
+    assert payload["errors"][0]["code"] == "metadata_invalid"
+    assert payload["diagnostics"]["parser_error_reasons"]["metadata_invalid"] == 1
     assert secret_content not in response.text
 
     search = client.post(
@@ -517,6 +519,107 @@ def test_batch_validation_errors_are_isolated_and_do_not_echo_content():
     )
     assert search.status_code == 200
     assert search.json()["total"] > 0
+
+
+def test_source_delete_removes_chunks_from_search_and_reindex_refreshes_existing_chunks():
+    client = httpx.Client(base_url=BASE_URL, timeout=120.0)
+    headers = _login(client)
+    project_id = _create_project(client, headers, "purge-source")
+    source_id = client.post(
+        f"/v1/projects/{project_id}/sources",
+        headers=headers,
+        json={"name": "logs", "source_type": "filesystem", "sync_mode": "manual", "config": {}},
+    ).json()["id"]
+    sync_id = client.post(f"/v1/sources/{source_id}/syncs/start", headers=headers, json={"diagnostics": {}}).json()[
+        "sync_id"
+    ]
+    content = "2026-05-05T10:00:00Z ERROR api purgeunique timeout after 1500ms"
+    batch = client.post(
+        f"/v1/sources/{source_id}/documents/batch",
+        headers=headers,
+        json={
+            "sync_id": sync_id,
+            "documents": [
+                {
+                    "external_id": "logs/purge.log",
+                    "path": "logs/purge.log",
+                    "source_type": "logs",
+                    "content": content,
+                    "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                    "metadata": {"service_name": "api"},
+                    "size_bytes": len(content),
+                    "modified_at": "2026-05-05T10:00:00Z",
+                }
+            ],
+        },
+    )
+    assert batch.status_code == 200
+    assert batch.json()["chunks_created"] > 0
+
+    reindex = client.post(f"/v1/projects/{project_id}/sources/{source_id}/reindex", headers=headers)
+    assert reindex.status_code == 200
+    assert reindex.json()["chunks_reindexed"] == batch.json()["chunks_created"]
+    assert reindex.json()["chunks_created"] == 0
+
+    search = client.post(
+        "/v1/search",
+        headers=headers,
+        json={"project_id": project_id, "query": "purgeunique", "top_k": 3},
+    )
+    assert search.status_code == 200
+    assert search.json()["total"] > 0
+
+    deleted = client.delete(f"/v1/projects/{project_id}/sources/{source_id}", headers=headers)
+    assert deleted.status_code == 200
+    assert deleted.json()["counts"]["chunks"] == batch.json()["chunks_created"]
+    after = client.post(
+        "/v1/search",
+        headers=headers,
+        json={"project_id": project_id, "query": "purgeunique", "top_k": 3},
+    )
+    assert after.status_code == 200
+    assert after.json()["total"] == 0
+
+
+def test_project_delete_cascades_safely():
+    client = httpx.Client(base_url=BASE_URL, timeout=120.0)
+    headers = _login(client)
+    project_id = _create_project(client, headers, "purge-project")
+    source_id = client.post(
+        f"/v1/projects/{project_id}/sources",
+        headers=headers,
+        json={"name": "docs", "source_type": "filesystem", "sync_mode": "manual", "config": {}},
+    ).json()["id"]
+    sync_id = client.post(f"/v1/sources/{source_id}/syncs/start", headers=headers, json={"diagnostics": {}}).json()[
+        "sync_id"
+    ]
+    content = "# Docs\nprojectdeleteunique runbook content"
+    batch = client.post(
+        f"/v1/sources/{source_id}/documents/batch",
+        headers=headers,
+        json={
+            "sync_id": sync_id,
+            "documents": [
+                {
+                    "external_id": "docs/delete.md",
+                    "path": "docs/delete.md",
+                    "source_type": "runbook",
+                    "content": content,
+                    "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                    "metadata": {},
+                    "size_bytes": len(content),
+                    "modified_at": "2026-05-05T10:00:00Z",
+                }
+            ],
+        },
+    )
+    assert batch.status_code == 200
+    deleted = client.delete(f"/v1/projects/{project_id}", headers=headers)
+    assert deleted.status_code == 200
+    assert deleted.json()["counts"]["documents"] == 1
+    assert deleted.json()["counts"]["chunks"] == batch.json()["chunks_created"]
+    sources = client.get(f"/v1/projects/{project_id}/sources", headers=headers)
+    assert sources.status_code == 404
 
 
 def test_batch_limit_rejects_too_many_documents():

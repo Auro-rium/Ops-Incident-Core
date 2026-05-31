@@ -11,18 +11,18 @@ def test_classify_code_location_query():
 
 def test_classify_config_query():
     intent = classify_query_intent("Which config defines the database connection?")
-    assert intent.intent == "config_api_doc"
+    assert intent.intent == "config_lookup"
     assert "config" in intent.preferred_source_types
 
 
 def test_classify_architecture_query():
     intent = classify_query_intent("Which documentation files reference service architecture?")
-    assert intent.intent == "architecture_docs"
+    assert intent.intent == "architecture"
 
 
 def test_classify_root_cause_query():
     intent = classify_query_intent("Why did checkout latency spike after the last deploy?")
-    assert intent.intent == "root_cause_investigation"
+    assert intent.intent == "runtime_incident"
 
 
 def test_investigate_supported_rejects_repo_only_code_lookup():

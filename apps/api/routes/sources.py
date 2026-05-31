@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy import select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.deps import (
@@ -18,8 +18,9 @@ from apps.api.deps import (
     require_user,
 )
 from incidentops.config.settings import Settings
-from incidentops.db.models import Collector, ProjectRole, Source, SourceSync
+from incidentops.db.models import Chunk, Document, RetrievalResult, SourceSync, Collector, ProjectRole, Source
 from incidentops.ingestion.diagnostics import build_source_coverage
+from incidentops.ingestion.failure_taxonomy import failure_reason_counts
 from incidentops.ingestion.indexer import index_normalized_documents
 from incidentops.ingestion.normalized import NormalizedDocument, safe_json_size
 from incidentops.observability.metrics import incr
@@ -30,6 +31,8 @@ from incidentops.schemas.api import (
     BatchIngestResponse,
     CollectorRegisterRequest,
     CollectorRegisterResponse,
+    PurgeResponse,
+    ReindexResponse,
     SourceCreateRequest,
     SourceResponse,
     SyncFinishRequest,
@@ -110,6 +113,119 @@ async def list_sources(
     await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.viewer)
     result = await db.execute(select(Source).where(Source.project_id == project_id).order_by(Source.created_at.asc()))
     return [_source_response(source) for source in result.scalars().all()]
+
+
+@router.delete("/projects/{project_id}/sources/{source_id}", response_model=PurgeResponse)
+async def delete_source(
+    project_id: uuid.UUID,
+    source_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+    user=Depends(require_user),
+):
+    await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.admin)
+    await require_project_role(db, project_id, user.id, ProjectRole.admin)
+    source = await _require_source(db, source_id)
+    if source.project_id != project_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Source not found for project")
+
+    counts = {
+        "documents": await _count(db, select(func.count()).select_from(Document).where(Document.source_id == source_id)),
+        "chunks": await _count(db, select(func.count()).select_from(Chunk).where(Chunk.source_id == source_id)),
+        "syncs": await _count(db, select(func.count()).select_from(SourceSync).where(SourceSync.source_id == source_id)),
+        "retrieval_results": await _count_source_retrieval_results(db, source_id),
+    }
+    chunk_ids = select(Chunk.id).where(Chunk.source_id == source_id)
+    await db.execute(delete(RetrievalResult).where(RetrievalResult.chunk_id.in_(chunk_ids)))
+    await db.execute(delete(Chunk).where(Chunk.source_id == source_id))
+    await db.execute(delete(Document).where(Document.source_id == source_id))
+    await db.execute(delete(SourceSync).where(SourceSync.source_id == source_id))
+    await db.execute(delete(Source).where(Source.id == source_id, Source.project_id == project_id))
+    await record_audit_event(
+        db,
+        action="source_deleted",
+        status="success",
+        project_id=project_id,
+        user=user,
+        resource_type="source",
+        resource_id=source_id,
+        request=request,
+        metadata={"source_id": str(source_id), "source_name": source.name, "delete_counts": counts},
+    )
+    await db.commit()
+    return PurgeResponse(deleted=True, resource_type="source", resource_id=source_id, counts=counts)
+
+
+@router.post("/projects/{project_id}/sources/{source_id}/reindex", response_model=ReindexResponse)
+async def reindex_source(
+    project_id: uuid.UUID,
+    source_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+    user=Depends(require_user),
+):
+    await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.admin)
+    await require_project_role(db, project_id, user.id, ProjectRole.admin)
+    source = await _require_source(db, source_id)
+    if source.project_id != project_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Source not found for project")
+
+    documents_reindexed = await _count(
+        db,
+        select(func.count()).select_from(Document).where(Document.project_id == project_id, Document.source_id == source_id),
+    )
+    chunks_reindexed = await _count(
+        db,
+        select(func.count()).select_from(Chunk).where(Chunk.project_id == project_id, Chunk.source_id == source_id),
+    )
+    await db.execute(
+        update(Chunk)
+        .where(Chunk.project_id == project_id, Chunk.source_id == source_id)
+        .values(search_tsvector=func.to_tsvector("english", Chunk.text))
+    )
+    source_type_counts = await _source_type_counts(db, project_id, source_id)
+    chunk_type_counts = await _chunk_type_counts(db, project_id, source_id)
+    diagnostics = {
+        "reindex_mode": "refresh_existing_chunks",
+        "documents_reindexed": documents_reindexed,
+        "chunks_reindexed": chunks_reindexed,
+        "chunks_created": 0,
+        "source_type_counts": source_type_counts,
+        "chunk_type_counts": chunk_type_counts,
+        "reindexed_at": _utcnow().isoformat(),
+    }
+    latest = await _latest_sync_for_source(db, source_id)
+    if latest:
+        merged = dict(latest.diagnostics_json or {})
+        merged.update({"last_reindex": diagnostics})
+        latest.diagnostics_json = merged
+        latest.coverage_json = build_source_coverage(source_type_counts, chunk_type_counts)
+    await record_audit_event(
+        db,
+        action="source_reindexed",
+        status="success",
+        project_id=project_id,
+        user=user,
+        resource_type="source",
+        resource_id=source_id,
+        request=request,
+        metadata={
+            "source_id": str(source_id),
+            "documents_reindexed": documents_reindexed,
+            "chunks_reindexed": chunks_reindexed,
+            "chunks_created": 0,
+        },
+    )
+    await db.commit()
+    return ReindexResponse(
+        source_id=source_id,
+        documents_reindexed=documents_reindexed,
+        chunks_reindexed=chunks_reindexed,
+        chunks_created=0,
+        diagnostics=diagnostics,
+    )
 
 
 @router.post("/projects/{project_id}/collectors/register", response_model=CollectorRegisterResponse)
@@ -370,7 +486,11 @@ async def finish_sync(
             return SyncStatusResponse(sync_id=sync.id, status=sync.status)
         raise HTTPException(status.HTTP_409_CONFLICT, detail="sync is already finished")
     diagnostics = {**(sync.diagnostics_json or {}), **(body.diagnostics or {})}
-    parser_errors = max(sync.parser_errors, int(diagnostics.get("parser_errors", sync.parser_errors) or 0))
+    parser_errors = max(
+        sync.parser_errors,
+        int(diagnostics.get("parser_errors", sync.parser_errors) or 0),
+        int(diagnostics.get("parser_error_count", 0) or 0),
+    )
     error_count = int(diagnostics.get("error_count", 0) or 0)
     effective_status = (
         "partial_success"
@@ -511,6 +631,23 @@ def _merge_batch_diagnostics(
     diagnostics["skipped_unchanged"] = int(diagnostics.get("skipped_unchanged", 0) or 0) + result.skipped_unchanged
     diagnostics["skipped_invalid"] = int(diagnostics.get("skipped_invalid", 0) or 0) + result.skipped_invalid
     diagnostics["error_count"] = int(diagnostics.get("error_count", 0) or 0) + error_count
+    parser_error_reasons = result.diagnostics.get("parser_error_reasons") or failure_reason_counts(
+        error.code for error in result.errors
+    )
+    diagnostics["parser_error_reasons"] = _merge_counts(
+        diagnostics.get("parser_error_reasons", {}),
+        parser_error_reasons,
+    )
+    diagnostics["parser_error_count"] = int(diagnostics.get("parser_error_count", 0) or 0) + int(
+        result.diagnostics.get("parser_error_count", error_count) or 0
+    )
+    diagnostics["chunk_discard_reasons"] = _merge_counts(
+        diagnostics.get("chunk_discard_reasons", {}),
+        result.diagnostics.get("chunk_discard_reasons", {}),
+    )
+    diagnostics["embedding_failures"] = int(diagnostics.get("embedding_failures", 0) or 0) + int(
+        result.diagnostics.get("embedding_failures", 0) or 0
+    )
     diagnostics["source_type_counts"] = _merge_counts(
         diagnostics.get("source_type_counts", {}),
         result.source_type_counts,
@@ -536,6 +673,44 @@ def _merge_counts(left: dict, right: dict) -> dict:
     for key, value in (right or {}).items():
         merged[key] = int(merged.get(key, 0) or 0) + int(value or 0)
     return merged
+
+
+async def _count(db: AsyncSession, statement) -> int:
+    result = await db.execute(statement)
+    return int(result.scalar_one() or 0)
+
+
+async def _count_source_retrieval_results(db: AsyncSession, source_id: uuid.UUID) -> int:
+    chunk_ids = select(Chunk.id).where(Chunk.source_id == source_id)
+    return await _count(
+        db,
+        select(func.count()).select_from(RetrievalResult).where(RetrievalResult.chunk_id.in_(chunk_ids)),
+    )
+
+
+async def _source_type_counts(db: AsyncSession, project_id: uuid.UUID, source_id: uuid.UUID) -> dict[str, int]:
+    result = await db.execute(
+        select(Document.source_type, func.count())
+        .where(Document.project_id == project_id, Document.source_id == source_id)
+        .group_by(Document.source_type)
+    )
+    return {str(source_type or "unknown_text"): int(count or 0) for source_type, count in result.all()}
+
+
+async def _chunk_type_counts(db: AsyncSession, project_id: uuid.UUID, source_id: uuid.UUID) -> dict[str, int]:
+    result = await db.execute(
+        select(Chunk.chunk_type, func.count())
+        .where(Chunk.project_id == project_id, Chunk.source_id == source_id)
+        .group_by(Chunk.chunk_type)
+    )
+    return {str(chunk_type or "unknown"): int(count or 0) for chunk_type, count in result.all()}
+
+
+async def _latest_sync_for_source(db: AsyncSession, source_id: uuid.UUID) -> SourceSync | None:
+    result = await db.execute(
+        select(SourceSync).where(SourceSync.source_id == source_id).order_by(SourceSync.started_at.desc()).limit(1)
+    )
+    return result.scalar_one_or_none()
 
 
 def _source_response(source: Source) -> SourceResponse:

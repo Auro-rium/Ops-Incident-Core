@@ -30,29 +30,29 @@ def _doc(**overrides) -> NormalizedDocument:
 def test_normalized_document_rejects_missing_external_id():
     result = validate_normalized_document(_doc(external_id=""), Settings())
     assert isinstance(result, DocumentBatchError)
-    assert result.code == "invalid_external_id"
+    assert result.code == "metadata_invalid"
 
 
 def test_normalized_document_rejects_path_traversal_and_absolute_paths():
     traversal = validate_normalized_document(_doc(path="../secrets.log"), Settings())
     absolute = validate_normalized_document(_doc(path="/var/log/app.log"), Settings())
     assert isinstance(traversal, DocumentBatchError)
-    assert traversal.code == "unsafe_path"
+    assert traversal.code == "metadata_invalid"
     assert isinstance(absolute, DocumentBatchError)
-    assert absolute.code == "unsafe_path"
+    assert absolute.code == "metadata_invalid"
 
 
 def test_normalized_document_rejects_oversized_metadata():
     settings = Settings(max_metadata_bytes=16)
     result = validate_normalized_document(_doc(metadata={"description": "x" * 100}), settings)
     assert isinstance(result, DocumentBatchError)
-    assert result.code == "metadata_too_large"
+    assert result.code == "metadata_invalid"
 
 
 def test_normalized_document_treats_empty_content_as_invalid_without_content_echo():
     result = validate_normalized_document(_doc(content="   ", content_hash=hashlib.sha256(b"   ").hexdigest()), Settings())
     assert isinstance(result, DocumentBatchError)
-    assert result.code == "empty_content"
+    assert result.code == "empty"
     assert "   " not in result.error
 
 

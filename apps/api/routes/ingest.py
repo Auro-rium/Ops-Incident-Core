@@ -3,12 +3,30 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.deps import check_rate_limit, get_current_user, get_db, get_settings_dep, require_user
 from incidentops.config.settings import Settings
-from incidentops.db.models import Project, ProjectMember, ProjectRole
+from incidentops.db.models import (
+    AgentRun,
+    AgentRunEvent,
+    Approval,
+    Chunk,
+    Collector,
+    Document,
+    EvalRun,
+    EvalRunCase,
+    IncidentReportDraft,
+    IssueDraft,
+    Project,
+    ProjectMember,
+    ProjectRole,
+    RetrievalResult,
+    RetrievalRun,
+    Source,
+    SourceSync,
+)
 from incidentops.ingestion.pipeline import run_ingestion
 from incidentops.observability.metrics import incr
 from incidentops.retrieval.embeddings import embed_texts
@@ -17,6 +35,7 @@ from incidentops.schemas.api import (
     CreateProjectResponse,
     IngestRequest,
     IngestResponse,
+    PurgeResponse,
 )
 from incidentops.security.audit import record_audit_event
 from incidentops.security.path_policy import PathPolicyError, validate_path_under_allowed_roots
@@ -60,6 +79,71 @@ async def create_project(
     await db.commit()
     await db.refresh(project)
     return CreateProjectResponse(project_id=project.id, name=project.name, created_at=project.created_at.isoformat())
+
+
+@router.delete("/projects/{project_id}", response_model=PurgeResponse)
+async def delete_project(
+    project_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+    user=Depends(require_user),
+):
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Project not found")
+    await require_project_role(db, project_id, user.id, ProjectRole.admin)
+    counts = {
+        "sources": await _count(db, select(func.count()).select_from(Source).where(Source.project_id == project_id)),
+        "collectors": await _count(db, select(func.count()).select_from(Collector).where(Collector.project_id == project_id)),
+        "syncs": await _count(db, select(func.count()).select_from(SourceSync).where(SourceSync.project_id == project_id)),
+        "documents": await _count(db, select(func.count()).select_from(Document).where(Document.project_id == project_id)),
+        "chunks": await _count(db, select(func.count()).select_from(Chunk).where(Chunk.project_id == project_id)),
+        "retrieval_runs": await _count(
+            db,
+            select(func.count()).select_from(RetrievalRun).where(RetrievalRun.project_id == project_id),
+        ),
+        "agent_runs": await _count(db, select(func.count()).select_from(AgentRun).where(AgentRun.project_id == project_id)),
+        "eval_runs": await _count(db, select(func.count()).select_from(EvalRun).where(EvalRun.project_id == project_id)),
+        "memberships": await _count(
+            db,
+            select(func.count()).select_from(ProjectMember).where(ProjectMember.project_id == project_id),
+        ),
+    }
+    agent_run_ids = select(AgentRun.id).where(AgentRun.project_id == project_id)
+    eval_run_ids = select(EvalRun.id).where(EvalRun.project_id == project_id)
+    retrieval_run_ids = select(RetrievalRun.id).where(RetrievalRun.project_id == project_id)
+
+    await db.execute(delete(EvalRunCase).where(EvalRunCase.eval_run_id.in_(eval_run_ids)))
+    await db.execute(delete(EvalRun).where(EvalRun.project_id == project_id))
+    await db.execute(delete(IncidentReportDraft).where(IncidentReportDraft.run_id.in_(agent_run_ids)))
+    await db.execute(delete(IssueDraft).where(IssueDraft.run_id.in_(agent_run_ids)))
+    await db.execute(delete(Approval).where(Approval.run_id.in_(agent_run_ids)))
+    await db.execute(delete(AgentRunEvent).where(AgentRunEvent.run_id.in_(agent_run_ids)))
+    await db.execute(delete(AgentRun).where(AgentRun.project_id == project_id))
+    await db.execute(delete(RetrievalResult).where(RetrievalResult.retrieval_run_id.in_(retrieval_run_ids)))
+    await db.execute(delete(RetrievalRun).where(RetrievalRun.project_id == project_id))
+    await db.execute(delete(Chunk).where(Chunk.project_id == project_id))
+    await db.execute(delete(Document).where(Document.project_id == project_id))
+    await db.execute(delete(SourceSync).where(SourceSync.project_id == project_id))
+    await db.execute(delete(Source).where(Source.project_id == project_id))
+    await db.execute(delete(Collector).where(Collector.project_id == project_id))
+    await db.execute(delete(ProjectMember).where(ProjectMember.project_id == project_id))
+    await record_audit_event(
+        db,
+        action="project_deleted",
+        status="success",
+        project_id=project_id,
+        user=user,
+        resource_type="project",
+        resource_id=project_id,
+        request=request,
+        metadata={"project_id": str(project_id), "project_name": project.name, "delete_counts": counts},
+    )
+    await db.execute(delete(Project).where(Project.id == project_id))
+    await db.commit()
+    return PurgeResponse(deleted=True, resource_type="project", resource_id=project_id, counts=counts)
 
 
 @router.post("/projects/{project_id}/ingest", response_model=IngestResponse)
@@ -164,3 +248,8 @@ async def ingest(
         chunk_type_counts=stats.get("chunk_type_counts", {}),
         source_coverage=stats["source_coverage"],
     )
+
+
+async def _count(db: AsyncSession, statement) -> int:
+    result = await db.execute(statement)
+    return int(result.scalar_one() or 0)

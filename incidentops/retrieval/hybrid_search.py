@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import uuid
+from collections import Counter
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +15,20 @@ from incidentops.config.settings import get_settings
 from incidentops.ingestion.chunking.metadata import extract_deploy_hash
 from incidentops.retrieval.embeddings import embed_query
 from incidentops.retrieval.lexical_search import lexical_search
-from incidentops.retrieval.query_intent import QueryIntent, classify_query_intent
+from incidentops.observability.metrics import observe_latency
+from incidentops.retrieval.query_intent import (
+    INTENT_API_CONTRACT,
+    INTENT_ARCHITECTURE,
+    INTENT_CODE_LOCATION,
+    INTENT_CONFIG_LOOKUP,
+    INTENT_DEPLOY_REGRESSION,
+    INTENT_GENERIC,
+    INTENT_PREVIOUS_INCIDENT,
+    INTENT_RUNTIME_INCIDENT,
+    INTENT_RUNBOOK_LOOKUP,
+    QueryIntent,
+    classify_query_intent,
+)
 from incidentops.retrieval.vector_search import vector_search
 
 logger = logging.getLogger("incidentops.retrieval.hybrid")
@@ -139,13 +154,21 @@ async def hybrid_search_with_debug(
     filters: dict[str, Any] | None = None,
 ) -> tuple[list[dict], dict]:
     settings = get_settings()
+    started = time.perf_counter()
+    branch_latencies: dict[str, int] = {}
     query_info = analyze_query(query)
     intent = classify_query_intent(query)
     logger.info("Query analysis: %s", query_info)
+    embed_started = time.perf_counter()
     query_embedding = embed_query(query, settings.embedding_model)
-    fetch_k = max(top_k * 3, 30)
+    branch_latencies["query_embedding_ms"] = _elapsed_ms(embed_started)
+    fetch_k = _fetch_budget(top_k, intent)
+    vector_started = time.perf_counter()
     vec_results = await vector_search(db, project_id, query_embedding, top_k=fetch_k, filters=filters)
+    branch_latencies["vector_search_ms"] = _elapsed_ms(vector_started)
+    lexical_started = time.perf_counter()
     lex_results = await lexical_search(db, project_id, query, top_k=fetch_k, filters=filters)
+    branch_latencies["lexical_search_ms"] = _elapsed_ms(lexical_started)
 
     scores: dict[uuid.UUID, dict[str, Any]] = {}
     vec_max = max((result["score"] for result in vec_results), default=1.0)
@@ -182,7 +205,9 @@ async def hybrid_search_with_debug(
             + settings.metadata_weight * entry["metadata_boost"]
         )
 
+    fusion_started = time.perf_counter()
     ranked_all = sorted(scores.values(), key=lambda item: item["fused_score"], reverse=True)
+    branch_latencies["score_fusion_ms"] = _elapsed_ms(fusion_started)
     ranked = ranked_all[:top_k]
     results = [
         {
@@ -195,18 +220,57 @@ async def hybrid_search_with_debug(
         }
         for item in ranked
     ]
+    evidence_mix = _evidence_mix(ranked)
+    total_latency_ms = _elapsed_ms(started)
+    observe_latency("retrieval_total", total_latency_ms)
     debug = {
         "query_intent": intent.as_dict(),
         "extracted_entities": query_info,
         "applied_filters": filters or {},
+        "retrieval_budget": _retrieval_budget_summary(intent, fetch_k),
         "vector_candidates_count": len(vec_results),
         "lexical_candidates_count": len(lex_results),
         "merged_candidates_count": len(scores),
+        "source_type_distribution": evidence_mix["source_types"],
+        "chunk_type_distribution": evidence_mix["chunk_types"],
+        "applied_boosts": _reason_counts(ranked, positive=True),
+        "applied_penalties": _reason_counts(ranked, positive=False),
+        "retrieval_branch_latencies": branch_latencies,
+        "total_retrieval_latency_ms": total_latency_ms,
         "metadata_boosts_used": _summarize_boosts(ranked_all[: min(10, len(ranked_all))]),
-        "evidence_mix": _evidence_mix(ranked),
+        "evidence_mix": evidence_mix,
         "top_rejected": _top_rejected_candidates(ranked_all, top_k),
     }
     return results, debug
+
+
+def _fetch_budget(top_k: int, intent: QueryIntent) -> int:
+    multiplier = 4 if intent.intent in {INTENT_RUNTIME_INCIDENT, INTENT_DEPLOY_REGRESSION} else 3
+    if intent.intent in {INTENT_CODE_LOCATION, INTENT_CONFIG_LOOKUP, INTENT_API_CONTRACT}:
+        multiplier = 3
+    return max(top_k * multiplier, 30)
+
+
+def _retrieval_budget_summary(intent: QueryIntent, fetch_k: int) -> dict[str, Any]:
+    return {
+        "fetch_k_per_branch": fetch_k,
+        "preferred_source_types": list(intent.preferred_source_types),
+        "preferred_chunk_types": list(intent.preferred_chunk_types),
+    }
+
+
+def _reason_counts(ranked: list[dict[str, Any]], *, positive: bool) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for item in ranked:
+        for reason in item.get("metadata_boost_reasons") or []:
+            is_penalty = reason.endswith("_penalty") or "penalty" in reason
+            if (positive and not is_penalty) or (not positive and is_penalty):
+                counts[reason] += 1
+    return dict(sorted(counts.items()))
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.perf_counter() - started) * 1000)
 
 
 def _metadata_boost(chunk, query_info: dict[str, Any], intent: QueryIntent) -> tuple[float, list[str]]:
@@ -246,26 +310,36 @@ def _metadata_boost(chunk, query_info: dict[str, Any], intent: QueryIntent) -> t
             boost += 0.05 * min(len(matched), 3)
             reasons.append(f"metadata_terms:{','.join(matched)}")
 
-    if intent.intent == "config_api_doc":
+    if intent.intent == INTENT_CONFIG_LOOKUP:
         if any(token in lower_path for token in ("docker", "compose", "helm", "openapi", "swagger", "config", ".env", ".yaml", ".yml", ".toml", ".ini", ".json")):
             boost += 0.12
             reasons.append("config_path_match")
-    if intent.intent == "architecture_docs":
+    if intent.intent == INTENT_API_CONTRACT:
+        if any(token in lower_path for token in ("api", "openapi", "swagger", ".proto", "proto/", "routes", "router")):
+            boost += 0.12
+            reasons.append("api_contract_path_match")
+    if intent.intent == INTENT_ARCHITECTURE:
         if any(token in lower_path for token in ("docs/", "/docs", "architecture", "design", "overview", "readme")):
             boost += 0.10
             reasons.append("architecture_doc_match")
-    if intent.intent == "code_location":
+    if intent.intent == INTENT_CODE_LOCATION:
         if any(token in lower_path for token in ("service/", "services/", "src/", "pkg/", "internal/", "cmd/", "app/")):
             boost += 0.06
             reasons.append("code_path_match")
-    if intent.intent == "runtime_logs" and source_type == "logs":
+    if intent.intent == INTENT_RUNTIME_INCIDENT and source_type == "logs":
         if metadata.get("timestamp_start") or metadata.get("log_levels") or metadata.get("trace_ids"):
             boost += 0.08
             reasons.append("runtime_log_metadata")
-    if intent.intent == "incident_history" and source_type == "incident":
+    if intent.intent == INTENT_DEPLOY_REGRESSION and source_type == "deploy":
+        boost += 0.08
+        reasons.append("deploy_regression_source")
+    if intent.intent == INTENT_PREVIOUS_INCIDENT and source_type == "incident":
         if metadata.get("incident_date") or metadata.get("has_root_cause"):
             boost += 0.08
             reasons.append("incident_metadata")
+    if intent.intent == INTENT_RUNBOOK_LOOKUP and source_type == "runbook":
+        boost += 0.08
+        reasons.append("runbook_source")
 
     if _should_penalize_readme(intent, lower_path):
         boost -= 0.10
@@ -321,16 +395,17 @@ def _tokenize(value: str) -> list[str]:
 
 
 def _should_penalize_readme(intent: QueryIntent, lower_path: str) -> bool:
-    if intent.intent == "architecture_docs":
+    if intent.intent in {INTENT_ARCHITECTURE, INTENT_GENERIC}:
         return False
     if any(token in lower_path for token in README_PATH_TOKENS):
         return intent.intent in {
-            "code_location",
-            "config_api_doc",
-            "runtime_logs",
-            "deploy_change",
-            "incident_history",
-            "root_cause_investigation",
+            INTENT_CODE_LOCATION,
+            INTENT_CONFIG_LOOKUP,
+            INTENT_API_CONTRACT,
+            INTENT_RUNTIME_INCIDENT,
+            INTENT_DEPLOY_REGRESSION,
+            INTENT_PREVIOUS_INCIDENT,
+            INTENT_RUNBOOK_LOOKUP,
         }
     return False
 

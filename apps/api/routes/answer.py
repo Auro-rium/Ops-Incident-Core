@@ -14,7 +14,13 @@ from incidentops.observability.metrics import incr, observe_latency
 from incidentops.retrieval.citation_builder import build_citations
 from incidentops.retrieval.evidence_packer import pack_evidence
 from incidentops.retrieval.hybrid_search import hybrid_search
-from incidentops.retrieval.query_intent import classify_query_intent, investigate_supported
+from incidentops.retrieval.query_intent import (
+    INTENT_DEPLOY_REGRESSION,
+    INTENT_PREVIOUS_INCIDENT,
+    INTENT_RUNTIME_INCIDENT,
+    classify_query_intent,
+    investigate_supported,
+)
 from incidentops.retrieval.reranker import rerank
 from incidentops.schemas.api import (
     AnswerBody,
@@ -121,7 +127,7 @@ async def answer(
 def _answer_warnings(query_intent: str, evidence: list[dict]) -> list[str]:
     source_types = {item.get("source_type") for item in evidence if item.get("source_type")}
     warnings: list[str] = []
-    if query_intent in {"runtime_logs", "deploy_change", "incident_history", "root_cause_investigation"}:
+    if query_intent in {INTENT_RUNTIME_INCIDENT, INTENT_DEPLOY_REGRESSION, INTENT_PREVIOUS_INCIDENT}:
         if "logs" not in source_types:
             warnings.append("runtime logs are missing from the retrieved evidence")
         if "deploy" not in source_types:

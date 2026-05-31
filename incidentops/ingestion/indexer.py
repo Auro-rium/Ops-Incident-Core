@@ -14,6 +14,13 @@ from incidentops.db.models import Chunk, Document
 from incidentops.ingestion.chunking.chunker import count_tokens, split_text_by_tokens
 from incidentops.ingestion.chunking.metadata import classify_doc_type, classify_source_type, extract_service_from_path
 from incidentops.ingestion.diagnostics import build_source_coverage
+from incidentops.ingestion.failure_taxonomy import (
+    FAILURE_CHUNK_LIMIT_EXCEEDED,
+    FAILURE_EMBEDDING_FAILED,
+    FAILURE_PARSER_EXCEPTION,
+    failure_reason_counts,
+    normalize_failure_code,
+)
 from incidentops.ingestion.normalized import (
     BatchIngestResult,
     DocumentBatchError,
@@ -67,7 +74,7 @@ async def index_normalized_documents(
                 DocumentBatchError(
                     external_id=normalized.external_id,
                     path=normalized.path,
-                    code="duplicate_external_id",
+                    code=normalize_failure_code("duplicate_external_id"),
                     error="duplicate external_id in batch",
                     message="duplicate external_id in batch",
                 )
@@ -102,7 +109,7 @@ async def index_normalized_documents(
                 DocumentBatchError(
                     external_id=normalized.external_id,
                     path=normalized.path,
-                    code="index_error",
+                    code=normalize_failure_code("index_error"),
                     error=f"failed to index document: {exc.__class__.__name__}",
                     message="failed to index document",
                 )
@@ -121,12 +128,19 @@ async def index_normalized_documents(
     result.chunk_type_counts = dict(chunk_type_counts)
     result.coverage = build_source_coverage(result.source_type_counts, result.chunk_type_counts)
     result.warnings = result.coverage.get("warnings", [])
+    parser_error_reasons = failure_reason_counts(error.code for error in result.errors)
     result.diagnostics = {
         "documents_created": result.created,
         "documents_updated": result.updated,
         "skipped_unchanged": result.skipped_unchanged,
         "skipped_invalid": result.skipped_invalid,
         "errors": len(result.errors),
+        "parser_error_count": len(result.errors),
+        "parser_error_reasons": parser_error_reasons,
+        "chunk_discard_reasons": {
+            FAILURE_CHUNK_LIMIT_EXCEEDED: parser_error_reasons.get(FAILURE_CHUNK_LIMIT_EXCEEDED, 0)
+        },
+        "embedding_failures": parser_error_reasons.get(FAILURE_EMBEDDING_FAILED, 0),
         "source_type_counts": result.source_type_counts,
         "chunk_type_counts": result.chunk_type_counts,
         "embedding_backend": result.embedding_backend,
@@ -137,7 +151,7 @@ async def index_normalized_documents(
 class DocumentIndexingError(Exception):
     def __init__(self, code: str, safe_message: str) -> None:
         super().__init__(safe_message)
-        self.code = code
+        self.code = normalize_failure_code(code)
         self.safe_message = safe_message
 
 
@@ -172,10 +186,13 @@ async def _index_one_document(
         raw_chunks, parse_error = _parse_normalized_document(normalized, service_name=service_name)
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Failed parsing normalized document %s", normalized.path)
-        raise DocumentIndexingError("parse_error", f"failed to parse document: {exc.__class__.__name__}") from exc
+        raise DocumentIndexingError(
+            FAILURE_PARSER_EXCEPTION,
+            f"failed to parse document: {exc.__class__.__name__}",
+        ) from exc
 
     if parse_error:
-        raise DocumentIndexingError("parse_error", parse_error)
+        raise DocumentIndexingError(FAILURE_PARSER_EXCEPTION, parse_error)
     if not raw_chunks:
         raise DocumentIndexingError("no_chunks_parsed", "no chunks parsed")
 
