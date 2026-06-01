@@ -103,6 +103,12 @@ class LLMProvider:
                 data = resp.json()
                 incr("llm_calls")
                 incr("llm_calls_total")
+                meta = {
+                    "provider": "azure_openai" if self.azure_mode else "openai_compatible",
+                    "model": self.model,
+                    "latency_ms": latency_ms,
+                    "usage": data.get("usage") or {},
+                }
                 if usage := data.get("usage"):
                     incr("llm_prompt_tokens", usage.get("prompt_tokens", 0))
                     incr("llm_completion_tokens", usage.get("completion_tokens", 0))
@@ -110,9 +116,12 @@ class LLMProvider:
                     incr("llm_output_tokens_total", usage.get("completion_tokens", 0))
                 content = data["choices"][0]["message"]["content"]
                 try:
-                    return json.loads(content)
+                    parsed = json.loads(content)
+                    if isinstance(parsed, dict):
+                        parsed["_meta"] = meta
+                    return parsed
                 except json.JSONDecodeError:
-                    return {"raw_response": content}
+                    return {"raw_response": content, "_meta": meta}
         except httpx.HTTPStatusError as exc:
             logger.error("LLM HTTP error %d: %s", exc.response.status_code, exc.response.text[:200])
             incr("llm_failures")

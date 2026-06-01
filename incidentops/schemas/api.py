@@ -326,6 +326,7 @@ class AnswerBody(BaseModel):
     likely_root_cause: str
     confidence: str
     affected_services: list[str]
+    answer_text: str | None = None
     reasoning: str | None = None
     suggested_fix: str | None = None
     unknowns: list[str] | None = None
@@ -335,11 +336,13 @@ class AnswerBody(BaseModel):
 class EvidenceItem(BaseModel):
     chunk_id: str
     source_type: str
+    chunk_type: str | None = None
     document_path: str
     service_name: str | None
     deploy_hash: str | None
     score: float
     text_preview: str
+    why_retrieved: list[str] = Field(default_factory=list)
     citation: CitationInfo
 
 
@@ -349,6 +352,9 @@ class AnswerResponse(BaseModel):
     answer: AnswerBody | None = None
     message: str | None = None
     evidence: list[EvidenceItem]
+    synthesis_mode: str = "retrieval_only"
+    llm_usage: dict[str, int] | None = None
+    llm_latency_ms: int | None = None
     latency_ms: int
     warnings: list[str] = Field(default_factory=list)
 

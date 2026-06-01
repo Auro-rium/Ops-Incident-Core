@@ -2,16 +2,32 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from incidentops.retrieval.evidence_packer import pack_evidence
 from incidentops.retrieval.hybrid_search import _metadata_boost
 from incidentops.retrieval.query_intent import classify_query_intent
 
 
-def _chunk(path: str, *, chunk_type: str = "markdown_section", source_type: str = "runbook"):
+def _chunk(
+    path: str,
+    *,
+    chunk_type: str = "markdown_section",
+    source_type: str = "runbook",
+    text: str = "example text",
+    start_line: int | None = 1,
+    end_line: int | None = 5,
+):
     return SimpleNamespace(
+        id=f"{path}:{start_line}:{end_line}",
         chunk_type=chunk_type,
         service_name=None,
         endpoint=None,
         deploy_hash=None,
+        section_title=None,
+        start_line=start_line,
+        end_line=end_line,
+        timestamp_start=None,
+        timestamp_end=None,
+        text=text,
         metadata_json={"source_type": source_type, "document_path": path},
         document=SimpleNamespace(path=path),
     )
@@ -51,3 +67,50 @@ def test_runtime_query_warns_when_runtime_evidence_missing():
     assert intent.intent == "runtime_incident"
     assert "intent_source:runbook" in reasons
     assert boost > 0
+
+
+def test_pack_evidence_prefers_highest_score_and_dedupes():
+    results = [
+        {
+            "chunk": _chunk(
+                "README.md",
+                chunk_type="markdown_section",
+                source_type="runbook",
+                text="overview" * 50,
+            ),
+            "fused_score": 0.42,
+            "metadata_boost_reasons": ["readme_penalty"],
+        },
+        {
+            "chunk": _chunk(
+                "service/history/handler.go",
+                chunk_type="go_function",
+                source_type="code",
+                text="func HistoryServiceLatencyProbe() {\n    return\n}\n",
+                start_line=10,
+                end_line=22,
+            ),
+            "fused_score": 0.91,
+            "metadata_boost_reasons": ["intent_source:code", "code_path_match"],
+        },
+        {
+            "chunk": _chunk(
+                "service/history/handler.go",
+                chunk_type="go_function",
+                source_type="code",
+                text="func HistoryServiceLatencyProbe() {\n    return\n}\n",
+                start_line=10,
+                end_line=22,
+            ),
+            "fused_score": 0.90,
+            "metadata_boost_reasons": ["intent_source:code"],
+        },
+    ]
+
+    packed = pack_evidence(results, max_evidence=5, max_chars_per_chunk=80, max_total_chars=120)
+
+    assert len(packed) == 2
+    assert packed[0]["document_path"] == "service/history/handler.go"
+    assert packed[0]["chunk_type"] == "go_function"
+    assert "code_path_match" in packed[0]["why_retrieved"]
+    assert sum(len(item["text"]) for item in packed) <= 120

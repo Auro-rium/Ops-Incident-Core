@@ -105,6 +105,11 @@ class Settings(BaseSettings):
     allow_demo_project_bypass: bool = True
     max_ingest_file_bytes: int = 2_000_000
     max_chunk_tokens: int = 512
+    answer_max_evidence_chunks: int = 8
+    answer_max_chars_per_chunk: int = 1600
+    answer_max_total_chars: int = 10000
+    direct_answer_max_chars_per_chunk: int = 900
+    direct_answer_max_total_chars: int = 4500
     supported_extensions: str = ".md,.txt,.log,.json,.yaml,.yml,.toml,.ini,.py,.js,.ts,.jsx,.tsx,.go,.java,.proto,.patch,.diff"
     cors_allow_origins: str = Field(
         "*",

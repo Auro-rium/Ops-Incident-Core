@@ -197,6 +197,20 @@ class TestSearchAndAnswer:
         assert "warnings" in response.json()
         assert response.json()["evidence"]
 
+    def test_answer_uses_direct_evidence_mode_for_code_lookup(self, client):
+        project_id = create_fixture_project(client)
+        response = client.post(
+            "/v1/answer",
+            json={"project_id": project_id, "query": "Where is handle_orders implemented?", "top_k": 5},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["query_intent"] == "code_location"
+        assert payload["synthesis_mode"] == "direct_evidence"
+        assert payload["answer"]["confidence"] == "high"
+        assert "services/api/service.py" in (payload["answer"]["answer_text"] or "")
+        assert any(item["chunk_type"] in {"function", "python_function"} for item in payload["evidence"])
+
 
 class TestSmokeScript:
     def test_smoke_script_exits_non_zero_on_zero_chunks(self, tmp_path):
