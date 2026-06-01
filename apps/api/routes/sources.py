@@ -336,7 +336,7 @@ async def ingest_documents_batch(
         db,
         settings,
         f"batch_ingest:{user.id}",
-        settings.project_ingestion_limit,
+        settings.collector_batch_request_limit,
         3600,
         user=user,
         project_id=source.project_id,

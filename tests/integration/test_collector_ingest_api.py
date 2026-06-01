@@ -66,6 +66,25 @@ def _build_fixture_documents() -> list[dict]:
     return documents
 
 
+def _build_repeated_log_documents(count: int) -> list[dict]:
+    path = FIXTURE_ROOT / "logs" / "api.log"
+    content = path.read_text(encoding="utf-8")
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return [
+        {
+            "external_id": f"logs/api-{index}.log",
+            "path": f"logs/api-{index}.log",
+            "source_type": "logs",
+            "content": content,
+            "content_hash": digest,
+            "metadata": {"service_name": "api"},
+            "size_bytes": path.stat().st_size,
+            "modified_at": "2026-05-05T10:00:00Z",
+        }
+        for index in range(count)
+    ]
+
+
 async def _document_chunk_count(project_id: str, source_id: str, external_id: str) -> int:
     factory, engine = _test_session_factory()
     async with factory() as db:
@@ -248,6 +267,40 @@ def test_source_registry_and_collector_sync_batch_ingest_flow():
     )
     assert investigate.status_code == 200
     assert investigate.json()["evidence"]
+
+
+def test_collector_batch_ingest_allows_many_batches_without_human_request_limit():
+    client = httpx.Client(base_url=BASE_URL, timeout=120.0)
+    headers = _login(client)
+    project_id = _create_project(client, headers, "collector-batch-limit")
+    source_id = client.post(
+        f"/v1/projects/{project_id}/sources",
+        headers=headers,
+        json={"name": "batch-limit", "source_type": "filesystem", "sync_mode": "manual", "config": {}},
+    ).json()["id"]
+    collector_id = client.post(
+        f"/v1/projects/{project_id}/collectors/register",
+        headers=headers,
+        json={"name": "limit-collector", "environment": "dev", "version": "0.1.0"},
+    ).json()["collector_id"]
+    sync_id = client.post(
+        f"/v1/sources/{source_id}/syncs/start",
+        headers=headers,
+        json={"collector_id": collector_id, "diagnostics": {"total_files_seen": 30}},
+    ).json()["sync_id"]
+
+    documents = _build_repeated_log_documents(30)
+    for document in documents:
+        response = client.post(
+            f"/v1/sources/{source_id}/documents/batch",
+            headers=headers,
+            json={"sync_id": sync_id, "collector_id": collector_id, "documents": [document]},
+        )
+        assert response.status_code == 200
+
+    latest_sync = client.get(f"/v1/sources/{source_id}/syncs/latest", headers=headers)
+    assert latest_sync.status_code == 200
+    assert latest_sync.json()["documents_received"] == 30
 
 
 def test_batch_ingest_skips_unchanged_and_updates_changed_content():

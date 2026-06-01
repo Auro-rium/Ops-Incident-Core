@@ -64,6 +64,7 @@ class Settings(BaseSettings):
 
     user_request_limit: int = 30
     project_ingestion_limit: int = 20
+    collector_batch_request_limit: int = 2000
     rate_limit_enabled: bool = True
     rate_limit_backend: str = "memory"
     rate_limit_window_seconds: int = 60
