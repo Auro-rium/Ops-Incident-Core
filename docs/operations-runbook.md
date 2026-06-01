@@ -43,6 +43,8 @@ az containerapp logs show --resource-group "$AZURE_RESOURCE_GROUP" --name incide
 az containerapp logs show --resource-group "$AZURE_RESOURCE_GROUP" --name incidentops-frontend --follow
 ```
 
+The frontend log command is relevant only when frontend deployment is enabled in the current environment.
+
 ## Common Failures
 
 ### `/ready` fails
@@ -94,6 +96,12 @@ Verify Collector has:
 - source registration permission
 
 Then inspect Core source sync diagnostics.
+
+For large repos, also check for:
+
+- Azure OpenAI embedding throttling
+- collector batch upload `429` responses
+- API event-loop starvation symptoms during indexing
 
 ### MCP tools fail
 

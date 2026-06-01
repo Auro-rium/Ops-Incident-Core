@@ -20,7 +20,7 @@ Local execution is only for development and CI tests. It is not a supported prod
   - Core worker
   - Core MCP server
   - Collector
-  - frontend
+  - frontend when frontend deployment is enabled
   - migration job
   - bootstrap admin job
 - Azure Database for PostgreSQL Flexible Server with pgvector
@@ -37,6 +37,12 @@ Local execution is only for development and CI tests. It is not a supported prod
 4. Bootstrap admin.
 5. Configure Collector and MCP tokens.
 6. Run Azure smoke.
+
+Current workflow reality:
+
+- `.github/workflows/deploy-azure.yml` runs on push to `core` and manual dispatch.
+- It builds/pushes Core and Collector images by default.
+- Frontend deployment support exists in the scripts and Bicep stack, but the current Core workflow uses `BUILD_FRONTEND=false` and `DEPLOY_FRONTEND=false`.
 
 ## Required Secrets
 

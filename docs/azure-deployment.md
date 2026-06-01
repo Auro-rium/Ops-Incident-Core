@@ -14,7 +14,7 @@ Azure services used:
   - `incidentops-core-worker`
   - `incidentops-mcp`
   - `incidentops-collector`
-  - `incidentops-frontend`
+  - `incidentops-frontend` when frontend deployment is enabled
 - Azure Database for PostgreSQL Flexible Server
 - Azure Cache for Redis
 - Azure Key Vault
@@ -88,7 +88,14 @@ This creates the resource group and ACR if needed, then uses local Docker builds
 
 - `incidentops-core:<tag>`
 - `opsincident-collector:<tag>`
-- `incidentops-frontend:<tag>`
+- `incidentops-frontend:<tag>` only when `BUILD_FRONTEND=true`
+
+Current GitHub workflow reality:
+
+- `.github/workflows/deploy-azure.yml` builds and deploys Core plus Collector on pushes to `core`.
+- That workflow checks out the Collector repo and runs `scripts/azure_build_push_images.sh` with `BUILD_FRONTEND=false`.
+- The same workflow runs `scripts/azure_deploy.sh` with `DEPLOY_FRONTEND=false`, so frontend infrastructure can remain deployed in Azure without being rebuilt on every Core push.
+- Frontend deployment is therefore supported by the infrastructure and scripts, but not enabled by default in the Core workflow.
 
 ## Deploy Infrastructure
 
@@ -96,7 +103,7 @@ This creates the resource group and ACR if needed, then uses local Docker builds
 scripts/azure_deploy.sh
 ```
 
-The deployment creates Container Apps, PostgreSQL, Redis, Key Vault, and Log Analytics.
+The deployment creates Container Apps, PostgreSQL, Redis, Key Vault, and Log Analytics. If `DEPLOY_FRONTEND=false`, the Bicep deployment leaves frontend deployment disabled while still updating the Core-side runtime.
 
 Production settings enforced by the Container Apps:
 
@@ -197,11 +204,16 @@ The MCP app is private by default. Do not make it public without adding an expli
 
 ## GitHub Actions
 
-Manual workflow:
+GitHub workflow:
 
 ```text
 .github/workflows/deploy-azure.yml
 ```
+
+Trigger behavior:
+
+- push to `core`
+- manual `workflow_dispatch`
 
 Required GitHub secrets:
 
@@ -234,6 +246,12 @@ Optional:
 - `INCIDENTOPS_PROJECT_ID`
 - `INCIDENTOPS_MCP_TOKEN`
 
+Latest verified Core Azure runs in GitHub at the time of this doc update:
+
+- `26735683633` — success — deployed collector batch upload rate-limit separation
+- `26735351384` — success — deployed embedding work off the API event loop
+- `26734478346` — success — deployed embedding retry/backoff and bounded fallback chunking
+
 ## Teardown
 
 ```bash
@@ -246,4 +264,4 @@ This deletes PostgreSQL, Redis, Container Apps, images, Key Vault, and logs in t
 
 ## Caveats
 
-This is not yet a hardened enterprise network deployment. For budget and complexity reasons, PostgreSQL and Redis are provisioned in the smallest practical demo shape. Before calling it production-grade, move stateful services behind private networking, add backup/restore drills, define retention, and run real customer-data validation.
+This is not yet a hardened enterprise network deployment. PostgreSQL and Redis are provisioned in the smallest practical demo shape, and large-repo benchmark quality is still being hardened. Before calling it production-grade, move stateful services behind private networking, add backup/restore drills, define retention, and publish repeatable large-repo benchmark results after the current ingestion fixes.

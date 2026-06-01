@@ -23,7 +23,7 @@ graph TD
 
 ## Required Production Boot Sequence
 
-1. Build and push Core, Collector, and frontend images to Azure Container Registry.
+1. Build and push Core and Collector images to Azure Container Registry. Frontend image build/deploy is supported by the scripts but disabled by default in the current Core GitHub workflow.
 2. Deploy Azure infrastructure from `infra/azure/main.bicep`.
 3. Run migrations:
 

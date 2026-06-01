@@ -1,12 +1,12 @@
 # IncidentOps MCP Architecture
 
-IncidentOps uses MCP as an interface layer over Core, not as an ingestion path and not as a second brain. This boundary matters because otherwise every useful system eventually becomes a haunted tool loop wearing a product name.
+IncidentOps uses MCP as an interface layer over Core, not as an ingestion path and not as a second brain.
 
 ## Decision
 
 The product MCP surface is **Core MCP**.
 
-Collector MCP, if used, is local/private operator tooling only. It is not deployed as the public product MCP surface.
+There is no supported Collector MCP surface in the current Collector codebase. Collector does not ship an MCP package extra or server entrypoint.
 
 ```text
 External AI client
@@ -14,14 +14,6 @@ External AI client
   -> Core API
   -> readiness / search / investigate / sync / workflow endpoints
   -> cited Core response
-```
-
-```text
-Local operator only, optional
-  -> Collector MCP
-  -> inspect local paths / preview collection / validate config
-  -> approved Collector sync
-  -> Core batch ingest API
 ```
 
 ## Why Core MCP Is the Product MCP
@@ -69,25 +61,16 @@ Core MCP must not:
 - mutate external systems
 - diagnose locally outside Core
 
-## Collector MCP Boundary
+## Collector Boundary
 
-Collector MCP is only useful for controlled local/operator workflows:
+Collector remains a CLI/daemon/runtime boundary, not an MCP surface:
 
-- inspect a local repo path
-- preview what would be collected
-- validate source config
-- preview redaction
-- optionally trigger approved sync to Core
+- inspect local repo paths
+- preview collection
+- validate config
+- run approved sync to Core
 
-Collector MCP must stay:
-
-- private/local by default
-- path-policy protected
-- approval-gated for sync/export actions
-- redaction-safe
-- unable to bypass Core ingestion contracts
-
-Do not expose Collector MCP publicly in Azure. For the product demo and external AI client story, use Core MCP only.
+Those behaviors stay in Collector CLI and daemon flows. The Azure product and external AI client story uses Core MCP only.
 
 ## Azure Deployment
 

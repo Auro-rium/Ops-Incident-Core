@@ -1,29 +1,28 @@
 # IncidentOps Product Proof
 
-This document defines what counts as product proof for IncidentOps. It is intentionally stricter than “the app deployed.” Cloud containers being alive is not product value; it is just a server bill with better posture.
+This document defines what counts as product proof for IncidentOps and what remains only partially proven.
 
-## Product Claim
+The standard is stricter than “the containers are up.” A useful proof has to show that Collector, Core, retrieval, and answer behavior produce inspectable engineering evidence with honest limitations.
 
-IncidentOps helps backend teams turn scattered engineering evidence into cited, queryable incident context.
+## What counts as proof
 
-A useful proof run should show:
+A serious proof run should show:
 
 ```text
 real repo or evidence bundle
-  -> Collector scan/redaction/normalization
+  -> Collector scan, redaction, normalization
   -> Core batch ingest
   -> PostgreSQL documents/chunks + pgvector
-  -> Azure OpenAI embeddings/synthesis
   -> readiness report
   -> cited search
-  -> cited investigation
+  -> cited answer or investigation
   -> Core MCP tool call
   -> metrics table
 ```
 
-## Minimum Proof Metrics
+## Minimum metrics to publish
 
-Every serious benchmark should publish this table:
+Every benchmark or demo report should publish this table:
 
 | Metric | Value |
 |---|---:|
@@ -34,7 +33,8 @@ Every serious benchmark should publish this table:
 | Documents normalized | |
 | Documents received by Core | |
 | Chunks created | |
-| Parser errors / skipped invalid | |
+| Parser error count | |
+| Top parser error reasons | |
 | Redaction count | |
 | Sync status | |
 | Embedding backend | |
@@ -54,92 +54,81 @@ Every serious benchmark should publish this table:
 | Changed-file update result | |
 | Duplicate chunks after update | |
 
-## Current Known Proof
+If a metric is unavailable, say so explicitly. Do not backfill vibes into an empty cell.
 
-The Azure production-style path has proven:
+## What is actually proven now
 
-- Azure Container Apps deployment for Core API, worker, Collector, frontend, and MCP server
-- Azure PostgreSQL + pgvector backing store
-- Azure Redis queue/rate-limit path
-- Azure OpenAI embeddings and answer synthesis in deployed mode
-- Core health/readiness
-- Collector sync into Core
-- readiness endpoint
-- search, answer, and investigation calls
-- internal Core MCP app deployment
-- GitHub Actions CI/CD deployment flow
+Current verified proof points:
 
-A 10-question cloud run succeeded technically:
+- Core Azure deployment runs through `.github/workflows/deploy-azure.yml`.
+- Collector Azure validation/dispatch runs through `.github/workflows/deploy-collector.yml`.
+- Core health/readiness, login, readiness, search, investigate, MCP token wiring, and Azure smoke are working on the current Azure stack.
+- Runtime status reports production cloud mode:
+  - Azure OpenAI chat/embeddings
+  - PostgreSQL/pgvector retrieval
+  - Redis worker/rate-limit backend
+  - no local fallback in production mode
+- Core now exposes purge endpoints, runtime status, capabilities, readiness, parser failure taxonomy, retrieval diagnostics, and direct-evidence answer fast paths for simple code/config/API lookups.
 
-```text
-HTTP calls: 36
-Succeeded: 36
-Failed: 0
-Search calls: 10
-Answer calls: 10
-Investigate calls: 10
-LLM calls: 10
-Prompt tokens: 15,674
-Completion tokens: 14,688
-Total tokens: 30,362
-Search avg latency: ~1.58s
-Answer avg latency: ~21.8s
-Investigate avg latency: ~1.63s
-```
+Latest verified Core deployment runs at the time of this update:
 
-## Current Known Bottleneck
+- `26735683633` — success
+- `26735351384` — success
+- `26734478346` — success
 
-The Temporal stress run exposed weak Go/proto coverage:
+## What is not proven yet
+
+The large-repo benchmark story is not done. The latest verified Temporal-scale run was a failure report, not a success proof:
 
 ```text
 files_seen: 1500
-files_skipped: 1413
-documents_normalized: 87
-documents_received_by_core: 87
-chunks_created: 12
-parser_errors / skipped_invalid: 85
-redaction_count: 28
+files_skipped: 72
+documents_normalized: 1428
+documents_received_by_core: 0
+chunks_created: 0
+failed_uploads: 2856
+retry_attempted: 1428
+retry_succeeded: 0
+redaction_count: 71
 sync_status: partial_success
 ```
 
-This means the cloud system worked, but Temporal repo intelligence was shallow. The next product-quality milestone is deeper Go/proto indexing and retrieval validation.
+That run exposed three real flaws:
 
-## What Not To Claim Yet
+1. Azure OpenAI embedding throttling needed bounded retry/backoff.
+2. Embedding work and retry sleeps were happening on the API event loop, which made the API unhealthy during large syncs.
+3. Collector batch uploads were sharing a human-scale request limit and were rejected with `429 Too Many Requests`.
+
+The first two fixes are live. The collector-batch rate-limit separation is deployed and needs a clean rerun before new benchmark numbers belong in a proof document.
+
+## What not to claim
 
 Do not claim:
 
-- “fully production-grade AI SRE replacement”
-- “Temporal fully understood”
-- “Azure AI Search production retrieval” unless Azure AI Search is implemented and benchmarked
-- “MCP public product surface” unless the protected client path is validated
-- “root cause quality” without runtime logs, deploy history, traces, metrics, and incident reports
+- broad large-repo retrieval quality
+- deep Go/proto understanding across Temporal-scale repos
+- root-cause quality for runtime incidents without logs/deploys/incidents
+- Azure AI Search support
+- public MCP product access without an authenticated client path
 
 Claim this instead:
 
-> IncidentOps is an Azure-deployed, collector-first incident investigation RAG system with real repo ingestion, Azure OpenAI embeddings/synthesis, PostgreSQL/pgvector retrieval, readiness reports, cited investigation, workflow runs, and Core MCP tools. Current stress testing exposed the next retrieval-quality bottleneck: deeper Go/proto support for large backend repositories like Temporal.
+> IncidentOps is an Azure-deployed, collector-first engineering-evidence backend with real cloud deployment, readiness, cited search, investigation, workflow runtime, and Core MCP integration. The current engineering work is focused on raising retrieval quality and latency under large-repo ingest pressure.
 
-## Definition of Done for the Next Proof
+## Definition of done for the next proof
 
-The next proof is complete when the Temporal rerun shows:
+The next proof should only be called complete when a fresh large-repo rerun shows:
 
-- `.go` and `.proto` files are no longer massively skipped
-- documents normalized increases substantially
-- chunks created increases substantially beyond 12
-- parser/skipped-invalid count drops substantially below 85
-- history/matching/namespace/persistence queries return relevant Go/proto paths
-- missing-evidence questions remain honest
-- repeated sync skips unchanged docs
-- changed-file update passes
-- duplicate chunks remain 0
-- reports include before/after metrics
+- documents actually accepted by Core
+- chunks created at useful scale
+- parser failures typed by reason
+- code-location queries returning code/proto over README noise
+- repeated sync skipping unchanged docs
+- changed-file update replacing chunks without duplicates
+- latency and token metrics published from live Azure
 
-Target, not promise:
+Until then, the honest status is:
 
-```text
-documents_normalized: 500+
-chunks_created: 1000+
-.go skipped: near 0 for included paths
-.proto skipped: near 0 for included paths
-```
-
-Numbers beat vibes. Very rude of reality, but useful.
+- cloud deployment: proven
+- product runtime loop: proven
+- large-repo RAG quality: still under active hardening

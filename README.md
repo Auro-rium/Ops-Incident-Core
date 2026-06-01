@@ -34,31 +34,42 @@ Core owns indexing, retrieval, readiness, investigation, workflow, auth/RBAC, me
 
 ## What Is Proven
 
-The Azure path has been wired for real deployment through GitHub Actions and Azure Container Apps:
+The Azure path is live and exercised through GitHub Actions plus Azure Container Apps:
 
-- Core push runs tests, builds Core/Collector/frontend images, deploys Azure Container Apps, runs migrations, bootstraps admin, and runs Azure smoke.
-- Frontend and Collector repository workflows can dispatch the Core Azure deployment path.
-- Azure smoke validates Core health/readiness, Collector sync, search, investigate, and readiness.
-- Runtime status should show production/staging using Azure OpenAI, Redis queue/rate limit, and no local fallback.
+- Core pushes on `core` run `Deploy Azure Demo`, which executes Core tests, builds and pushes Core plus Collector images, deploys Azure resources, runs migrations, bootstraps admin, and runs Azure smoke.
+- The Collector repo runs `Validate and Deploy Azure Collector`, which validates Collector and dispatches the Core Azure deployment workflow.
+- Runtime status shows whether deployed Core is actually using Azure OpenAI, Redis-backed queue/rate limiting, and no local fallback.
+- Azure smoke validates Core health/readiness, login, project creation, private Collector sync, readiness, search, investigate, and MCP token wiring.
 
-The project has also run a real cloud E2E with Azure OpenAI embeddings/synthesis, PostgreSQL/pgvector retrieval, frontend access, Collector ingestion, and internal Core MCP deployment. The strongest next proof is deeper Temporal-scale code intelligence, not more cloud plumbing. Humanity may recover from that restraint.
+What is proven today is the cloud runtime and control plane. What is not proven yet is broad large-repo retrieval quality at the level needed to call the RAG pipeline mature.
 
 ## Current Bottleneck
 
-The first Temporal stress run proved the cloud system worked, but also exposed the repo-intelligence bottleneck:
+The current problem is retrieval quality and large-repo ingestion behavior, not cloud deployment.
+
+The latest verified Temporal-scale Azure run before the next rerun exposed a real ingestion bottleneck:
 
 ```text
 Temporal benchmark snapshot:
 files_seen: 1500
-files_skipped: 1413
-documents_normalized: 87
-documents_received_by_core: 87
-chunks_created: 12
-parser_errors / skipped_invalid: 85
+files_skipped: 72
+documents_normalized: 1428
+documents_received_by_core: 0
+chunks_created: 0
+failed_uploads: 2856
+retry_attempted: 1428
+retry_succeeded: 0
+redaction_count: 71
 sync_status: partial_success
 ```
 
-The issue was coverage quality, not the cloud loop. Temporal is mostly Go/proto, so the next useful engineering milestone is Go/proto ingestion, parsing, chunking, and retrieval validation at scale.
+That failure was useful because it exposed three concrete architecture bugs instead of vague “AI quality” complaints:
+
+- Azure OpenAI embedding throttling needed bounded retry/backoff.
+- Embedding work and retry sleeps were happening on the API event loop, which made the API unhealthy during large syncs.
+- Collector batch uploads were sharing a human-scale request limit and were being rejected with `429 Too Many Requests`.
+
+The first two fixes are live. The collector batch-limit separation is deployed through the latest Core Azure workflow and needs a clean rerun to publish new benchmark numbers. Until that rerun exists, do not claim Temporal-scale retrieval proof.
 
 See [Temporal benchmark](docs/temporal-benchmark.md) and [Product proof](docs/product-proof.md).
 
@@ -110,7 +121,7 @@ Unit and integration tests still use deterministic local-hash embeddings so CI d
 
 ## MCP Boundary
 
-Core MCP is the product MCP. Collector MCP, if used, is local/private operator tooling only.
+Core MCP is the product MCP. The Collector repository does not currently ship a supported MCP server path.
 
 Core MCP tools:
 
@@ -143,6 +154,7 @@ See [MCP architecture](docs/mcp-architecture.md).
 - audit events
 - Prometheus-style metrics and OpenTelemetry hooks
 - Core MCP server over Core APIs
+- direct-evidence fast path for simple code/config/API lookups
 
 ## Required Production Settings
 

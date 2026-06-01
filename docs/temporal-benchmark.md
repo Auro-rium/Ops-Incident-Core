@@ -1,6 +1,6 @@
 # Temporal Benchmark Status
 
-Temporal is the current large-repository benchmark for IncidentOps.
+Temporal remains the current large-repo stress target for IncidentOps.
 
 Target repository:
 
@@ -8,146 +8,120 @@ Target repository:
 https://github.com/temporalio/temporal
 ```
 
-Temporal is a useful stress target because it is a large distributed-systems backend repository with Go code, proto/API definitions, service packages, persistence layers, configuration, docs, and operational complexity.
+Temporal is useful because it is large enough to expose queueing, embedding, chunking, and ranking weaknesses instead of politely hiding them.
 
-## First Azure Run Result
+## Latest verified benchmark state
 
-The first Azure Temporal run proved that the cloud product loop worked, but it did not prove deep Temporal code intelligence.
+The latest verified Azure Temporal run, before the next clean rerun, produced this result:
 
 ```text
 files_seen: 1500
-files_skipped: 1413
-documents_normalized: 87
-documents_received_by_core: 87
-chunks_created: 12
-parser_errors / skipped_invalid: 85
-redaction_count: 28
+files_skipped: 72
+documents_normalized: 1428
+documents_received_by_core: 0
+chunks_created: 0
+failed_uploads: 2856
+retry_attempted: 1428
+retry_succeeded: 0
+redaction_count: 71
 sync_status: partial_success
 ```
 
-Search worked technically:
+Top skip reasons:
 
 ```text
-/v1/search calls: 10
-success: 10
-failed: 0
-results per query: 8
-avg search latency: about 1.58s
-p95 search latency: about 1.60s
+unsupported_extension: 62
+denied: 9
+empty: 1
 ```
 
-Retrieval quality was only partially useful:
-
-- README and documentation questions worked.
-- Real code questions were weak because Go source was not deeply indexed in that run.
-- Runtime investigation questions correctly returned cautious or insufficient-evidence responses when runtime logs, deployment history, traces, metrics, and incident records were missing.
-
-## Why It Was Shallow
-
-Temporal is mostly Go/proto. The first benchmark skipped or failed most of that evidence:
+Most common unsupported extensions in that run:
 
 ```text
-.go skipped: 1283
-.proto skipped: 56
+.svg: 20
+.d2: 18
+.sh: 7
+.cql: 5
+.tmpl: 4
 ```
 
-That means the result was not “Temporal fully understood.” It was “the Azure loop works, and the ingestion/chunking bottleneck is now visible.” That is useful because the next engineering problem is specific instead of mystical.
+## What this run proved
 
-## Current Code Direction
+It proved three things:
 
-Core contains parser/chunker paths for Go and proto-style declaration parsing:
+1. Collector can walk a large real repo, normalize a large number of documents, and redact content safely.
+2. The failure point was not discovery or normalization. The failure point was the Core-side ingest/runtime path.
+3. The benchmark exposed architecture bugs that were worth fixing:
+   - Azure OpenAI embedding throttling
+   - embedding work blocking the API event loop
+   - collector batch uploads sharing a human-scale request limit
 
-- Go files: declaration-oriented chunks for functions and types, with fallback file chunks.
-- Proto files: service/message/enum chunks, with fallback API-doc chunks.
-- Chunk metadata carries language, symbol, kind, path, section title, and line ranges where available.
+## What it did not prove
 
-Collector supports `.go` and `.proto` in its default extension set and extracts deterministic metadata such as package, functions/types, proto services/messages, language, module path, headings, endpoints, config keys, commits, and operational hints.
+It did **not** prove:
 
-The next proof is not whether code exists. The next proof is whether the deployed Azure benchmark numbers improve.
+- useful Temporal-scale chunk coverage
+- useful Temporal-scale code retrieval quality
+- answer/investigation quality on Temporal
+- Go/proto retrieval performance
 
-## Rerun Goal
+Core received zero documents in that verified run, so any stronger claim would be fiction.
 
-Rerun Temporal after deploying the current Go/proto support through Azure CI/CD.
+## Current code direction after the failed run
 
-Improvement targets:
+The current Core codebase has already moved in the right direction:
 
-```text
-files_seen: 1500
-documents_normalized: 500+
-chunks_created: 1000+
-.go skipped: near 0 for included paths
-.proto skipped: near 0 for included paths
-parser_errors / skipped_invalid: far below 85
-sync_status: success or explained partial_success
-```
+- bounded Azure embedding retry/backoff
+- embedding work offloaded from the API event loop
+- separate collector batch upload rate limit
+- source-aware Go chunk types:
+  - `go_module`
+  - `go_type`
+  - `go_function`
+  - `go_method`
+- source-aware proto chunk types:
+  - `proto_preamble`
+  - `proto_service`
+  - `proto_rpc`
+  - `proto_message`
+  - `proto_enum`
+- retrieval intent routing and diagnostics
+- direct-evidence answer fast paths
 
-These are targets, not guarantees. They define the bar for calling Temporal a real retrieval proof.
+Those code changes are deployed, but the benchmark report should not be rewritten as a success story until the rerun numbers exist.
 
-## Required Temporal Queries
+## Required rerun bar
 
-Use repo-grounded queries first:
+The next Temporal rerun should publish:
 
-```text
-Where is the history service implemented?
-Where are matching service responsibilities implemented?
-Where is namespace management implemented?
-Where are persistence stores or database-related components defined?
-Where are proto API definitions for workflows or history located?
-Which parts of the repo are relevant to investigating workflow task latency?
-What evidence is missing before IncidentOps could diagnose a real runtime issue in Temporal?
-```
-
-Expected behavior:
-
-- history/matching/namespace/persistence questions should return relevant Go/proto paths.
-- proto questions should return `.proto` evidence.
-- workflow task latency questions should return relevant code areas plus missing-runtime-evidence warnings.
-- runtime diagnosis should remain cautious unless logs, deploy records, traces, metrics, and incident records are present.
-
-## Benchmark Report Requirements
-
-The rerun report should include before/after metrics:
-
-| Metric | First run | Rerun |
+| Metric | Latest verified run | Next rerun |
 |---|---:|---:|
 | Files seen | 1500 | |
-| Files skipped | 1413 | |
-| `.go` skipped | 1283 | |
-| `.proto` skipped | 56 | |
-| Documents normalized | 87 | |
-| Documents received by Core | 87 | |
-| Chunks created | 12 | |
-| Parser errors / skipped invalid | 85 | |
-| Redaction count | 28 | |
+| Files skipped | 72 | |
+| Documents normalized | 1428 | |
+| Documents received by Core | 0 | |
+| Chunks created | 0 | |
+| Failed uploads | 2856 | |
+| Retry attempted | 1428 | |
+| Retry succeeded | 0 | |
+| Redaction count | 71 | |
 | Sync status | partial_success | |
-| Search success rate | 10/10 | |
-| Search avg latency | about 1.58s | |
-| Investigation citation count | | |
-| Repeat sync skipped unchanged | | |
-| Changed-file update | | |
-| Duplicate chunks after update | | |
+| Search result count | | |
+| Answer/investigation citation count | | |
+| Search latency avg/p95 | | |
+| Answer latency avg/p95 | | |
+| Investigation latency avg/p95 | | |
+| Prompt/completion/total tokens | | |
 
-## Definition of Success
+## Definition of success
 
-The Temporal benchmark is successful when:
+The Temporal benchmark is only successful when all of these are true:
 
-- Go/proto evidence is ingested instead of mostly skipped.
-- Source-aware chunks are created at useful scale.
-- Search returns relevant Go/proto paths for architecture questions.
-- Investigations cite indexed evidence and preserve missing-data warnings.
-- Repeat sync and changed-file update still work.
-- Duplicate chunks remain 0.
-- The benchmark report is published with numbers.
+- Core accepts documents and creates chunks
+- Go/proto paths appear in top results for code-location questions
+- runtime questions stay cautious when runtime evidence is missing
+- repeated sync skips unchanged documents
+- changed-file update replaces old chunks without duplicates
+- live latency and token numbers are published
 
-## Definition of Failure
-
-The benchmark is not successful if:
-
-- chunks remain near 12
-- Go/proto remains mostly skipped
-- parser errors remain near 85 without explanation
-- search returns only README/docs for code questions
-- investigation overclaims runtime cause without runtime evidence
-- reports hide partial success
-
-Partial success is allowed. Hidden failure is not.
+Until then, Temporal remains a failure-driven benchmark. That is still useful, but it is not a success proof.

@@ -70,6 +70,12 @@ frontend
   Separate operator console from the frontend repo in the Azure deployment path.
 ```
 
+Current deployment note:
+
+- Core Azure CI/CD always deploys API, worker, database, Redis, and MCP runtime changes.
+- Frontend infrastructure exists in Azure, but the current Core GitHub workflow does not rebuild or redeploy frontend by default.
+- Collector is deployed through the Core Azure path after Collector repo validation succeeds.
+
 ## Data model overview
 
 Important tables:
@@ -144,17 +150,29 @@ Core uses hybrid retrieval:
 
 ```text
 query
-  -> query/entity analysis
+  -> query intent classification
+  -> retrieval budget routing
   -> vector search with pgvector
   -> lexical search with Postgres full-text
   -> metadata fusion and boosts
   -> optional reranking
   -> evidence packing
-  -> redaction and prompt-injection marking
+  -> direct-evidence fast path or Azure OpenAI synthesis
   -> citation builder
 ```
 
 Why hybrid retrieval? Incident questions contain exact operational facts: deploy hashes, endpoints, error codes, service names, and timestamps. Pure vector search is not reliable enough for that.
+
+Current retrieval diagnostics include:
+
+- `query_intent`
+- `retrieval_budget`
+- `source_type_distribution`
+- `chunk_type_distribution`
+- `applied_boosts`
+- `applied_penalties`
+- `retrieval_branch_latencies`
+- `total_retrieval_latency_ms`
 
 ## Investigation pipeline
 
@@ -175,6 +193,8 @@ The investigation service:
 Supported task styles include latency, error-rate, deploy regression, timeout, previous incident lookup, and generic incident questions.
 
 Core is intentionally honest when evidence is weak. A weak fixture should produce an insufficient-evidence response, not a hallucinated executive summary wearing a tie.
+
+Large-repo benchmark status is still under active hardening. The latest verified Temporal-scale run exposed ingestion/runtime bottlenecks and should be treated as a failure report, not as retrieval proof.
 
 ## Workflow runtime
 

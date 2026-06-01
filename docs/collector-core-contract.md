@@ -32,9 +32,11 @@ Example shape:
     "batch_ingest": true,
     "search": true,
     "investigate": true,
-    "runs": true
+    "runs": true,
+    "mcp": true
   },
   "limits": {
+    "max_batch_size": 52428800,
     "max_documents_per_batch": 100,
     "max_document_bytes": 10485760,
     "max_batch_bytes": 52428800
@@ -44,7 +46,9 @@ Example shape:
     "register_source": "/v1/projects/{project_id}/sources",
     "create_sync": "/v1/sources/{source_id}/syncs/start",
     "batch_upload": "/v1/sources/{source_id}/documents/batch",
-    "update_sync": "/v1/sources/{source_id}/syncs/{sync_id}/finish"
+    "update_sync": "/v1/sources/{source_id}/syncs/{sync_id}/finish",
+    "readiness": "/v1/projects/{project_id}/readiness",
+    "mcp": "/mcp"
   }
 }
 ```
