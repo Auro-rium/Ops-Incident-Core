@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -172,7 +173,7 @@ async def hybrid_search_with_debug(
     intent = classify_query_intent(query)
     logger.info("Query analysis: %s", query_info)
     embed_started = time.perf_counter()
-    query_embedding = embed_query(query, settings.embedding_model)
+    query_embedding = await asyncio.to_thread(embed_query, query, settings.embedding_model)
     branch_latencies["query_embedding_ms"] = _elapsed_ms(embed_started)
     fetch_k = _fetch_budget(top_k, intent)
     vector_started = time.perf_counter()

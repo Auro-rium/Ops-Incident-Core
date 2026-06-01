@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import uuid
@@ -236,7 +237,7 @@ async def _index_one_document(
 
     if embed_fn and chunk_payloads:
         try:
-            embeddings = embed_fn(embedding_texts)
+            embeddings = await asyncio.to_thread(embed_fn, embedding_texts)
         except Exception as exc:
             raise DocumentIndexingError("embedding_error", f"failed to embed document: {exc.__class__.__name__}") from exc
         if len(embeddings) != len(chunk_payloads):
