@@ -1,0 +1,71 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import httpx
+
+from incidentops.retrieval import embeddings
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int, payload: dict, headers: dict[str, str] | None = None) -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.headers = headers or {}
+        self.request = httpx.Request("POST", "https://example.invalid")
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError("request failed", request=self.request, response=self)
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _FakeClient:
+    def __init__(self, responses: list[_FakeResponse]) -> None:
+        self._responses = responses
+        self.calls = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def post(self, *args, **kwargs):
+        response = self._responses[self.calls]
+        self.calls += 1
+        return response
+
+
+def test_azure_embed_retries_throttled_requests(monkeypatch):
+    settings = SimpleNamespace(
+        azure_openai_embeddings_configured=True,
+        azure_openai_endpoint="https://example.openai.azure.com",
+        azure_openai_embedding_deployment="incidentops-embed",
+        azure_openai_api_key="secret",
+        azure_openai_api_version="2024-10-21",
+        embedding_dim=4,
+        llm_timeout_seconds=5,
+        embedding_request_max_retries=3,
+        embedding_request_initial_backoff_seconds=0.01,
+        embedding_request_max_backoff_seconds=0.05,
+        embedding_request_min_interval_seconds=0.0,
+    )
+    fake_client = _FakeClient(
+        [
+            _FakeResponse(429, {"error": {"message": "throttled"}}, headers={"retry-after": "0"}),
+            _FakeResponse(200, {"data": [{"index": 0, "embedding": [1.0, 0.0, 0.0, 0.0]}]}),
+        ]
+    )
+    monkeypatch.setattr(embeddings, "get_settings", lambda: settings)
+    monkeypatch.setattr(embeddings.httpx, "Client", lambda timeout: fake_client)
+    monkeypatch.setattr(embeddings.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(embeddings.random, "uniform", lambda a, b: 0.0)
+
+    result = embeddings.embed_texts(["history service"], model_name="azure-openai")
+
+    assert len(result) == 1
+    assert fake_client.calls == 2
+    assert result[0] == [1.0, 0.0, 0.0, 0.0]

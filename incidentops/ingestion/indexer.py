@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from collections import Counter
 from pathlib import PurePosixPath
@@ -195,6 +196,8 @@ async def _index_one_document(
         raise DocumentIndexingError(FAILURE_PARSER_EXCEPTION, parse_error)
     if not raw_chunks:
         raise DocumentIndexingError("no_chunks_parsed", "no chunks parsed")
+    if _estimate_chunk_segments(raw_chunks, settings.max_chunk_tokens) > settings.max_chunks_per_document:
+        raw_chunks = _build_bounded_fallback_chunks(normalized, service_name=service_name, settings=settings)
 
     chunk_payloads: list[dict[str, Any]] = []
     embedding_texts: list[str] = []
@@ -292,6 +295,88 @@ async def _index_one_document(
         "chunks_created": len(chunk_payloads),
         "chunk_type_counts": dict(chunk_type_counts),
     }
+
+
+def _estimate_chunk_segments(raw_chunks: list[RawChunk], max_chunk_tokens: int) -> int:
+    total = 0
+    for raw_chunk in raw_chunks:
+        token_count = max(1, count_tokens(raw_chunk.text))
+        total += max(1, math.ceil(token_count / max_chunk_tokens))
+    return total
+
+
+def _build_bounded_fallback_chunks(
+    normalized: NormalizedDocument,
+    *,
+    service_name: str | None,
+    settings: Any,
+) -> list[RawChunk]:
+    lines = normalized.content.splitlines()
+    if not lines:
+        return []
+    total_tokens = max(1, count_tokens(normalized.content))
+    target_chunk_count = min(
+        settings.max_chunks_per_document,
+        max(1, math.ceil(total_tokens / settings.max_chunk_tokens)),
+    )
+    target_tokens = max(
+        settings.max_chunk_tokens,
+        math.ceil(total_tokens / target_chunk_count),
+    )
+    chunk_type = _fallback_chunk_type(normalized.path, normalized.source_type)
+    chunks: list[RawChunk] = []
+    start_index = 0
+    while start_index < len(lines) and len(chunks) < settings.max_chunks_per_document:
+        end_index = start_index
+        chunk_lines: list[str] = []
+        while end_index < len(lines):
+            candidate_lines = chunk_lines + [lines[end_index]]
+            candidate_text = "\n".join(candidate_lines).strip()
+            if chunk_lines and count_tokens(candidate_text) > target_tokens:
+                break
+            chunk_lines = candidate_lines
+            end_index += 1
+            if count_tokens("\n".join(chunk_lines).strip()) >= target_tokens:
+                break
+        chunk_text = "\n".join(chunk_lines).strip()
+        if not chunk_text:
+            break
+        chunks.append(
+            RawChunk(
+                text=chunk_text,
+                chunk_type=chunk_type,
+                source_type=normalized.source_type,
+                document_path=normalized.path,
+                doc_type=_doc_type_for_normalized_document(normalized),
+                service_name=service_name,
+                section_title=PurePosixPath(normalized.path).name,
+                start_line=start_index + 1,
+                end_line=end_index,
+                metadata={
+                    "language": normalized.metadata.get("language") or normalized.metadata.get("file_language"),
+                    "package_name": normalized.metadata.get("package_name"),
+                    "symbol_name": normalized.metadata.get("symbol_name"),
+                    "fallback_reason": "chunk_limit_guard",
+                },
+            )
+        )
+        start_index = end_index
+    return chunks
+
+
+def _fallback_chunk_type(path: str, source_type: str) -> str:
+    suffix = PurePosixPath(path).suffix.lower()
+    if suffix == ".go":
+        return "go_fallback"
+    if suffix == ".proto":
+        return "proto_fallback"
+    if source_type == "config":
+        return "config_fallback"
+    if source_type == "api_doc":
+        return "api_fallback"
+    if source_type == "code":
+        return "code_fallback"
+    return "text_fallback"
 
 
 def _doc_type_for_normalized_document(document: NormalizedDocument) -> str:

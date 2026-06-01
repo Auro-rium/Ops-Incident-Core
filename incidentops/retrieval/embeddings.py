@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import random
+import time
 
 import httpx
 
@@ -19,6 +21,9 @@ logger = logging.getLogger("incidentops.retrieval.embeddings")
 
 _model = None
 _model_name: str | None = None
+_last_azure_embed_request_at = 0.0
+
+_RETRYABLE_EMBEDDING_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
 
 
 def _load_model(model_name: str):
@@ -63,13 +68,41 @@ def _azure_embed(texts: list[str]) -> list[list[float]]:
         "Content-Type": "application/json",
     }
     with httpx.Client(timeout=float(settings.llm_timeout_seconds)) as client:
-        response = client.post(
-            url,
-            params={"api-version": settings.azure_openai_api_version},
-            headers=headers,
-            json=payload,
-        )
-        response.raise_for_status()
+        for attempt in range(settings.embedding_request_max_retries + 1):
+            _respect_embedding_min_interval(settings)
+            try:
+                response = client.post(
+                    url,
+                    params={"api-version": settings.azure_openai_api_version},
+                    headers=headers,
+                    json=payload,
+                )
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                if attempt >= settings.embedding_request_max_retries:
+                    raise
+                delay = _embedding_retry_delay(None, attempt, settings)
+                logger.warning(
+                    "Azure embedding request failed with %s; retrying in %.2fs (attempt %d/%d)",
+                    exc.__class__.__name__,
+                    delay,
+                    attempt + 1,
+                    settings.embedding_request_max_retries,
+                )
+                time.sleep(delay)
+                continue
+            if response.status_code in _RETRYABLE_EMBEDDING_STATUS_CODES and attempt < settings.embedding_request_max_retries:
+                delay = _embedding_retry_delay(response, attempt, settings)
+                logger.warning(
+                    "Azure embedding request returned HTTP %d; retrying in %.2fs (attempt %d/%d)",
+                    response.status_code,
+                    delay,
+                    attempt + 1,
+                    settings.embedding_request_max_retries,
+                )
+                time.sleep(delay)
+                continue
+            response.raise_for_status()
+            break
     data = response.json()["data"]
     ordered = sorted(data, key=lambda item: item.get("index", 0))
     embeddings = [item["embedding"] for item in ordered]
@@ -112,3 +145,35 @@ def get_embedding_dimension(model_name: str | None = None) -> int:
         return settings.embedding_dim
     model = _load_model(chosen_model)
     return model.get_sentence_embedding_dimension()
+
+
+def _respect_embedding_min_interval(settings) -> None:
+    global _last_azure_embed_request_at
+    min_interval = max(0.0, float(settings.embedding_request_min_interval_seconds))
+    if min_interval <= 0:
+        _last_azure_embed_request_at = time.monotonic()
+        return
+    elapsed = time.monotonic() - _last_azure_embed_request_at
+    if elapsed < min_interval:
+        time.sleep(min_interval - elapsed)
+    _last_azure_embed_request_at = time.monotonic()
+
+
+def _embedding_retry_delay(response: httpx.Response | None, attempt: int, settings) -> float:
+    if response is not None:
+        retry_after_ms = response.headers.get("x-ms-retry-after-ms")
+        if retry_after_ms:
+            try:
+                return max(0.0, min(float(retry_after_ms) / 1000.0, float(settings.embedding_request_max_backoff_seconds)))
+            except ValueError:
+                pass
+        retry_after = response.headers.get("retry-after")
+        if retry_after:
+            try:
+                return max(0.0, min(float(retry_after), float(settings.embedding_request_max_backoff_seconds)))
+            except ValueError:
+                pass
+    base = float(settings.embedding_request_initial_backoff_seconds) * (2**attempt)
+    capped = min(base, float(settings.embedding_request_max_backoff_seconds))
+    jitter = min(0.5, capped * 0.1)
+    return capped + random.uniform(0.0, jitter)

@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "gpt-4o"
     llm_timeout_seconds: int = 60
+    embedding_request_max_retries: int = 8
+    embedding_request_initial_backoff_seconds: float = 1.0
+    embedding_request_max_backoff_seconds: float = 20.0
+    embedding_request_min_interval_seconds: float = 0.25
     azure_openai_endpoint: str = ""
     azure_openai_api_key: str = ""
     azure_openai_api_version: str = "2024-10-21"
