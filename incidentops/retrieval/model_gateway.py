@@ -121,12 +121,3 @@ async def remote_rerank(query: str, candidates: list[dict[str, Any]]) -> list[fl
     except httpx.HTTPError as exc:
         incr("rag_remote_rerank_failures_total")
         raise RemoteModelError(f"remote reranker request failed: {exc.__class__.__name__}") from exc
-
-
-async def remote_health() -> dict[str, Any]:
-    settings = get_settings()
-    if not settings.rag_embedding_endpoint:
-        return {"configured": False}
-    # Managed Azure ML scoring URIs do not expose a health route publicly.
-    # Deployment health is checked by Azure ML and by a bounded scoring smoke.
-    return {"configured": True, "healthy": None}

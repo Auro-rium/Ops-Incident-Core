@@ -140,11 +140,6 @@ def embed_texts(texts: list[str], model_name: str | None = None) -> list[list[fl
         return [_hash_embed(text, settings.embedding_dim) for text in texts]
 
 
-def embed_query(query: str, model_name: str | None = None) -> list[float]:
-    result = embed_texts([query], model_name)
-    return result[0] if result else []
-
-
 async def embed_texts_async(texts: list[str], model_name: str | None = None) -> list[list[float]]:
     if not texts:
         return []
@@ -169,17 +164,6 @@ async def embed_texts_async(texts: list[str], model_name: str | None = None) -> 
 async def embed_query_async(query: str, model_name: str | None = None) -> list[float]:
     vectors = await embed_texts_async([query], model_name=model_name)
     return vectors[0] if vectors else []
-
-
-def get_embedding_dimension(model_name: str | None = None) -> int:
-    settings = get_settings()
-    chosen_model = model_name or settings.embedding_model
-    if chosen_model.startswith("local-hash") or chosen_model.startswith("azure-openai"):
-        return settings.embedding_dim
-    if chosen_model.startswith("azure-ml"):
-        return settings.rag_embedding_dim
-    model = _load_model(chosen_model)
-    return model.get_sentence_embedding_dimension()
 
 
 def _respect_embedding_min_interval(settings) -> None:
