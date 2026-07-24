@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from incidentops.observability.metrics import incr, observe_latency
+from incidentops.retrieval.model_gateway import RemoteModelError, remote_rerank
 
 logger = logging.getLogger("incidentops.retrieval.reranker")
 
@@ -20,6 +21,11 @@ def _load_cross_encoder(model_name: str):
     """Lazy-load the cross-encoder model."""
     global _cross_encoder, _ce_model_name
     if not model_name:
+        return None
+    from incidentops.config.settings import get_settings
+
+    if not get_settings().allow_local_model_loading:
+        logger.info("Local reranker loading is disabled; using remote or heuristic reranking")
         return None
     if _cross_encoder is None or _ce_model_name != model_name:
         try:
@@ -100,6 +106,71 @@ def rerank_with_debug(
         "used_model": model_name if mode == "cross_encoder" else None,
         "latency_ms": latency_ms,
     }
+
+
+async def rerank_with_debug_async(
+    query: str,
+    results: list[dict],
+    model_name: str = "",
+    top_k: int = 10,
+) -> tuple[list[dict], dict[str, Any]]:
+    """Async reranking path used by cloud deployments.
+
+    Azure ML reranking is remote and never loads a model in the Core process.
+    Local deterministic/cross-encoder behavior remains available only to
+    compatibility callers and contract tests.
+    """
+    from incidentops.config.settings import get_settings
+
+    settings = get_settings()
+    if not results:
+        return [], {"mode": "skipped", "reason": "no_results", "used_model": None}
+    if settings.rag_rerank_mode == "disabled":
+        _fallback_sort(results)
+        return results[:top_k], {"mode": "disabled", "reason": "configuration", "used_model": None}
+    if model_name.startswith("azure-ml") or settings.rag_reranker_endpoint:
+        if settings.rag_rerank_mode == "conditional" and _should_skip_cross_encoder(results):
+            _fallback_sort(results)
+            return results[:top_k], {
+                "mode": "heuristic",
+                "reason": "decisive_retrieval_result",
+                "used_model": None,
+            }
+        try:
+            started = time.time()
+            scores = await remote_rerank(
+                query,
+                [
+                    {"id": result["chunk"].id, "text": result["chunk"].text}
+                    for result in results
+                ],
+            )
+            for result, score in zip(results, scores):
+                result["rerank_score"] = score
+            results.sort(key=lambda item: item.get("rerank_score", 0.0), reverse=True)
+            latency_ms = int((time.time() - started) * 1000)
+            observe_latency("rerank", latency_ms)
+            return results[:top_k], {
+                "mode": "remote_cross_encoder",
+                "reason": "ambiguous_results",
+                "used_model": model_name or settings.reranker_model,
+                "latency_ms": latency_ms,
+            }
+        except RemoteModelError:
+            incr("rerank_failures_total")
+            _fallback_sort(results)
+            return results[:top_k], {
+                "mode": "fallback",
+                "reason": "remote_model_failure",
+                "used_model": None,
+            }
+    return await _rerank_sync_off_thread(query, results, model_name, top_k)
+
+
+async def _rerank_sync_off_thread(query: str, results: list[dict], model_name: str, top_k: int):
+    import asyncio
+
+    return await asyncio.to_thread(rerank_with_debug, query, results, model_name, top_k)
 
 
 def _fallback_sort(results: list[dict]) -> None:

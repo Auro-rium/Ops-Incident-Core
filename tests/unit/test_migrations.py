@@ -57,8 +57,8 @@ async def test_production_startup_does_not_call_create_all(monkeypatch):
     )
 
 
-def test_alembic_head_resolves_to_security_migration():
-    assert get_head_revision() == "0002_security_audit_events"
+def test_alembic_head_resolves_to_rag_v2_embeddings_migration():
+    assert get_head_revision() == "0003_rag_v2_embeddings"
 
 
 def test_required_tables_match_current_models():
@@ -78,8 +78,8 @@ def test_readiness_payload_ready_when_all_checks_pass():
         database_ok=True,
         pgvector_ok=True,
         existing_tables=set(required_tables()),
-        current_revision="0002_security_audit_events",
-        head_revision="0002_security_audit_events",
+        current_revision="0003_rag_v2_embeddings",
+        head_revision="0003_rag_v2_embeddings",
     )
     assert payload["ready"] is True
     assert payload["required_tables"] == "ok"
@@ -95,7 +95,7 @@ def test_readiness_payload_reports_missing_tables_and_outdated_migration():
         pgvector_ok=True,
         existing_tables=existing,
         current_revision="old_revision",
-        head_revision="0002_security_audit_events",
+        head_revision="0003_rag_v2_embeddings",
     )
     assert payload["ready"] is False
     assert payload["required_tables"] == ["chunks"]
@@ -113,8 +113,8 @@ def test_readiness_payload_reports_missing_columns():
         pgvector_ok=True,
         existing_tables=existing_tables,
         existing_columns=existing_columns,
-        current_revision="0002_security_audit_events",
-        head_revision="0002_security_audit_events",
+        current_revision="0003_rag_v2_embeddings",
+        head_revision="0003_rag_v2_embeddings",
     )
     assert payload["ready"] is False
     assert payload["required_columns"] == {"sources": ["name"]}
@@ -126,7 +126,7 @@ def test_readiness_payload_reports_missing_pgvector_and_missing_revision():
         pgvector_ok=False,
         existing_tables=set(required_tables()),
         current_revision=None,
-        head_revision="0002_security_audit_events",
+        head_revision="0003_rag_v2_embeddings",
     )
     assert payload["ready"] is False
     assert payload["pgvector"] == "missing"

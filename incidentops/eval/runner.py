@@ -14,6 +14,7 @@ from incidentops.config.settings import Settings, get_settings
 from incidentops.db.models import EvalRun, EvalRunCase, EvalStatus
 from incidentops.investigation.service import investigate
 from incidentops.observability.metrics import incr, observe_latency
+from incidentops.retrieval.query_intent import classify_query_intent
 from incidentops.security.path_policy import validate_path_under_allowed_roots
 
 DEFAULT_CASES_PATH = Path(__file__).parent / "golden_cases.jsonl"
@@ -43,7 +44,12 @@ def load_cases(cases_path: str | Path | None = None, settings: Settings | None =
     return cases
 
 
-def evaluate_case_output(case: dict, evidence_paths: list[str], answer_payload: str) -> dict:
+def evaluate_case_output(
+    case: dict,
+    evidence_paths: list[str],
+    answer_payload: str,
+    evidence_source_types: list[str] | None = None,
+) -> dict:
     expected_documents = case.get("expected_documents", [])
     expected_terms = [term.lower() for term in case.get("expected_terms", [])]
     forbidden_terms = [term.lower() for term in case.get("forbidden_terms", [])]
@@ -56,6 +62,11 @@ def evaluate_case_output(case: dict, evidence_paths: list[str], answer_payload: 
     found_terms = [term for term in expected_terms if term in lower_answer]
     term_coverage = len(found_terms) / len(expected_terms) if expected_terms else 1.0
     forbidden_hits = [term for term in forbidden_terms if term in lower_answer]
+    observed_source_types = sorted(set(evidence_source_types or []))
+    expected_source_types = [str(value) for value in case.get("expected_source_types", [])]
+    forbidden_source_types = [str(value) for value in case.get("forbidden_source_types", [])]
+    source_type_hits = sorted(set(expected_source_types) & set(observed_source_types))
+    wrong_source_type_hits = sorted(set(forbidden_source_types) & set(observed_source_types))
     return {
         "found_documents": found_documents,
         "missing_documents": [expected for expected in expected_documents if expected not in found_documents],
@@ -64,6 +75,11 @@ def evaluate_case_output(case: dict, evidence_paths: list[str], answer_payload: 
         "missing_terms": [term for term in expected_terms if term not in found_terms],
         "term_coverage": term_coverage,
         "forbidden_hits": forbidden_hits,
+        "query_class": str(case.get("query_class") or classify_query_intent(str(case.get("question", ""))).intent),
+        "expected_source_types": expected_source_types,
+        "observed_source_types": observed_source_types,
+        "source_type_hit_rate": len(source_type_hits) / len(expected_source_types) if expected_source_types else 1.0,
+        "wrong_source_type_hits": wrong_source_type_hits,
     }
 
 
@@ -137,7 +153,12 @@ async def execute_eval_run(
                     " ".join(h.summary for h in investigation.hypotheses),
                 ]
             )
-            case_result = evaluate_case_output(case, evidence_paths, answer_payload)
+            case_result = evaluate_case_output(
+                case,
+                evidence_paths,
+                answer_payload,
+                [str(item.get("source_type") or "unknown_text") for item in investigation.evidence],
+            )
             case_result.update(
                 {
                     "case_id": case.get("id", ""),
@@ -165,6 +186,11 @@ async def execute_eval_run(
                 "missing_terms": [str(term).lower() for term in case.get("expected_terms", [])],
                 "term_coverage": 0.0,
                 "forbidden_hits": [],
+                "query_class": str(case.get("query_class") or classify_query_intent(str(case.get("question", ""))).intent),
+                "expected_source_types": case.get("expected_source_types", []),
+                "observed_source_types": [],
+                "source_type_hit_rate": 0.0,
+                "wrong_source_type_hits": [],
                 "latency_ms": int((time.time() - started) * 1000),
                 "error": _safe_error(exc),
             }
@@ -184,6 +210,9 @@ async def execute_eval_run(
     failed_cases = sum(1 for result in results if result.get("error"))
     passed_cases = len(results) - failed_cases
     avg_latency_ms = sum(int(result.get("latency_ms") or 0) for result in results) / len(results) if results else 0.0
+    latency_values = [int(result.get("latency_ms") or 0) for result in results]
+    avg_source_type_hit_rate = sum(float(result["source_type_hit_rate"]) for result in results) / len(results) if results else 0.0
+    wrong_source_type_rate = sum(1 for result in results if result["wrong_source_type_hits"]) / len(results) if results else 0.0
     run.status = EvalStatus.completed
     run.summary_json = {
         "total_cases": len(results),
@@ -193,6 +222,10 @@ async def execute_eval_run(
         "avg_term_coverage": avg_term_coverage,
         "forbidden_hit_count": forbidden_hits,
         "avg_latency_ms": avg_latency_ms,
+        "latency_p50_ms": _percentile(latency_values, 50),
+        "latency_p95_ms": _percentile(latency_values, 95),
+        "avg_source_type_hit_rate": avg_source_type_hit_rate,
+        "wrong_source_type_rate": wrong_source_type_rate,
         # Backward-compatible keys used by existing tests and scripts.
         "cases": len(results),
         "avg_recall": avg_recall,
@@ -236,7 +269,12 @@ async def run_eval_http(
                     " ".join(h.get("summary", "") for h in payload.get("hypotheses", [])),
                 ]
             )
-            case_result = evaluate_case_output(case, evidence_paths, answer_payload)
+            case_result = evaluate_case_output(
+                case,
+                evidence_paths,
+                answer_payload,
+                [str(item.get("source_type") or "unknown_text") for item in payload.get("evidence", [])],
+            )
             case_result["case_id"] = case["id"]
             results.append(case_result)
     summary = {
@@ -244,9 +282,21 @@ async def run_eval_http(
         "avg_recall": sum(result["evidence_recall"] for result in results) / len(results) if results else 0.0,
         "avg_term_coverage": sum(result["term_coverage"] for result in results) / len(results) if results else 0.0,
         "forbidden_hit_cases": sum(1 for result in results if result["forbidden_hits"]),
+        "avg_source_type_hit_rate": sum(result["source_type_hit_rate"] for result in results) / len(results) if results else 0.0,
+        "wrong_source_type_rate": sum(1 for result in results if result["wrong_source_type_hits"]) / len(results) if results else 0.0,
+        "latency_p50_ms": _percentile([int(result.get("latency_ms") or 0) for result in results], 50),
+        "latency_p95_ms": _percentile([int(result.get("latency_ms") or 0) for result in results], 95),
         "results": results,
     }
     return summary
+
+
+def _percentile(values: list[int], percentile: int) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, int((percentile / 100) * (len(ordered) - 1))))
+    return float(ordered[index])
 
 
 def _build_parser() -> argparse.ArgumentParser:

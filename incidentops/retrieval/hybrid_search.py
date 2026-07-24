@@ -14,9 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from incidentops.config.settings import get_settings
 from incidentops.ingestion.chunking.metadata import extract_deploy_hash
-from incidentops.retrieval.embeddings import embed_query
+from incidentops.retrieval.embeddings import embed_query_async
 from incidentops.retrieval.lexical_search import lexical_search
-from incidentops.observability.metrics import observe_latency
+from incidentops.observability.metrics import incr, observe_latency
 from incidentops.retrieval.query_intent import (
     INTENT_API_CONTRACT,
     INTENT_ARCHITECTURE,
@@ -111,6 +111,7 @@ _CHUNK_TYPE_BOOSTS = {
     "proto_enum": 0.08,
     "markdown_section": 0.08,
     "log_window": 0.12,
+    "error_cluster": 0.14,
     "error_cluster": 0.12,
     "deploy_diff": 0.12,
     "incident_section": 0.12,
@@ -171,17 +172,49 @@ async def hybrid_search_with_debug(
     branch_latencies: dict[str, int] = {}
     query_info = analyze_query(query)
     intent = classify_query_intent(query)
-    logger.info("Query analysis: %s", query_info)
+    incr(f"retrieval_intent_{intent.intent}_total")
+    logger.info("query classified intent=%s", intent.intent)
     embed_started = time.perf_counter()
-    query_embedding = await asyncio.to_thread(embed_query, query, settings.embedding_model)
+    query_embedding = await embed_query_async(query, settings.embedding_model)
     branch_latencies["query_embedding_ms"] = _elapsed_ms(embed_started)
     fetch_k = _fetch_budget(top_k, intent)
-    vector_started = time.perf_counter()
-    vec_results = await vector_search(db, project_id, query_embedding, top_k=fetch_k, filters=filters)
-    branch_latencies["vector_search_ms"] = _elapsed_ms(vector_started)
-    lexical_started = time.perf_counter()
-    lex_results = await lexical_search(db, project_id, query, top_k=fetch_k, filters=filters)
-    branch_latencies["lexical_search_ms"] = _elapsed_ms(lexical_started)
+    if settings.rag_parallel_retrieval:
+        try:
+            from incidentops.db.session import _get_session_factory
+
+            factory = _get_session_factory()
+            vector_started = time.perf_counter()
+            lexical_started = time.perf_counter()
+
+            async def _vector_branch():
+                async with factory() as branch_db:
+                    return await vector_search(branch_db, project_id, query_embedding, top_k=fetch_k, filters=filters)
+
+            async def _lexical_branch():
+                async with factory() as branch_db:
+                    return await lexical_search(branch_db, project_id, query, top_k=fetch_k, filters=filters)
+
+            vec_results, lex_results = await asyncio.gather(_vector_branch(), _lexical_branch())
+            branch_latencies["vector_search_ms"] = _elapsed_ms(vector_started)
+            branch_latencies["lexical_search_ms"] = _elapsed_ms(lexical_started)
+            branch_latencies["retrieval_parallel"] = 1
+        except Exception:
+            logger.warning("Parallel retrieval unavailable; using request session", exc_info=True)
+            vector_started = time.perf_counter()
+            vec_results = await vector_search(db, project_id, query_embedding, top_k=fetch_k, filters=filters)
+            branch_latencies["vector_search_ms"] = _elapsed_ms(vector_started)
+            lexical_started = time.perf_counter()
+            lex_results = await lexical_search(db, project_id, query, top_k=fetch_k, filters=filters)
+            branch_latencies["lexical_search_ms"] = _elapsed_ms(lexical_started)
+            branch_latencies["retrieval_parallel"] = 0
+    else:
+        vector_started = time.perf_counter()
+        vec_results = await vector_search(db, project_id, query_embedding, top_k=fetch_k, filters=filters)
+        branch_latencies["vector_search_ms"] = _elapsed_ms(vector_started)
+        lexical_started = time.perf_counter()
+        lex_results = await lexical_search(db, project_id, query, top_k=fetch_k, filters=filters)
+        branch_latencies["lexical_search_ms"] = _elapsed_ms(lexical_started)
+        branch_latencies["retrieval_parallel"] = 0
 
     scores: dict[uuid.UUID, dict[str, Any]] = {}
     vec_max = max((result["score"] for result in vec_results), default=1.0)
@@ -234,6 +267,10 @@ async def hybrid_search_with_debug(
         for item in ranked
     ]
     evidence_mix = _evidence_mix(ranked)
+    for source_type, count in evidence_mix["source_types"].items():
+        incr(f"retrieval_source_type_{source_type}_total", count)
+    for chunk_type, count in evidence_mix["chunk_types"].items():
+        incr(f"retrieval_chunk_type_{chunk_type}_total", count)
     total_latency_ms = _elapsed_ms(started)
     observe_latency("retrieval_total", total_latency_ms)
     debug = {
@@ -258,7 +295,10 @@ async def hybrid_search_with_debug(
 
 
 def _fetch_budget(top_k: int, intent: QueryIntent) -> int:
-    multiplier = 4 if intent.intent in {INTENT_RUNTIME_INCIDENT, INTENT_DEPLOY_REGRESSION} else 3
+    settings = get_settings()
+    multiplier = max(1, settings.rag_candidate_multiplier)
+    if intent.intent in {INTENT_RUNTIME_INCIDENT, INTENT_DEPLOY_REGRESSION}:
+        multiplier = max(multiplier, 4)
     if intent.intent in {INTENT_CODE_LOCATION, INTENT_CONFIG_LOOKUP, INTENT_API_CONTRACT}:
         multiplier = 3
     return max(top_k * multiplier, 30)
@@ -369,7 +409,7 @@ def _chunk_source_type(chunk) -> str:
     chunk_type = (chunk.chunk_type or "").lower()
     if chunk_type == "deploy_diff":
         return "deploy"
-    if chunk_type == "log_window":
+    if chunk_type in {"log_window", "error_cluster"}:
         return "logs"
     if chunk_type in {
         "function",

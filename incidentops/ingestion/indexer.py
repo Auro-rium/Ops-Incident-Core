@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import math
 import uuid
@@ -12,7 +13,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from incidentops.config.settings import get_settings
-from incidentops.db.models import Chunk, Document
+from incidentops.db.models import Chunk, ChunkEmbedding, Document
 from incidentops.ingestion.chunking.chunker import count_tokens, split_text_by_tokens
 from incidentops.ingestion.chunking.metadata import classify_doc_type, classify_source_type, extract_service_from_path
 from incidentops.ingestion.diagnostics import build_source_coverage
@@ -235,15 +236,20 @@ async def _index_one_document(
             embedding_texts.append(sub_text)
             chunk_type_counts[raw_chunk.chunk_type] += 1
 
+    embeddings: list[list[float]] | None = None
     if embed_fn and chunk_payloads:
         try:
-            embeddings = await asyncio.to_thread(embed_fn, embedding_texts)
+            if inspect.iscoroutinefunction(embed_fn):
+                embeddings = await embed_fn(embedding_texts)
+            else:
+                embeddings = await asyncio.to_thread(embed_fn, embedding_texts)
         except Exception as exc:
             raise DocumentIndexingError("embedding_error", f"failed to embed document: {exc.__class__.__name__}") from exc
         if len(embeddings) != len(chunk_payloads):
             raise DocumentIndexingError("embedding_error", "embedding backend returned an unexpected result count")
-        for chunk_payload, embedding in zip(chunk_payloads, embeddings):
-            chunk_payload["embedding"] = embedding
+        if settings.rag_retrieval_version != "v2":
+            for chunk_payload, embedding in zip(chunk_payloads, embeddings):
+                chunk_payload["embedding"] = embedding
 
     async with db.begin_nested():
         document_row = current
@@ -278,10 +284,34 @@ async def _index_one_document(
             updated = 1
             await db.execute(delete(Chunk).where(Chunk.document_id == document_row.id))
 
+        persisted_chunks: list[Chunk] = []
         for chunk_payload in chunk_payloads:
             chunk_payload["document_id"] = document_row.id
-            db.add(Chunk(**chunk_payload))
+            chunk = Chunk(**chunk_payload)
+            db.add(chunk)
+            persisted_chunks.append(chunk)
         await db.flush()
+        if settings.rag_retrieval_version == "v2" and embeddings:
+            for chunk, embedding in zip(persisted_chunks, embeddings):
+                if len(embedding) != settings.rag_embedding_dim:
+                    raise DocumentIndexingError(
+                        FAILURE_EMBEDDING_FAILED,
+                        "remote embedding dimension does not match the configured v2 index",
+                    )
+                db.add(
+                    ChunkEmbedding(
+                        chunk_id=chunk.id,
+                        project_id=project_id,
+                        model_id=settings.embedding_model,
+                        model_revision=settings.rag_model_revision or None,
+                        index_version=settings.rag_index_version,
+                        embedding_dim=len(embedding),
+                        embedding=embedding,
+                        content_hash=normalized.content_hash,
+                        status="published",
+                    )
+                )
+            await db.flush()
         await db.execute(
             update(Chunk)
             .where(Chunk.document_id == document_row.id)

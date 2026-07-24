@@ -11,12 +11,15 @@ router = APIRouter(prefix="/v1/runtime", tags=["Runtime"])
 
 
 def build_runtime_status(settings: Settings) -> RuntimeStatusResponse:
-    embedding_backend = "azure_openai" if settings.embedding_model.startswith("azure-openai") else settings.embedding_model
+    if settings.embedding_model.startswith("azure-ml"):
+        embedding_backend = "azure_ml_gpu"
+    else:
+        embedding_backend = "azure_openai" if settings.embedding_model.startswith("azure-openai") else settings.embedding_model
     llm_provider = "azure_openai" if settings.azure_openai_configured else ("openai_compatible" if settings.llm_available else "none")
+    cloud_embedding_ready = settings.azure_openai_embeddings_configured or settings.gpu_rag_configured
     local_fallback_active = settings.is_production_like and (
         not settings.azure_openai_configured
-        or not settings.azure_openai_embeddings_configured
-        or not settings.embedding_model.startswith("azure-openai")
+        or not cloud_embedding_ready
         or settings.worker_mode != "queue"
         or settings.rate_limit_backend != "redis"
     )
@@ -33,6 +36,10 @@ def build_runtime_status(settings: Settings) -> RuntimeStatusResponse:
         local_fallback_active=local_fallback_active,
         chat_deployment=settings.azure_openai_chat_deployment or None,
         embedding_deployment=settings.azure_openai_embedding_deployment or None,
+        rag_retrieval_version=settings.rag_retrieval_version,
+        rag_index_version=settings.rag_index_version,
+        rag_rerank_mode=settings.rag_rerank_mode,
+        gpu_rag_configured=settings.gpu_rag_configured,
     )
 
 

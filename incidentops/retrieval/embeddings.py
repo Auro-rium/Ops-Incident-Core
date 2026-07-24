@@ -8,6 +8,7 @@ Sentence-transformers remains supported if explicitly configured.
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import logging
 import math
 import random
@@ -16,6 +17,8 @@ import time
 import httpx
 
 from incidentops.config.settings import get_settings
+from incidentops.retrieval.cache import get_embedding, set_embedding
+from incidentops.retrieval.model_gateway import remote_embed
 
 logger = logging.getLogger("incidentops.retrieval.embeddings")
 
@@ -30,6 +33,8 @@ def _load_model(model_name: str):
     global _model, _model_name
     if model_name.startswith("local-hash"):
         return None
+    if not get_settings().allow_local_model_loading:
+        raise RuntimeError("local model loading is disabled; use Azure ML or Azure OpenAI")
     if _model is None or _model_name != model_name:
         logger.info("Loading embedding model: %s", model_name)
         from sentence_transformers import SentenceTransformer
@@ -118,6 +123,8 @@ def embed_texts(texts: list[str], model_name: str | None = None) -> list[list[fl
         return []
     settings = get_settings()
     chosen_model = model_name or settings.embedding_model
+    if chosen_model.startswith("azure-ml"):
+        raise RuntimeError("azure-ml embeddings require the asynchronous remote gateway")
     if chosen_model.startswith("local-hash"):
         return [_hash_embed(text, settings.embedding_dim) for text in texts]
     if chosen_model.startswith("azure-openai"):
@@ -138,11 +145,39 @@ def embed_query(query: str, model_name: str | None = None) -> list[float]:
     return result[0] if result else []
 
 
+async def embed_texts_async(texts: list[str], model_name: str | None = None) -> list[list[float]]:
+    if not texts:
+        return []
+    settings = get_settings()
+    chosen_model = model_name or settings.embedding_model
+    if chosen_model.startswith("azure-ml"):
+        cached: list[list[float] | None] = await asyncio.gather(
+            *(get_embedding(text) for text in texts)
+        )
+        missing_indexes = [index for index, vector in enumerate(cached) if vector is None]
+        if missing_indexes:
+            generated = await remote_embed([texts[index] for index in missing_indexes])
+            await asyncio.gather(
+                *(set_embedding(texts[index], vector) for index, vector in zip(missing_indexes, generated))
+            )
+            for index, vector in zip(missing_indexes, generated):
+                cached[index] = vector
+        return [vector for vector in cached if vector is not None]
+    return await asyncio.to_thread(embed_texts, texts, chosen_model)
+
+
+async def embed_query_async(query: str, model_name: str | None = None) -> list[float]:
+    vectors = await embed_texts_async([query], model_name=model_name)
+    return vectors[0] if vectors else []
+
+
 def get_embedding_dimension(model_name: str | None = None) -> int:
     settings = get_settings()
     chosen_model = model_name or settings.embedding_model
     if chosen_model.startswith("local-hash") or chosen_model.startswith("azure-openai"):
         return settings.embedding_dim
+    if chosen_model.startswith("azure-ml"):
+        return settings.rag_embedding_dim
     model = _load_model(chosen_model)
     return model.get_sentence_embedding_dimension()
 

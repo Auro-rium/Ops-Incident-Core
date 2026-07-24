@@ -1,0 +1,1 @@
+{"id":"deploy-1","query_class":"deploy_regression","question":"What changed before the latest deploy regression?","expected_source_types":["deploy","code","logs"],"expected_documents":[],"expected_terms":[],"forbidden_source_types":[]}

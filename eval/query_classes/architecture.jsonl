@@ -1,0 +1,1 @@
+{"id":"architecture-1","query_class":"architecture","question":"How are the services and modules organized?","expected_source_types":["code","runbook","api_doc"],"expected_documents":["README"],"expected_terms":["service"],"forbidden_source_types":["logs"]}

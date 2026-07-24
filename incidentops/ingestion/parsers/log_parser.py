@@ -22,6 +22,8 @@ LOG_LINE_RE = re.compile(
 )
 
 WINDOW_SIZE = 30  # lines per chunk
+ERROR_CLUSTER_MIN_LINES = 2
+ERROR_CLUSTER_MAX_LINES = 24
 
 
 def parse_logs(
@@ -54,6 +56,10 @@ def parse_logs(
         )
         if chunk:
             chunks.append(chunk)
+
+    # Windows preserve timeline context. Error clusters provide a second,
+    # bounded retrieval unit when a runtime query needs the failure itself.
+    chunks.extend(_error_clusters(lines, file_path=file_path, service_name=service_name))
 
     return chunks
 
@@ -115,9 +121,57 @@ def _build_log_chunk(
         metadata={
             "trace_ids": sorted(trace_ids),
             "levels": sorted(levels),
+            "log_levels": sorted(levels),
             "endpoints": sorted(endpoints),
         },
     )
+
+
+def _error_clusters(lines: list[str], *, file_path: str, service_name: str | None) -> list[RawChunk]:
+    clusters: list[RawChunk] = []
+    current: list[str] = []
+    start_line = 1
+
+    def flush(end_line: int) -> None:
+        nonlocal current
+        error_lines = [line for line in current if _is_error_line(line)]
+        if len(error_lines) < ERROR_CLUSTER_MIN_LINES:
+            current = []
+            return
+        bounded = current[:ERROR_CLUSTER_MAX_LINES]
+        window = _build_log_chunk(
+            bounded,
+            file_path=file_path,
+            service_name=service_name,
+            start_line=start_line,
+            end_line=start_line + len(bounded) - 1,
+        )
+        if window:
+            window.chunk_type = "error_cluster"
+            window.metadata["error_line_count"] = len(error_lines)
+            window.metadata["cluster_end_line"] = end_line
+            clusters.append(window)
+        current = []
+
+    for line_number, line in enumerate(lines, start=1):
+        if _is_error_line(line):
+            if not current:
+                start_line = line_number
+            current.append(line)
+        elif current:
+            # Keep one adjacent line for stack traces or a causal message.
+            current.append(line)
+            flush(line_number)
+    if current:
+        flush(len(lines))
+    return clusters
+
+
+def _is_error_line(line: str) -> bool:
+    match = LOG_LINE_RE.match(line)
+    if match and (match.group("level") or "").upper() in {"ERROR", "FATAL", "CRITICAL"}:
+        return True
+    return bool(re.search(r"\b(?:error|fatal|exception|panic|stack trace)\b", line, re.IGNORECASE))
 
 
 def _infer_service_from_path(path: str) -> str | None:

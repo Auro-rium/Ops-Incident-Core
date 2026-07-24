@@ -24,7 +24,7 @@ from incidentops.retrieval.query_intent import (
     classify_query_intent,
     investigate_supported,
 )
-from incidentops.retrieval.reranker import rerank_with_debug
+from incidentops.retrieval.reranker import rerank_with_debug_async
 from incidentops.schemas.api import (
     AnswerBody,
     AnswerCitation,
@@ -62,7 +62,7 @@ async def answer(
     query_intent = classify_query_intent(body.query)
     raw_results = await hybrid_search(db, body.project_id, body.query, top_k=max(body.top_k * 3, 30))
     rerank_limit = max(body.top_k * 3, settings.answer_max_evidence_chunks * 2)
-    reranked, rerank_debug = rerank_with_debug(
+    reranked, rerank_debug = await rerank_with_debug_async(
         body.query,
         raw_results,
         model_name=settings.reranker_model,

@@ -29,7 +29,7 @@ from incidentops.db.models import (
 )
 from incidentops.ingestion.pipeline import run_ingestion
 from incidentops.observability.metrics import incr
-from incidentops.retrieval.embeddings import embed_texts
+from incidentops.retrieval.embeddings import embed_texts_async
 from incidentops.schemas.api import (
     CreateProjectRequest,
     CreateProjectResponse,
@@ -182,8 +182,8 @@ async def ingest(
     except PathPolicyError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    def embed_fn(texts: list[str]) -> list[list[float]]:
-        return embed_texts(texts, model_name=settings.embedding_model)
+    async def embed_fn(texts: list[str]) -> list[list[float]]:
+        return await embed_texts_async(texts, model_name=settings.embedding_model)
 
     await record_audit_event(
         db,

@@ -256,6 +256,7 @@ class Document(Base):
     __table_args__ = (
         Index("ix_documents_project_id", "project_id"),
         Index("ix_documents_source_id", "source_id"),
+        Index("ix_documents_project_source_type", "project_id", "source_type"),
         Index("ix_documents_project_source_external", "project_id", "source_id", "external_id"),
         UniqueConstraint("project_id", "source_id", "external_id", name="uq_documents_project_source_external_id"),
     )
@@ -295,6 +296,7 @@ class Chunk(Base):
 
     __table_args__ = (
         Index("ix_chunks_project_id", "project_id"),
+        Index("ix_chunks_project_source_type", "project_id", "source_id", "chunk_type"),
         Index("ix_chunks_document_id", "document_id"),
         Index("ix_chunks_source_id", "source_id"),
         Index("ix_chunks_service_name", "service_name"),
@@ -307,6 +309,68 @@ class Chunk(Base):
         Index("ix_chunks_project_service_endpoint", "project_id", "service_name", "endpoint"),
         Index("ix_chunks_project_deploy_hash", "project_id", "deploy_hash"),
         Index("ix_chunks_project_timestamp_start", "project_id", "timestamp_start"),
+    )
+
+
+class ChunkEmbedding(Base):
+    """Versioned GPU-generated embedding kept separate from legacy v1 vectors."""
+
+    __tablename__ = "chunk_embeddings"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    chunk_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chunks.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    model_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    model_revision: Mapped[str | None] = mapped_column(String(256))
+    index_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    embedding_dim: Mapped[int] = mapped_column(Integer, nullable=False)
+    embedding = mapped_column(Vector(1024), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="published")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("chunk_id", "index_version", "model_id", name="uq_chunk_embeddings_version"),
+        Index("ix_chunk_embeddings_project_version", "project_id", "index_version"),
+        Index("ix_chunk_embeddings_chunk_id", "chunk_id"),
+    )
+
+
+class IndexJob(Base):
+    """Durable redacted-payload reference for asynchronous index publication."""
+
+    __tablename__ = "index_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sources.id", ondelete="CASCADE"), nullable=False
+    )
+    sync_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("source_syncs.id", ondelete="SET NULL")
+    )
+    normalized_payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    index_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_index_jobs_status_created", "status", "created_at"),
+        Index("ix_index_jobs_status_queued", "status", "queued_at"),
+        Index("ix_index_jobs_sync_id", "sync_id"),
+        Index("ix_index_jobs_source_version", "source_id", "index_version"),
     )
 
 

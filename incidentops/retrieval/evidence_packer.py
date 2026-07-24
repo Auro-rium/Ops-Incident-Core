@@ -33,13 +33,29 @@ def _source_type_from_chunk(chunk) -> str:
     ct = chunk.chunk_type or ""
     if ct == "deploy_diff":
         return "deploy"
-    if ct == "log_window":
+    if ct in {"log_window", "error_cluster"}:
         return "logs"
-    if ct in {"function", "class", "module", "code_file"}:
+    if ct in {
+        "function",
+        "class",
+        "module",
+        "code_file",
+        "go_function",
+        "go_method",
+        "go_type",
+        "go_module",
+        "go_fallback",
+        "python_function",
+        "python_class",
+        "ts_function",
+        "ts_class",
+        "java_function",
+        "java_class",
+    }:
         return "code"
     if ct == "incident_section":
         return "incident"
-    if ct in ("api_endpoint", "proto_service", "proto_message", "proto_preamble"):
+    if ct in ("api_endpoint", "proto_service", "proto_rpc", "proto_message", "proto_enum", "proto_preamble", "proto_fallback"):
         return "api_doc"
     if ct == "config_section":
         return "config"

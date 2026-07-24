@@ -173,6 +173,10 @@ class RuntimeStatusResponse(BaseModel):
     local_fallback_active: bool
     chat_deployment: str | None = None
     embedding_deployment: str | None = None
+    rag_retrieval_version: str = "v1"
+    rag_index_version: str = "v1"
+    rag_rerank_mode: str = "conditional"
+    gpu_rag_configured: bool = False
 
 
 class ReadinessLatestSync(BaseModel):

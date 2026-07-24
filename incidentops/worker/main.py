@@ -8,6 +8,7 @@ from incidentops.config.settings import get_settings
 from incidentops.config.validation import validate_startup_settings
 from incidentops.observability.metrics import incr, observe_latency
 from incidentops.worker.jobs import execute_job
+from incidentops.worker.index_dispatch import dispatch_recoverable_index_jobs
 from incidentops.worker.queue import get_job_queue
 
 logger = logging.getLogger("incidentops.worker")
@@ -25,6 +26,7 @@ async def run_worker(*, once: bool = False) -> None:
     queue = get_job_queue(settings)
     logger.info("worker started mode=%s queue_backend=%s", settings.worker_mode, settings.job_queue_backend)
     while True:
+        await dispatch_recoverable_index_jobs(queue, settings)
         job = await queue.dequeue()
         if job is None:
             if once:
@@ -62,4 +64,3 @@ def _safe_error(exc: Exception) -> str:
 
 if __name__ == "__main__":
     main()
-

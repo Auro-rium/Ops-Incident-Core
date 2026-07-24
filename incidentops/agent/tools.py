@@ -7,12 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from incidentops.retrieval.citation_builder import build_citations
 from incidentops.retrieval.evidence_packer import pack_evidence
 from incidentops.retrieval.hybrid_search import hybrid_search
-from incidentops.retrieval.reranker import rerank
+from incidentops.retrieval.reranker import rerank_with_debug_async
 
 
 async def search_evidence(db: AsyncSession, project_id: uuid.UUID, query: str, top_k: int, reranker_model: str, filters: dict | None = None) -> list[dict]:
     raw = await hybrid_search(db, project_id, query, top_k=max(top_k * 3, 30), filters=filters)
-    ranked = rerank(query, raw, model_name=reranker_model, top_k=top_k)
+    ranked, _ = await rerank_with_debug_async(query, raw, model_name=reranker_model, top_k=top_k)
     evidence = pack_evidence(ranked, max_evidence=top_k)
     build_citations(evidence)
     return evidence

@@ -19,6 +19,7 @@ Azure services used:
 - Azure Cache for Redis
 - Azure Key Vault
 - Log Analytics / Azure Monitor
+- Azure ML managed GPU endpoints when RAG v2 is enabled
 
 Azure services intentionally not used:
 
@@ -122,6 +123,8 @@ REQUIRE_AZURE_OPENAI=true
 EMBEDDING_MODEL=azure-openai
 ```
 
+RAG v2 does not run models in Core, Collector, or local development. It uses two Azure ML managed GPU scoring endpoints, one for BGE-M3 embeddings and one for the BGE cross-encoder reranker. See [Cloud-only GPU RAG runtime](./rag-v2-cloud-runtime.md).
+
 ## Migrations and Bootstrap
 
 Run migrations as a Container Apps job:
@@ -173,7 +176,7 @@ export AZURE_OPENAI_CHAT_DEPLOYMENT=<chat-deployment-name>
 export AZURE_OPENAI_EMBEDDING_DEPLOYMENT=<embedding-deployment-name>
 ```
 
-The embedding deployment must support `dimensions=384` because the current pgvector schema stores `Vector(384)`.
+The v1 Azure OpenAI embedding deployment must support `dimensions=384` because the legacy pgvector schema stores `Vector(384)`. The optional GPU RAG v2 path stores BGE-M3 vectors in a separate `Vector(1024)` table.
 
 ## MCP Server
 

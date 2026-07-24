@@ -46,6 +46,8 @@ def production_settings_errors(settings: Settings) -> list[str]:
         errors.append("METRICS_BACKEND=memory is not allowed as the only metrics backend in staging/production")
     if settings.local_ingest_enabled:
         errors.append("LOCAL_INGEST_ENABLED=true is not allowed in staging/production")
+    if settings.allow_local_model_loading:
+        errors.append("ALLOW_LOCAL_MODEL_LOADING=true is not allowed in staging/production")
     if settings.cors_origins_list == ["*"] and not settings.allow_wildcard_cors:
         errors.append("CORS wildcard is disabled but CORS_ALLOW_ORIGINS=*")
     if settings.cors_origins_list == ["*"] and settings.allow_wildcard_cors:
@@ -55,11 +57,35 @@ def production_settings_errors(settings: Settings) -> list[str]:
             "Azure OpenAI/Foundry chat deployment is required in staging/production "
             "when REQUIRE_AZURE_OPENAI=true"
         )
-    if settings.require_azure_openai and not settings.azure_openai_embeddings_configured:
+    if (
+        settings.require_azure_openai
+        and not settings.azure_openai_embeddings_configured
+        and not settings.gpu_rag_configured
+    ):
         errors.append(
             "Azure OpenAI/Foundry embedding deployment is required in staging/production "
-            "when REQUIRE_AZURE_OPENAI=true"
+            "when REQUIRE_AZURE_OPENAI=true unless Azure ML GPU embeddings are configured"
         )
     if settings.require_azure_openai and not settings.embedding_model.startswith("azure-openai"):
-        errors.append("EMBEDDING_MODEL must be azure-openai in staging/production")
+        if not (settings.rag_gpu_endpoint_required and settings.embedding_model.startswith("azure-ml")):
+            errors.append("EMBEDDING_MODEL must be azure-openai or azure-ml in staging/production")
+    if settings.rag_gpu_endpoint_required and not settings.gpu_rag_configured:
+        errors.append(
+            "RAG_GPU_ENDPOINT_REQUIRED=true requires Azure ML embedding/reranker endpoints, "
+            "configured remote authentication, and EMBEDDING_MODEL=azure-ml"
+        )
+    if settings.rag_gpu_endpoint_required and not settings.rag_async_indexing:
+        errors.append("RAG_GPU_ENDPOINT_REQUIRED=true requires RAG_ASYNC_INDEXING=true")
+    if settings.rag_gpu_endpoint_required and not settings.rag_model_revision.strip():
+        errors.append("RAG_GPU_ENDPOINT_REQUIRED=true requires an immutable RAG_MODEL_REVISION")
+    if settings.embedding_model.startswith("azure-ml") and settings.rag_retrieval_version != "v2":
+        errors.append("EMBEDDING_MODEL=azure-ml requires RAG_RETRIEVAL_VERSION=v2")
+    if settings.reranker_model and not settings.rag_reranker_endpoint and settings.rag_rerank_mode != "disabled":
+        errors.append("production reranking requires RAG_RERANKER_ENDPOINT or RAG_RERANK_MODE=disabled")
+    if not 0 <= settings.rag_shadow_percent <= 100:
+        errors.append("RAG_SHADOW_PERCENT must be between 0 and 100")
+    if settings.rag_rerank_mode not in {"conditional", "always", "disabled"}:
+        errors.append("RAG_RERANK_MODE must be conditional, always, or disabled")
+    if settings.rag_cache_ttl_seconds < 1:
+        errors.append("RAG_CACHE_TTL_SECONDS must be at least 1")
     return errors

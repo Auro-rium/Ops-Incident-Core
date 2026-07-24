@@ -31,7 +31,7 @@ from incidentops.retrieval.query_intent import (
     investigate_supported,
 )
 from incidentops.retrieval.hybrid_search import hybrid_search, hybrid_search_with_debug
-from incidentops.retrieval.reranker import rerank
+from incidentops.retrieval.reranker import rerank_with_debug_async
 
 
 async def investigate(
@@ -64,7 +64,12 @@ async def investigate(
             filters=scope["filters"] or None,
         )
         retrieval_debug = {}
-    reranked = rerank(query, raw_results, model_name=reranker_model, top_k=top_k)
+    reranked, rerank_debug = await rerank_with_debug_async(
+        query,
+        raw_results,
+        model_name=reranker_model,
+        top_k=top_k,
+    )
     evidence = pack_evidence(reranked, max_evidence=top_k)
     build_citations(evidence)
 
@@ -150,6 +155,7 @@ async def investigate(
             "investigation_support_reasons": support_reasons,
             "applied_filters": scope["filters"] or {},
             "reranked_count": len(reranked),
+            "rerank": rerank_debug,
         }
         if debug
         else {},

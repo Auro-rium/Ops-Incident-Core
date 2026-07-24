@@ -209,6 +209,19 @@ class TestLogParser:
         chunks = parse_logs(log, "big.log", window_size=30)
         assert len(chunks) == 2  # 60 lines / 30 window = 2 chunks
 
+    def test_emits_bounded_error_cluster_for_runtime_retrieval(self):
+        log = "\n".join(
+            [
+                "2026-04-12T10:00:01.000Z ERROR svc timeout connecting to history",
+                "2026-04-12T10:00:02.000Z ERROR svc retry exhausted for history",
+                "2026-04-12T10:00:03.000Z INFO svc request failed",
+            ]
+        )
+        chunks = parse_logs(log, "logs/history.log")
+        error_chunks = [chunk for chunk in chunks if chunk.chunk_type == "error_cluster"]
+        assert len(error_chunks) == 1
+        assert error_chunks[0].metadata["error_line_count"] == 2
+
 
 # ── Deploy parser ─────────────────────────────
 

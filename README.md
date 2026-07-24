@@ -34,14 +34,14 @@ Core owns indexing, retrieval, readiness, investigation, workflow, auth/RBAC, me
 
 ## What Is Proven
 
-The Azure path is live and exercised through GitHub Actions plus Azure Container Apps:
+The Azure deployment path is defined through GitHub Actions plus Azure Container Apps. It must be revalidated after provisioning Azure resources:
 
 - Core pushes on `core` run `Deploy Azure Demo`, which executes Core tests, builds and pushes Core plus Collector images, deploys Azure resources, runs migrations, bootstraps admin, and runs Azure smoke.
 - The Collector repo runs `Validate and Deploy Azure Collector`, which validates Collector and dispatches the Core Azure deployment workflow.
 - Runtime status shows whether deployed Core is actually using Azure OpenAI, Redis-backed queue/rate limiting, and no local fallback.
 - Azure smoke validates Core health/readiness, login, project creation, private Collector sync, readiness, search, investigate, and MCP token wiring.
 
-What is proven today is the cloud runtime and control plane. What is not proven yet is broad large-repo retrieval quality at the level needed to call the RAG pipeline mature.
+The deployment control plane and v1 product flow have prior smoke coverage. Broad large-repo retrieval quality and the GPU RAG v2 path are not yet live-validated, so they must not be presented as proven.
 
 ## Current Bottleneck
 
@@ -69,7 +69,7 @@ That failure was useful because it exposed three concrete architecture bugs inst
 - Embedding work and retry sleeps were happening on the API event loop, which made the API unhealthy during large syncs.
 - Collector batch uploads were sharing a human-scale request limit and were being rejected with `429 Too Many Requests`.
 
-The first two fixes are live. The collector batch-limit separation is deployed through the latest Core Azure workflow and needs a clean rerun to publish new benchmark numbers. Until that rerun exists, do not claim Temporal-scale retrieval proof.
+The design includes bounded retry/backoff and collector batch-limit separation. A clean cloud rerun is still required before claiming Temporal-scale retrieval proof.
 
 See [Temporal benchmark](docs/temporal-benchmark.md) and [Product proof](docs/product-proof.md).
 
@@ -91,6 +91,7 @@ Azure services used:
 - Azure Key Vault
 - Azure Monitor / Log Analytics
 - Azure OpenAI / Foundry for production/staging chat and embeddings
+- Azure ML managed GPU endpoints for optional RAG v2 embeddings and reranking
 
 Services intentionally not used in the budget-demo architecture:
 
@@ -99,6 +100,11 @@ Services intentionally not used in the budget-demo architecture:
 - multi-region deployment
 - API Management / Application Gateway
 - Azure AI Search, until the managed retrieval backend is explicitly implemented and benchmarked
+
+The Azure ML GPU RAG manifests require a VNet-integrated Container Apps
+environment and private connectivity to the managed endpoints. That private
+network wiring is a remaining deployment task; the code and manifests alone
+are not evidence that the GPU path is live.
 
 ## Azure OpenAI / Foundry
 
@@ -115,7 +121,7 @@ EMBEDDING_MODEL=azure-openai
 EMBEDDING_DIM=384
 ```
 
-The database vector column is currently `Vector(384)`, so the Azure embedding deployment must support the requested `dimensions=384` parameter.
+The legacy v1 vector column is `Vector(384)`. RAG v2 adds a separate `chunk_embeddings` table with `Vector(1024)` for BGE-M3. Do not point `EMBEDDING_MODEL=azure-ml-*` at v1; use `RAG_RETRIEVAL_VERSION=v2` and the Azure ML scoring endpoints documented in [Cloud-only GPU RAG runtime](docs/rag-v2-cloud-runtime.md).
 
 Unit and integration tests still use deterministic local-hash embeddings so CI does not require paid model credentials. That is test discipline, not a production fallback.
 

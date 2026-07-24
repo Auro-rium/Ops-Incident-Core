@@ -12,7 +12,7 @@ from incidentops.retrieval.citation_builder import build_citations
 from incidentops.retrieval.evidence_packer import pack_evidence
 from incidentops.retrieval.hybrid_search import hybrid_search, hybrid_search_with_debug
 from incidentops.retrieval.query_intent import classify_query_intent
-from incidentops.retrieval.reranker import rerank
+from incidentops.retrieval.reranker import rerank_with_debug_async
 from incidentops.schemas.api import CitationInfo, SearchHit, SearchRequest, SearchResponse
 
 router = APIRouter(prefix="/v1", tags=["Search"])
@@ -53,7 +53,12 @@ async def search(
             db, body.project_id, body.query, top_k=max(body.top_k * 3, 30), filters=body.filters
         )
         retrieval_debug = None
-    reranked = rerank(body.query, raw_results, model_name=settings.reranker_model, top_k=min(body.top_k, settings.max_retrieved_chunks))
+    reranked, rerank_debug = await rerank_with_debug_async(
+        body.query,
+        raw_results,
+        model_name=settings.reranker_model,
+        top_k=min(body.top_k, settings.max_retrieved_chunks),
+    )
     evidence = pack_evidence(reranked, max_evidence=min(body.top_k, settings.max_retrieved_chunks))
     build_citations(evidence)
     latency_ms = int((time.time() - start) * 1000)
@@ -82,6 +87,7 @@ async def search(
     if body.debug:
         debug = retrieval_debug or {}
         debug["reranked_count"] = len(reranked)
+        debug["rerank"] = rerank_debug
     evidence_mix = {
         "source_types": _count_values(item["source_type"] for item in evidence),
         "chunk_types": _count_values(item.get("chunk_type") or "unknown" for item in evidence),

@@ -18,13 +18,19 @@ from apps.api.deps import (
     require_user,
 )
 from incidentops.config.settings import Settings
-from incidentops.db.models import Chunk, Document, RetrievalResult, SourceSync, Collector, ProjectRole, Source
+from incidentops.db.models import Chunk, Document, IndexJob, RetrievalResult, SourceSync, Collector, ProjectRole, Source
 from incidentops.ingestion.diagnostics import build_source_coverage
 from incidentops.ingestion.failure_taxonomy import failure_reason_counts
 from incidentops.ingestion.indexer import index_normalized_documents
-from incidentops.ingestion.normalized import NormalizedDocument, safe_json_size
+from incidentops.ingestion.normalized import (
+    BatchIngestResult,
+    DocumentBatchError,
+    NormalizedDocument,
+    safe_json_size,
+    validate_normalized_document,
+)
 from incidentops.observability.metrics import incr
-from incidentops.retrieval.embeddings import embed_texts
+from incidentops.retrieval.embeddings import embed_texts_async
 from incidentops.schemas.api import (
     BatchIngestErrorResponse,
     BatchIngestRequest,
@@ -356,8 +362,8 @@ async def ingest_documents_batch(
     if batch_bytes > settings.max_batch_bytes:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="document batch exceeds configured byte limit")
 
-    def embed_fn(texts: list[str]) -> list[list[float]]:
-        return embed_texts(texts, model_name=settings.embedding_model)
+    async def embed_fn(texts: list[str]) -> list[list[float]]:
+        return await embed_texts_async(texts, model_name=settings.embedding_model)
 
     normalized_documents = [
             NormalizedDocument(
@@ -372,14 +378,59 @@ async def ingest_documents_batch(
             )
         for document in body.documents
     ]
-    result = await index_normalized_documents(
-        db,
-        source.project_id,
-        source.id,
-        sync.id,
-        normalized_documents,
-        embed_fn=embed_fn,
-    )
+    queued_index_jobs = 0
+    if settings.rag_async_indexing:
+        validated_documents: list[NormalizedDocument] = []
+        validation_errors: list[DocumentBatchError] = []
+        seen_external_ids: set[str] = set()
+        for document in normalized_documents:
+            validation = validate_normalized_document(document, settings)
+            if isinstance(validation, DocumentBatchError):
+                validation_errors.append(validation)
+                continue
+            if validation.external_id in seen_external_ids:
+                validation_errors.append(
+                    DocumentBatchError(
+                        external_id=validation.external_id,
+                        path=validation.path,
+                        code="duplicate_external_id",
+                        error="duplicate external_id in batch",
+                        message="duplicate external_id in batch",
+                    )
+                )
+                continue
+            seen_external_ids.add(validation.external_id)
+            validated_documents.append(validation)
+        index_jobs = [
+            IndexJob(
+                project_id=source.project_id,
+                source_id=source.id,
+                sync_id=sync.id,
+                normalized_payload_json=document.model_dump(mode="json"),
+                content_hash=document.content_hash,
+                index_version=settings.rag_index_version,
+            )
+            for document in validated_documents
+        ]
+        db.add_all(index_jobs)
+        await db.flush()
+        queued_index_jobs = len(index_jobs)
+        result = BatchIngestResult(
+            received=len(normalized_documents),
+            skipped_invalid=len(validation_errors),
+            errors=validation_errors,
+            embedding_backend=settings.embedding_model,
+            diagnostics={"index_jobs_queued": queued_index_jobs},
+        )
+    else:
+        result = await index_normalized_documents(
+            db,
+            source.project_id,
+            source.id,
+            sync.id,
+            normalized_documents,
+            embed_fn=embed_fn,
+        )
     all_errors = [BatchIngestErrorResponse(**error.model_dump()) for error in result.errors]
     sync.documents_received += len(body.documents)
     sync.chunks_created += result.chunks_created
@@ -394,6 +445,7 @@ async def ingest_documents_batch(
             "core_api_version": body.core_api_version,
         },
     )
+    diagnostics["index_jobs_queued"] = int(diagnostics.get("index_jobs_queued", 0) or 0) + queued_index_jobs
     sync.diagnostics_json = diagnostics
     sync.coverage_json = build_source_coverage(
         diagnostics.get("source_type_counts", {}),
@@ -424,6 +476,7 @@ async def ingest_documents_batch(
             "skipped_invalid": result.skipped_invalid,
             "chunks_created": result.chunks_created,
             "error_count": len(all_errors),
+            "index_jobs_queued": queued_index_jobs,
         },
     )
     if all_errors:
@@ -507,10 +560,23 @@ async def finish_sync(
     sync.diagnostics_json = diagnostics
     sync.error_message = diagnostics.get("error_message") or (effective_status if effective_status in {"failed", "cancelled"} else None)
 
-    source.status = "ready" if effective_status in {"success", "partial_success"} else "error"
+    pending_index_jobs = 0
+    if settings.rag_async_indexing:
+        pending_index_jobs = await _count(
+            db,
+            select(func.count())
+            .select_from(IndexJob)
+            .where(IndexJob.sync_id == sync.id, IndexJob.status.in_(("pending", "queued", "running"))),
+        )
+        diagnostics["index_jobs_pending"] = pending_index_jobs
+    source.status = (
+        "indexing"
+        if pending_index_jobs and effective_status in {"success", "partial_success"}
+        else "ready" if effective_status in {"success", "partial_success"} else "error"
+    )
     source.last_sync_started_at = sync.started_at
     source.last_sync_finished_at = sync.finished_at
-    source.last_sync_status = effective_status
+    source.last_sync_status = "indexing" if pending_index_jobs else effective_status
     source.last_error = sync.error_message
     await record_audit_event(
         db,

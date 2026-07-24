@@ -12,7 +12,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from incidentops.db.models import Chunk
+from incidentops.config.settings import get_settings
+from incidentops.db.models import Chunk, ChunkEmbedding
 from incidentops.observability.metrics import observe_latency
 
 
@@ -28,14 +29,26 @@ async def vector_search(
     Returns list of {chunk, score} dicts.
     """
     start = time.time()
-    distance = Chunk.embedding.cosine_distance(query_embedding)
-
-    stmt = (
-        select(Chunk, (1 - distance).label("score"))
-        .options(selectinload(Chunk.document))
-        .where(Chunk.project_id == project_id)
-        .where(Chunk.embedding.isnot(None))
-    )
+    settings = get_settings()
+    if settings.rag_retrieval_version == "v2":
+        distance = ChunkEmbedding.embedding.cosine_distance(query_embedding)
+        stmt = (
+            select(Chunk, (1 - distance).label("score"))
+            .join(ChunkEmbedding, ChunkEmbedding.chunk_id == Chunk.id)
+            .options(selectinload(Chunk.document))
+            .where(Chunk.project_id == project_id)
+            .where(ChunkEmbedding.index_version == settings.rag_index_version)
+            .where(ChunkEmbedding.model_id == settings.embedding_model)
+            .where(ChunkEmbedding.status == "published")
+        )
+    else:
+        distance = Chunk.embedding.cosine_distance(query_embedding)
+        stmt = (
+            select(Chunk, (1 - distance).label("score"))
+            .options(selectinload(Chunk.document))
+            .where(Chunk.project_id == project_id)
+            .where(Chunk.embedding.isnot(None))
+        )
 
     if filters:
         stmt = _apply_filters(stmt, filters)

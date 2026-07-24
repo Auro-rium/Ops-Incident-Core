@@ -4,6 +4,7 @@ Centralized application settings.
 
 from __future__ import annotations
 
+import socket
 from urllib.parse import quote
 
 from pydantic import AliasChoices, Field
@@ -26,6 +27,27 @@ class Settings(BaseSettings):
 
     embedding_model: str = "local-hash-v1"
     embedding_dim: int = 384
+    rag_retrieval_version: str = "v1"
+    rag_index_version: str = "v1"
+    rag_embedding_dim: int = 1024
+    rag_model_revision: str = ""
+    rag_embedding_endpoint: str = ""
+    rag_reranker_endpoint: str = ""
+    rag_gpu_endpoint_required: bool = False
+    rag_rerank_mode: str = "conditional"
+    rag_streaming_enabled: bool = False
+    rag_shadow_percent: int = 0
+    rag_candidate_multiplier: int = 3
+    rag_parallel_retrieval: bool = True
+    rag_async_indexing: bool = False
+    rag_index_max_retries: int = 3
+    rag_index_dispatch_batch_size: int = 50
+    rag_cache_enabled: bool = True
+    rag_cache_ttl_seconds: int = 3600
+    rag_remote_timeout_seconds: int = 15
+    rag_remote_api_key: str = ""
+    rag_remote_auth_mode: str = "managed_identity"
+    allow_local_model_loading: bool = False
 
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
@@ -94,6 +116,9 @@ class Settings(BaseSettings):
     workflow_run_timeout_seconds: int = 300
     eval_run_timeout_seconds: int = 600
     job_poll_interval_seconds: int = 2
+    job_queue_consumer_group: str = "incidentops-workers"
+    job_queue_consumer_name: str = Field(default_factory=lambda: f"core-worker-{socket.gethostname()}")
+    job_queue_claim_idle_ms: int = 60000
     enable_otel: bool = False
     otel_service_name: str = "incidentops-core"
     otel_exporter_otlp_endpoint: str = ""
@@ -154,6 +179,19 @@ class Settings(BaseSettings):
             and azure_key
             and azure_key != "disabled"
             and self.azure_openai_embedding_deployment
+        )
+
+    @property
+    def gpu_rag_configured(self) -> bool:
+        auth_configured = (
+            self.rag_remote_auth_mode == "managed_identity"
+            or bool(self.rag_remote_api_key.strip())
+        )
+        return bool(
+            self.rag_embedding_endpoint.strip()
+            and self.rag_reranker_endpoint.strip()
+            and auth_configured
+            and self.embedding_model.startswith("azure-ml")
         )
 
     @property

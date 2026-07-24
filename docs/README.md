@@ -18,6 +18,7 @@ Local execution is kept only for deterministic development and CI safety. It is 
 - [Deployment](./deployment.md) — production topology, runtime settings, rollout sequence, and rollback notes.
 - [Deployment overview](./deployment-overview.md) — short-form Azure stack and promotion path.
 - [Azure cost guardrails](./azure-cost-guardrails.md) — budget alerts, teardown, and cloud cost risks.
+- [Cloud-only GPU RAG runtime](./rag-v2-cloud-runtime.md) — Azure ML embedding/reranking boundary, deploy inputs, and v1/v2 rollback.
 - [Cloud-only user E2E runbook](./user-e2e-runbook.md) — real Azure user proof with benchmark ingestion, runtime status, and MCP smoke.
 - [Operations runbook](./operations-runbook.md) — rollout, smoke, MCP, and Azure troubleshooting checks.
 - [Product proof](./product-proof.md) — what counts as product proof, what is actually proven, and what not to overclaim.
