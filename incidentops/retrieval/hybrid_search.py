@@ -112,7 +112,6 @@ _CHUNK_TYPE_BOOSTS = {
     "markdown_section": 0.08,
     "log_window": 0.12,
     "error_cluster": 0.14,
-    "error_cluster": 0.12,
     "deploy_diff": 0.12,
     "incident_section": 0.12,
     "release_note": 0.10,
