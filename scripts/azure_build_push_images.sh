@@ -27,13 +27,6 @@ detect_repo() {
   return 1
 }
 
-COLLECTOR_REPO_PATH="$(detect_repo "${COLLECTOR_REPO_PATH:-}" \
-  "$ROOT_DIR/../Ops-Incident-Collector" \
-  "$ROOT_DIR/../OpsIncident-Collector")" || {
-  echo "Collector repo not found. Set COLLECTOR_REPO_PATH." >&2
-  exit 1
-}
-
 FRONTEND_REPO_PATH=""
 if [[ "$BUILD_FRONTEND" == "true" ]]; then
   FRONTEND_REPO_PATH="$(detect_repo "${FRONTEND_REPO_PATH:-}" \
@@ -74,8 +67,6 @@ az acr login --name "$ACR_NAME" --only-show-errors >/dev/null
 echo "Building and pushing images to ACR '$ACR_NAME' with tag '$IMAGE_TAG'..."
 docker build -t "$login_server/incidentops-core:$IMAGE_TAG" "$CORE_REPO_PATH"
 docker push "$login_server/incidentops-core:$IMAGE_TAG"
-docker build -t "$login_server/opsincident-collector:$IMAGE_TAG" "$COLLECTOR_REPO_PATH"
-docker push "$login_server/opsincident-collector:$IMAGE_TAG"
 if [[ "$BUILD_FRONTEND" == "true" ]]; then
   docker build -t "$login_server/incidentops-frontend:$IMAGE_TAG" "$FRONTEND_REPO_PATH"
   docker push "$login_server/incidentops-frontend:$IMAGE_TAG"
@@ -84,7 +75,7 @@ fi
 cat <<EOF
 Images pushed:
   $login_server/incidentops-core:$IMAGE_TAG
-  $login_server/opsincident-collector:$IMAGE_TAG
+  Collector command is included in the Core image.
 $(if [[ "$BUILD_FRONTEND" == "true" ]]; then printf '  %s/incidentops-frontend:%s\n' "$login_server" "$IMAGE_TAG"; else printf '  frontend build skipped\n'; fi)
 
 Use IMAGE_TAG=$IMAGE_TAG for scripts/azure_deploy.sh.

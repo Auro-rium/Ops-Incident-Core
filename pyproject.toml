@@ -33,6 +33,9 @@ dev = [
     "ruff>=0.4,<1",
 ]
 
+[project.scripts]
+incidentops-collector = "incidentops.collector.__main__:main"
+
 [tool.setuptools.packages.find]
 include = ["apps*", "incidentops*"]
 

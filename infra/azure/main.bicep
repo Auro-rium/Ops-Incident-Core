@@ -49,6 +49,9 @@ param incidentopsToken string = ''
 @description('Core project id the demo collector should sync into. Leave blank until bootstrap/smoke creates one.')
 param incidentopsProjectId string = ''
 
+@description('Optional Git repository URL for the private Collector daemon. Empty keeps the daemon scaled to zero.')
+param collectorRepoUrl string = ''
+
 @description('Allowed browser origins for Core CORS.')
 param corsOrigins string = 'https://CHANGE-ME'
 
@@ -86,7 +89,7 @@ var databaseUrl = 'postgresql+asyncpg://${postgresAdminUser}:${postgresAdminPass
 var coreApiImage = '${containerRegistry.properties.loginServer}/incidentops-core:${coreImageTag}'
 var coreWorkerImage = '${containerRegistry.properties.loginServer}/incidentops-core:${coreImageTag}'
 var coreMcpImage = '${containerRegistry.properties.loginServer}/incidentops-core:${coreImageTag}'
-var collectorImage = '${containerRegistry.properties.loginServer}/opsincident-collector:${collectorImageTag}'
+var collectorImage = '${containerRegistry.properties.loginServer}/incidentops-core:${collectorImageTag}'
 var frontendImage = '${containerRegistry.properties.loginServer}/incidentops-frontend:${frontendImageTag}'
 var apiContainerAppName = '${namePrefix}-core-api'
 var workerContainerAppName = '${namePrefix}-core-worker'
@@ -765,7 +768,7 @@ resource collector 'Microsoft.App/containerApps@2024-03-01' = {
     }
     template: {
       scale: {
-        minReplicas: empty(incidentopsToken) || empty(incidentopsProjectId) ? 0 : 1
+        minReplicas: empty(incidentopsToken) || empty(incidentopsProjectId) || empty(collectorRepoUrl) ? 0 : 1
         maxReplicas: 1
       }
       containers: [
@@ -773,54 +776,10 @@ resource collector 'Microsoft.App/containerApps@2024-03-01' = {
           name: 'collector'
           image: collectorImage
           command: [
-            '/bin/sh'
-            '-c'
-            '''
-cat > /tmp/collector.yaml <<'EOF'
-api:
-  base_url: "https://${coreApi.properties.configuration.ingress.fqdn}"
-  token_env: "INCIDENTOPS_TOKEN"
-  timeout_seconds: 30
-  verify_tls: true
-project:
-  id: "${incidentopsProjectId}"
-collector:
-  id: "azure-demo-collector"
-  name: "azure-demo-collector"
-  mode: "daemon"
-  environment: "azure-demo"
-state:
-  sqlite_path: "/tmp/opsincident-collector-state.sqlite"
-sync:
-  batch_size: 50
-  max_file_size_mb: 10
-  retry_count: 3
-  retry_backoff_seconds: 5
-  retry_due_on_start: true
-security:
-  redact_secrets: true
-  require_confirmation_for_upload: false
-  allow_paths:
-    - "/app/tests/fixtures/basic_project"
-daemon:
-  enabled: true
-  interval_seconds: 300
-  jitter_seconds: 30
-  export_target: "api"
-  health_enabled: true
-  health_host: "0.0.0.0"
-  health_port: 8686
-  metrics_enabled: true
-  metrics_host: "0.0.0.0"
-  metrics_port: 8687
-  allow_unattended_upload: true
-sources:
-  - name: "azure-demo-fixture"
-    type: "filesystem"
-    path: "/app/tests/fixtures/basic_project"
-EOF
-exec opsincident-collector daemon run --config /tmp/collector.yaml
-'''
+            'python'
+            '-m'
+            'incidentops.collector'
+            'daemon'
           ]
           env: [
             {
@@ -848,12 +807,12 @@ exec opsincident-collector daemon run --config /tmp/collector.yaml
               value: 'filesystem'
             }
             {
-              name: 'COLLECTOR_ENVIRONMENT'
-              value: 'azure-demo'
+              name: 'COLLECTOR_REPO_URL'
+              value: collectorRepoUrl
             }
             {
-              name: 'INCIDENTOPS_EDGE_STATE'
-              value: '/tmp/opsincident-collector-state.sqlite'
+              name: 'COLLECTOR_ENVIRONMENT'
+              value: 'azure-demo'
             }
           ]
           resources: {
@@ -954,7 +913,7 @@ for key in QUERY_1 QUERY_2 QUERY_3 QUERY_4 QUERY_5; do
     set -- "$@" --query "$value"
   fi
 done
-opsincident-collector "$@"
+python -m incidentops.collector benchmark --repo-url "$REPO_URL" --project-id "$INCIDENTOPS_PROJECT_ID" --source-name "$SOURCE_NAME" --max-files "$MAX_FILES" --batch-size "$BATCH_SIZE" --changed-file-target "$CHANGED_FILE_TARGET" --output "$REPORT"
 python - "$REPORT" <<'INNERPY'
 import json, sys
 report = json.load(open(sys.argv[1], encoding='utf-8'))

@@ -12,7 +12,7 @@ param managedIdentityId string
 @description('ACR login server, for example incidentopsacr.azurecr.io.')
 param acrLoginServer string
 
-@description('Collector image tag to run.')
+@description('Core image tag containing the in-repository Collector command.')
 param collectorImageTag string
 
 @description('Core API URL.')
@@ -42,7 +42,7 @@ param batchSize string = '100'
 @description('Changed-file target used by the idempotency/update check.')
 param changedFileTarget string = 'README.md'
 
-var collectorImage = '${acrLoginServer}/opsincident-collector:${collectorImageTag}'
+var collectorImage = '${acrLoginServer}/incidentops-core:${collectorImageTag}'
 
 resource benchmarkJob 'Microsoft.App/jobs@2024-03-01' = {
   name: benchmarkJobName
@@ -79,68 +79,24 @@ resource benchmarkJob 'Microsoft.App/jobs@2024-03-01' = {
           name: 'benchmark'
           image: collectorImage
           command: [
-            'opsincident-collector'
+            'python'
+            '-m'
+            'incidentops.collector'
           ]
           args: [
             'benchmark'
             '--repo-url'
             repoUrl
-            '--core-url'
-            incidentopsApiUrl
             '--project-id'
             incidentopsProjectId
             '--source-name'
             sourceName
-            '--output'
-            '/tmp/incidentops-benchmark-report.json'
-            '--workdir'
-            '/tmp/incidentops-benchmark'
             '--max-files'
             maxFiles
             '--batch-size'
             batchSize
             '--changed-file-target'
             changedFileTarget
-            '--include-path'
-            'README.md'
-            '--include-path'
-            'docs/**'
-            '--include-path'
-            'api/**'
-            '--include-path'
-            'proto/**'
-            '--include-path'
-            'schema/**'
-            '--include-path'
-            'service/**'
-            '--include-path'
-            'common/**'
-            '--include-path'
-            'temporal/**'
-            '--include-path'
-            'cmd/**'
-            '--include-path'
-            'config/**'
-            '--include-path'
-            'develop/**'
-            '--exclude-path'
-            '.git/**'
-            '--exclude-path'
-            '.github/**'
-            '--exclude-path'
-            'temporaltest/**'
-            '--exclude-path'
-            'tools/**'
-            '--exclude-path'
-            'bin/**'
-            '--exclude-path'
-            'dist/**'
-            '--exclude-path'
-            'coverage/**'
-            '--query'
-            'Where is the history service implemented?'
-            '--query'
-            'Which parts of the Temporal repo are relevant to investigating workflow task latency?'
           ]
           env: [
             {

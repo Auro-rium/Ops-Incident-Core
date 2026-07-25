@@ -3,7 +3,7 @@
 ## Status and Scope
 
 IncidentOps is an engineering-evidence system, not a generic chatbot. It
-ingests deterministic, redacted evidence from a separate Collector, stores and
+ingests deterministic, redacted evidence from its in-repository Collector runtime, stores and
 indexes it in Core, retrieves cited evidence, and provides search,
 investigation, workflow, evaluation, readiness, and MCP interfaces.
 
@@ -18,13 +18,15 @@ OIDC subscription configuration and private network connectivity.
 
 | Repository | Owns | Does not own |
 |---|---|---|
-| `Ops-Incident-Collector` | source access, path policy, redaction, deterministic metadata extraction, `NormalizedDocument` production, sync checkpoints | retrieval, embeddings, model calls, incident diagnosis, database access |
-| `Ops-Incident-Core` | auth/RBAC, projects, sources, syncs, parsing/chunking, indexing, retrieval, investigation, workflows, evals, audit, MCP facade | arbitrary filesystem crawling or local Collector behavior |
+| `Ops-Incident-Core: incidentops.collector` | source access, path policy, redaction, deterministic metadata extraction, `NormalizedDocument` production, sync checkpoints | retrieval, embeddings, model calls, incident diagnosis, database access |
+| `Ops-Incident-Core: Core services` | auth/RBAC, projects, sources, syncs, parsing/chunking, indexing, retrieval, investigation, workflows, evals, audit, MCP facade | arbitrary filesystem crawling outside configured Collector roots |
 | `Ops-Incident-frontend` | operator-facing UI over Core APIs | evidence normalization or authorization bypass |
 
-The Collector-to-Core boundary is intentional: Collector has access to source
-material; Core has project-scoped data and retrieval authority. MCP is a Core
-interface only. It must call Core APIs with scoped credentials and cannot
+The Collector-to-Core boundary is intentional even though both runtimes share
+one repository and image: Collector has access to source material; Core has
+project-scoped data and retrieval authority. Collector uses authenticated HTTP
+only and cannot access PostgreSQL directly. MCP is a Core interface only. It
+must call Core APIs with scoped credentials and cannot
 ingest, normalize, access PostgreSQL directly, or bypass RBAC.
 
 ## End-to-End Flow
@@ -295,7 +297,8 @@ AI Search are deliberately excluded from the current architecture.
 
 Deployment order:
 
-1. Build Core, Collector, frontend, and optional GPU runtime images in ACR.
+1. Build the Core image, which contains API, worker, and Collector commands,
+   plus frontend and optional GPU runtime images in ACR.
 2. Deploy infrastructure and Container Apps using Key Vault references.
 3. Run `alembic upgrade head` and `scripts/check_migrations.py` in the
    migration job. Production never calls SQLAlchemy `create_all`.
