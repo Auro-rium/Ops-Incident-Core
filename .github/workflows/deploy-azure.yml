@@ -10,7 +10,7 @@ on:
         description: "Image tag to build/deploy. Defaults to commit SHA."
         required: false
       deploy_collector:
-        description: "Collector needs INCIDENTOPS_TOKEN and INCIDENTOPS_PROJECT_ID configured."
+        description: "Enable the in-Core Collector daemon with configured project/token/repository variables."
         required: false
         type: boolean
         default: false
@@ -115,13 +115,6 @@ jobs:
         with:
           path: Ops-Incident-Core
 
-      - name: Checkout Collector
-        uses: actions/checkout@v4
-        with:
-          repository: Auro-rium/Ops-Incident-Collector
-          path: OpsIncident-Collector
-          token: ${{ secrets.GH_READ_TOKEN || github.token }}
-
       - name: Validate Azure login secrets
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -158,7 +151,6 @@ jobs:
       - name: Build and push images
         working-directory: Ops-Incident-Core
         env:
-          COLLECTOR_REPO_PATH: ../OpsIncident-Collector
           BUILD_FRONTEND: "false"
         run: scripts/azure_build_push_images.sh
 
@@ -172,6 +164,7 @@ jobs:
           BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
           INCIDENTOPS_TOKEN: ${{ inputs.deploy_collector && secrets.INCIDENTOPS_TOKEN || '' }}
           INCIDENTOPS_PROJECT_ID: ${{ inputs.deploy_collector && vars.INCIDENTOPS_PROJECT_ID || '' }}
+          COLLECTOR_REPO_URL: ${{ inputs.deploy_collector && vars.COLLECTOR_REPO_URL || '' }}
           INCIDENTOPS_MCP_TOKEN: ${{ secrets.INCIDENTOPS_MCP_TOKEN || '' }}
           AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
           AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
