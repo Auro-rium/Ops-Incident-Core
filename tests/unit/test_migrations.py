@@ -34,6 +34,14 @@ async def test_production_startup_does_not_call_create_all(monkeypatch):
         raise AssertionError("create_all should not run in production")
 
     monkeypatch.setattr("apps.api.main.create_tables", fail_create_tables)
+    async def healthy_vector_store(_self):
+        return True
+
+    async def collection_ready(_self, _embedding_dim):
+        return None
+
+    monkeypatch.setattr("apps.api.main.QdrantVectorStore.health", healthy_vector_store)
+    monkeypatch.setattr("apps.api.main.QdrantVectorStore.ensure_collection", collection_ready)
     await initialize_database_for_startup(
         Settings(
             app_env="production",
@@ -57,8 +65,8 @@ async def test_production_startup_does_not_call_create_all(monkeypatch):
     )
 
 
-def test_alembic_head_resolves_to_rag_v2_embeddings_migration():
-    assert get_head_revision() == "0003_rag_v2_embeddings"
+def test_alembic_head_resolves_to_qdrant_migration():
+    assert get_head_revision() == "0004_qdrant_vector_store"
 
 
 def test_required_tables_match_current_models():
@@ -76,10 +84,10 @@ def test_required_columns_match_current_models():
 def test_readiness_payload_ready_when_all_checks_pass():
     payload = build_readiness_payload(
         database_ok=True,
-        pgvector_ok=True,
+        vector_store_ok=True,
         existing_tables=set(required_tables()),
-        current_revision="0003_rag_v2_embeddings",
-        head_revision="0003_rag_v2_embeddings",
+        current_revision="0004_qdrant_vector_store",
+        head_revision="0004_qdrant_vector_store",
     )
     assert payload["ready"] is True
     assert payload["required_tables"] == "ok"
@@ -92,10 +100,10 @@ def test_readiness_payload_reports_missing_tables_and_outdated_migration():
     existing.remove("chunks")
     payload = build_readiness_payload(
         database_ok=True,
-        pgvector_ok=True,
+        vector_store_ok=True,
         existing_tables=existing,
         current_revision="old_revision",
-        head_revision="0003_rag_v2_embeddings",
+        head_revision="0004_qdrant_vector_store",
     )
     assert payload["ready"] is False
     assert payload["required_tables"] == ["chunks"]
@@ -110,31 +118,33 @@ def test_readiness_payload_reports_missing_columns():
     existing_columns["sources"].remove("name")
     payload = build_readiness_payload(
         database_ok=True,
-        pgvector_ok=True,
+        vector_store_ok=True,
         existing_tables=existing_tables,
         existing_columns=existing_columns,
-        current_revision="0003_rag_v2_embeddings",
-        head_revision="0003_rag_v2_embeddings",
+        current_revision="0004_qdrant_vector_store",
+        head_revision="0004_qdrant_vector_store",
     )
     assert payload["ready"] is False
     assert payload["required_columns"] == {"sources": ["name"]}
 
 
-def test_readiness_payload_reports_missing_pgvector_and_missing_revision():
+def test_readiness_payload_reports_missing_vector_store_and_missing_revision():
     payload = build_readiness_payload(
         database_ok=True,
-        pgvector_ok=False,
+        vector_store_ok=False,
         existing_tables=set(required_tables()),
         current_revision=None,
-        head_revision="0003_rag_v2_embeddings",
+        head_revision="0004_qdrant_vector_store",
     )
     assert payload["ready"] is False
-    assert payload["pgvector"] == "missing"
+    assert payload["vector_store"] == "unavailable"
     assert payload["migration"] == "missing"
 
 
 def test_production_validation_rejects_unsafe_security_defaults():
-    errors = production_settings_errors(Settings(app_env="production"))
+    errors = production_settings_errors(
+        Settings(app_env="production", jwt_secret="incidentops-local-jwt-secret-change-me")
+    )
     assert any("JWT_SECRET" in error for error in errors)
     assert any("ALLOW_DEMO_PROJECT_BYPASS" in error for error in errors)
     assert any("ALLOW_LOCAL_SEED_ADMIN" in error for error in errors)

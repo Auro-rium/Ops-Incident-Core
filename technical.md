@@ -10,7 +10,7 @@ investigation, workflow, evaluation, readiness, and MCP interfaces.
 This document is the single source of technical documentation for the Core
 repository. It describes code and intended cloud deployment boundaries. It does
 not claim that a cloud component is live unless a successful deployment smoke
-has recorded it. At the time of this document, the GPU RAG v2 path is code and
+has recorded it. At the time of this document, the cloud GPU retrieval path is code and
 deployment scaffolding; its Azure deployment remains blocked on valid Azure
 OIDC subscription configuration and private network connectivity.
 
@@ -40,7 +40,8 @@ flowchart LR
   subgraph Core
     API[FastAPI Core API]
     W[Core Worker]
-    PG[(PostgreSQL + pgvector)]
+    PG[(PostgreSQL metadata and lexical search)]
+    QD[(Qdrant vector store)]
     RS[(Redis Streams / rate limits)]
     MCP[Core MCP]
   end
@@ -52,6 +53,7 @@ flowchart LR
   R --> C
   C -->|redacted NormalizedDocument batch| API
   API --> PG
+  API --> QD
   API --> RS
   RS --> W
   W --> PG
@@ -68,9 +70,9 @@ flowchart LR
    metadata, and sends `NormalizedDocument` batches with source/sync metadata.
 3. Core validates document size, metadata, path, batch limits, and duplicate
    external IDs. It records typed failures rather than silently dropping them.
-4. In v1, Core parses, chunks, embeds, and writes chunks in the batch path.
-   In RAG v2 asynchronous mode, Core stores a redacted `index_jobs` row and
-   returns without waiting for GPU embedding.
+4. Core parses, chunks, embeds, and publishes vectors through a durable index
+   job when asynchronous indexing is enabled; the API does not wait for remote
+   GPU embedding in that mode.
 5. The worker dispatches durable job IDs through Redis Streams, recovers
    pending/abandoned jobs from Postgres, obtains embeddings, replaces changed
    document chunks transactionally, and updates sync diagnostics.
@@ -127,8 +129,8 @@ Core data ownership is project-scoped:
 |---|---|
 | `projects`, memberships, users | project isolation and RBAC |
 | `sources`, collectors, `source_syncs` | source registry and ingestion lifecycle |
-| `documents`, `chunks` | legacy v1 evidence and lexical index |
-| `chunk_embeddings` | versioned v2 1024-dimension embeddings |
+| `documents`, `chunks` | authoritative evidence, chunk metadata, and lexical index |
+| Qdrant collection | embeddings and bounded vector filter payloads |
 | `index_jobs` | durable async parse/embed/publish work |
 | runs, events, approvals, evals | workflow and evaluation state |
 | audit events | security and destructive-operation traceability |
@@ -166,15 +168,13 @@ limits prevent a single malformed file from creating an unbounded index.
 
 ## Retrieval Design
 
-### Versions
+### Vector storage
 
-- **v1** uses the legacy `chunks.embedding` `Vector(384)` column and existing
-  embedding configuration.
-- **v2** uses `chunk_embeddings` with a versioned `Vector(1024)` representation
-  intended for BGE-M3 through Azure ML GPU endpoints.
-
-RAG v2 has its own index version and model revision. A v2 deployment must not
-query v1 vectors or publish vectors with a dimension other than 1024.
+PostgreSQL is authoritative for chunk text, metadata, authorization, and
+citations. Qdrant stores embedding vectors and bounded retrieval payloads.
+Every vector hit is mapped back to an authorized PostgreSQL chunk before it is
+returned. PostgreSQL does not store vector embeddings;
+runtime indexing and retrieval use Qdrant.
 
 ### Query intent and budgets
 
@@ -230,17 +230,19 @@ The endpoint runtime requires immutable Hugging Face revisions. Local model
 loading is disabled in production and rejected by startup validation. A
 deterministic local-hash path remains for development/CI compatibility only.
 
-GPU RAG v2 requirements:
+GPU retrieval requirements:
 
 ```text
-RAG_RETRIEVAL_VERSION=v2
-RAG_INDEX_VERSION=v2
+RETRIEVAL_BACKEND=qdrant
+QDRANT_URL=https://your-qdrant-endpoint
+QDRANT_COLLECTION=incidentops_chunks
+VECTOR_INDEX_VERSION=current
 EMBEDDING_MODEL=azure-ml-bge-m3
 RERANKER_MODEL=azure-ml-bge-reranker-v2-m3
 RAG_GPU_ENDPOINT_REQUIRED=true
 RAG_ASYNC_INDEXING=true
 RAG_MODEL_REVISION=<immutable revision>
-RAG_EMBEDDING_DIM=1024
+EMBEDDING_DIM=1024
 ```
 
 The Azure ML manifests set private endpoint access. Container Apps therefore
@@ -290,8 +292,8 @@ status. It never returns tokens, connection strings, passwords, or API keys.
 ## Runtime and Deployment
 
 The intended Azure stack is Azure Container Apps for Core API, worker,
-Collector, frontend, MCP, migration/bootstrap jobs; PostgreSQL Flexible Server
-with pgvector; Redis; Key Vault; ACR; Log Analytics; Azure OpenAI; and optional
+Collector, frontend, MCP, migration/bootstrap jobs; PostgreSQL Flexible Server;
+Qdrant; Redis; Key Vault; ACR; Log Analytics; Azure OpenAI; and optional
 Azure ML GPU endpoints. AKS, NAT Gateway, multi-region deployment, and Azure
 AI Search are deliberately excluded from the current architecture.
 
@@ -345,9 +347,9 @@ The system is not production-grade yet. Blocking gaps are:
    under failure/restart conditions in Azure.
 5. Add evidence packs with real logs/deploys/incidents before claiming runtime
    RCA quality.
-6. Compare PostgreSQL hybrid retrieval to Azure AI Search only after measured
-   Postgres quality/latency requires it.
+6. Validate Qdrant vector publication and retrieval consistency before comparing
+   it to additional managed retrieval services.
 
 Until those are complete, the correct product claim is: IncidentOps is a
 security-conscious, Collector-first engineering evidence backend with an
-implemented but not live-validated GPU RAG v2 path.
+implemented but not live-validated cloud GPU retrieval path.

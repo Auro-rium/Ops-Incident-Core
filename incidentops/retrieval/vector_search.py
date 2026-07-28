@@ -1,6 +1,4 @@
-"""
-Vector search — pgvector cosine similarity over chunk embeddings.
-"""
+"""Qdrant vector retrieval mapped back to authoritative PostgreSQL chunks."""
 
 from __future__ import annotations
 
@@ -13,8 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from incidentops.config.settings import get_settings
-from incidentops.db.models import Chunk, ChunkEmbedding
+from incidentops.db.models import Chunk
 from incidentops.observability.metrics import observe_latency
+from incidentops.retrieval.vector_store import QdrantVectorStore
 
 
 async def vector_search(
@@ -24,49 +23,26 @@ async def vector_search(
     top_k: int = 20,
     filters: dict[str, Any] | None = None,
 ) -> list[dict]:
-    """
-    Cosine-similarity search using pgvector.
-    Returns list of {chunk, score} dicts.
-    """
+    """Return vector candidates with PostgreSQL-backed chunk metadata."""
     start = time.time()
     settings = get_settings()
-    if settings.rag_retrieval_version == "v2":
-        distance = ChunkEmbedding.embedding.cosine_distance(query_embedding)
-        stmt = (
-            select(Chunk, (1 - distance).label("score"))
-            .join(ChunkEmbedding, ChunkEmbedding.chunk_id == Chunk.id)
-            .options(selectinload(Chunk.document))
-            .where(Chunk.project_id == project_id)
-            .where(ChunkEmbedding.index_version == settings.rag_index_version)
-            .where(ChunkEmbedding.model_id == settings.embedding_model)
-            .where(ChunkEmbedding.status == "published")
-        )
-    else:
-        distance = Chunk.embedding.cosine_distance(query_embedding)
-        stmt = (
-            select(Chunk, (1 - distance).label("score"))
-            .options(selectinload(Chunk.document))
-            .where(Chunk.project_id == project_id)
-            .where(Chunk.embedding.isnot(None))
-        )
-
-    if filters:
-        stmt = _apply_filters(stmt, filters)
-
-    stmt = stmt.order_by(distance).limit(top_k)
-    result = await db.execute(stmt)
-    rows = [{"chunk": row[0], "score": float(row[1])} for row in result.all()]
+    if settings.retrieval_backend != "qdrant":
+        raise RuntimeError("Configured vector backend is unsupported")
+    hits = await QdrantVectorStore(settings).search(project_id, query_embedding, top_k, filters)
+    if not hits:
+        observe_latency("vector_search", (time.time() - start) * 1000)
+        return []
+    chunk_ids = [hit.chunk_id for hit in hits]
+    result = await db.execute(
+        select(Chunk)
+        .options(selectinload(Chunk.document))
+        .where(Chunk.project_id == project_id, Chunk.id.in_(chunk_ids))
+    )
+    chunks = {chunk.id: chunk for chunk in result.scalars().all()}
+    rows = [
+        {"chunk": chunks[hit.chunk_id], "score": hit.score}
+        for hit in hits
+        if hit.chunk_id in chunks
+    ]
     observe_latency("vector_search", (time.time() - start) * 1000)
     return rows
-
-
-def _apply_filters(stmt, filters: dict):
-    if filters.get("service_name"):
-        stmt = stmt.where(Chunk.service_name == filters["service_name"])
-    if filters.get("deploy_hash"):
-        stmt = stmt.where(Chunk.deploy_hash == filters["deploy_hash"])
-    if filters.get("chunk_type"):
-        stmt = stmt.where(Chunk.chunk_type == filters["chunk_type"])
-    if filters.get("endpoint"):
-        stmt = stmt.where(Chunk.endpoint == filters["endpoint"])
-    return stmt

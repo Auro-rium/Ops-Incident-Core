@@ -99,42 +99,6 @@ async def bulk_insert_chunks(db: AsyncSession, chunks: list[dict]) -> int:
 
 # ── Search ────────────────────────────────────
 
-async def vector_search(
-    db: AsyncSession,
-    project_id: uuid.UUID,
-    query_embedding: list[float],
-    top_k: int = 20,
-    filters: dict[str, Any] | None = None,
-) -> list[dict]:
-    """Cosine-similarity search using pgvector."""
-    embedding_col = Chunk.embedding
-    distance = embedding_col.cosine_distance(query_embedding)
-
-    stmt = (
-        select(
-            Chunk,
-            (1 - distance).label("score"),
-        )
-        .where(Chunk.project_id == project_id)
-        .where(Chunk.embedding.isnot(None))
-    )
-
-    if filters:
-        if filters.get("service_name"):
-            stmt = stmt.where(Chunk.service_name == filters["service_name"])
-        if filters.get("deploy_hash"):
-            stmt = stmt.where(Chunk.deploy_hash == filters["deploy_hash"])
-        if filters.get("chunk_type"):
-            stmt = stmt.where(Chunk.chunk_type == filters["chunk_type"])
-        if filters.get("endpoint"):
-            stmt = stmt.where(Chunk.endpoint == filters["endpoint"])
-
-    stmt = stmt.order_by(distance).limit(top_k)
-    result = await db.execute(stmt)
-    rows = result.all()
-    return [{"chunk": row[0], "score": float(row[1])} for row in rows]
-
-
 async def lexical_search(
     db: AsyncSession,
     project_id: uuid.UUID,

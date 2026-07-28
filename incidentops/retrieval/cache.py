@@ -22,7 +22,7 @@ _client = None
 def _key(namespace: str, value: str) -> str:
     settings = get_settings()
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
-    return f"incidentops:rag:{namespace}:{settings.rag_index_version}:{settings.embedding_model}:{digest}"
+    return f"incidentops:rag:{namespace}:{settings.vector_index_version}:{settings.embedding_model}:{digest}"
 
 
 async def get_embedding(text: str) -> list[float] | None:

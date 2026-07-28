@@ -31,6 +31,7 @@ from incidentops.ingestion.normalized import (
 )
 from incidentops.observability.metrics import incr
 from incidentops.retrieval.embeddings import embed_texts_async
+from incidentops.retrieval.vector_store import QdrantVectorStore, VectorStoreError
 from incidentops.schemas.api import (
     BatchIngestErrorResponse,
     BatchIngestRequest,
@@ -142,6 +143,10 @@ async def delete_source(
         "syncs": await _count(db, select(func.count()).select_from(SourceSync).where(SourceSync.source_id == source_id)),
         "retrieval_results": await _count_source_retrieval_results(db, source_id),
     }
+    try:
+        await QdrantVectorStore(settings).delete_by_filter(project_id, source_id=str(source_id))
+    except VectorStoreError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Vector store deletion failed") from exc
     chunk_ids = select(Chunk.id).where(Chunk.source_id == source_id)
     await db.execute(delete(RetrievalResult).where(RetrievalResult.chunk_id.in_(chunk_ids)))
     await db.execute(delete(Chunk).where(Chunk.source_id == source_id))
@@ -408,7 +413,7 @@ async def ingest_documents_batch(
                 sync_id=sync.id,
                 normalized_payload_json=document.model_dump(mode="json"),
                 content_hash=document.content_hash,
-                index_version=settings.rag_index_version,
+                index_version=settings.vector_index_version,
             )
             for document in validated_documents
         ]

@@ -16,6 +16,7 @@ from incidentops.config.validation import validate_startup_settings
 from incidentops.db.session import create_tables
 from incidentops.observability.metrics import incr, observe_latency
 from incidentops.observability.tracing import configure_tracing
+from incidentops.retrieval.vector_store import QdrantVectorStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-5s %(name)s — %(message)s")
 logger = logging.getLogger("incidentops.api")
@@ -29,18 +30,16 @@ def should_run_create_all(settings: Settings) -> bool:
 
 async def initialize_database_for_startup(settings: Settings) -> None:
     validate_startup_settings(settings)
+    if settings.is_production_like:
+        vector_store = QdrantVectorStore(settings)
+        if not await vector_store.health():
+            raise RuntimeError("Qdrant is unavailable")
+        await vector_store.ensure_collection(settings.embedding_dim)
     if not should_run_create_all(settings):
         if settings.is_production_like and settings.db_create_all:
             logger.warning("Ignoring DB_CREATE_ALL=true because APP_ENV=%s forbids create_all", settings.app_env)
         return
 
-    from sqlalchemy import text
-
-    from incidentops.db.session import _get_engine
-
-    engine = _get_engine()
-    async with engine.begin() as conn:
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     await create_tables()
 
 

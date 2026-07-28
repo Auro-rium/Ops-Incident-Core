@@ -135,6 +135,7 @@ def test_runtime_status_reports_cloud_mode_without_secret_values():
             azure_openai_embedding_deployment="incidentops-embed",
             mcp_token="token-value",
             mcp_transport="streamable-http",
+            qdrant_url="https://qdrant.example.com",
         )
     )
 
@@ -142,7 +143,9 @@ def test_runtime_status_reports_cloud_mode_without_secret_values():
     assert data["app_env"] == "production"
     assert data["llm_provider"] == "azure_openai"
     assert data["embedding_backend"] == "azure_openai"
-    assert data["retrieval_backend"] == "postgres_pgvector"
+    assert data["retrieval_backend"] == "qdrant"
+    assert data["vector_store_configured"] is True
+    assert data["vector_collection"] == "incidentops_chunks"
     assert data["mcp_enabled"] is True
     assert data["azure_openai_configured"] is True
     assert data["local_fallback_active"] is False

@@ -7,7 +7,6 @@ depends_on = ${repr(depends_on)}
 
 from alembic import op
 import sqlalchemy as sa
-from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects import postgresql
 
 

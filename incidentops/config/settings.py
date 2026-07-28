@@ -27,9 +27,12 @@ class Settings(BaseSettings):
 
     embedding_model: str = "local-hash-v1"
     embedding_dim: int = 384
-    rag_retrieval_version: str = "v1"
-    rag_index_version: str = "v1"
-    rag_embedding_dim: int = 1024
+    retrieval_backend: str = "qdrant"
+    vector_index_version: str = "current"
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_api_key: str = ""
+    qdrant_collection: str = "incidentops_chunks"
+    qdrant_timeout_seconds: float = 10.0
     rag_model_revision: str = ""
     rag_embedding_endpoint: str = ""
     rag_reranker_endpoint: str = ""

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from incidentops.db.base import Base
 import incidentops.db.models  # noqa: F401 - register SQLAlchemy models for metadata checks
 from incidentops.db.session import _get_session_factory
+from incidentops.retrieval.vector_store import QdrantVectorStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
@@ -53,7 +54,7 @@ def get_head_revision() -> str | None:
 def build_readiness_payload(
     *,
     database_ok: bool,
-    pgvector_ok: bool,
+    vector_store_ok: bool,
     existing_tables: set[str],
     existing_columns: Mapping[str, set[str]] | None = None,
     current_revision: str | None,
@@ -85,13 +86,13 @@ def build_readiness_payload(
     payload: dict[str, Any] = {
         "ready": (
             database_ok
-            and pgvector_ok
+            and vector_store_ok
             and not missing_tables
             and not missing_columns
             and migration_status == "ok"
         ),
         "database": "ok" if database_ok else "error",
-        "pgvector": "ok" if pgvector_ok else "missing",
+        "vector_store": "ok" if vector_store_ok else "unavailable",
         "required_tables": "ok" if not missing_tables else missing_tables,
         "required_columns": "ok" if not missing_columns else missing_columns,
         "migration": migration_status,
@@ -119,20 +120,14 @@ async def _check_database_ready_with_session(db: AsyncSession) -> dict[str, Any]
         await db.rollback()
         return build_readiness_payload(
             database_ok=False,
-            pgvector_ok=False,
+            vector_store_ok=False,
             existing_tables=set(),
             current_revision=None,
             head_revision=head_revision,
             database_error=f"{exc.__class__.__name__}: {exc}",
         )
 
-    pgvector_ok = bool(
-        (
-            await db.execute(
-                text("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')")
-            )
-        ).scalar()
-    )
+    vector_store_ok = await QdrantVectorStore().health()
     table_rows = await db.execute(
         text(
             "SELECT table_name FROM information_schema.tables "
@@ -157,7 +152,7 @@ async def _check_database_ready_with_session(db: AsyncSession) -> dict[str, Any]
 
     return build_readiness_payload(
         database_ok=True,
-        pgvector_ok=pgvector_ok,
+        vector_store_ok=vector_store_ok,
         existing_tables=existing_tables,
         existing_columns=existing_columns,
         current_revision=current_revision,

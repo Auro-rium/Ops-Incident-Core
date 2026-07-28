@@ -30,6 +30,7 @@ from incidentops.db.models import (
 from incidentops.ingestion.pipeline import run_ingestion
 from incidentops.observability.metrics import incr
 from incidentops.retrieval.embeddings import embed_texts_async
+from incidentops.retrieval.vector_store import QdrantVectorStore, VectorStoreError
 from incidentops.schemas.api import (
     CreateProjectRequest,
     CreateProjectResponse,
@@ -114,6 +115,11 @@ async def delete_project(
     agent_run_ids = select(AgentRun.id).where(AgentRun.project_id == project_id)
     eval_run_ids = select(EvalRun.id).where(EvalRun.project_id == project_id)
     retrieval_run_ids = select(RetrievalRun.id).where(RetrievalRun.project_id == project_id)
+
+    try:
+        await QdrantVectorStore(settings).delete_by_filter(project_id)
+    except VectorStoreError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Vector store deletion failed") from exc
 
     await db.execute(delete(EvalRunCase).where(EvalRunCase.eval_run_id.in_(eval_run_ids)))
     await db.execute(delete(EvalRun).where(EvalRun.project_id == project_id))

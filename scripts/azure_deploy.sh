@@ -25,6 +25,10 @@ AZURE_OPENAI_API_KEY="${AZURE_OPENAI_API_KEY:-}"
 AZURE_OPENAI_API_VERSION="${AZURE_OPENAI_API_VERSION:-2024-10-21}"
 AZURE_OPENAI_CHAT_DEPLOYMENT="${AZURE_OPENAI_CHAT_DEPLOYMENT:-}"
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT="${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-}"
+QDRANT_URL="${QDRANT_URL:-}"
+QDRANT_API_KEY="${QDRANT_API_KEY:-}"
+QDRANT_COLLECTION="${QDRANT_COLLECTION:-incidentops_chunks}"
+EMBEDDING_DIMENSION="${EMBEDDING_DIMENSION:-1024}"
 OUTPUT_FILE="${OUTPUT_FILE:-$ROOT_DIR/infra/azure/.last-deployment.json}"
 PARAMETERS_FILE="$(mktemp)"
 DEPLOY_ERROR_FILE="$(mktemp)"
@@ -36,6 +40,8 @@ test -n "$AZURE_OPENAI_ENDPOINT" || { echo "AZURE_OPENAI_ENDPOINT is required." 
 test -n "$AZURE_OPENAI_API_KEY" || { echo "AZURE_OPENAI_API_KEY is required." >&2; exit 1; }
 test -n "$AZURE_OPENAI_CHAT_DEPLOYMENT" || { echo "AZURE_OPENAI_CHAT_DEPLOYMENT is required." >&2; exit 1; }
 test -n "$AZURE_OPENAI_EMBEDDING_DEPLOYMENT" || { echo "AZURE_OPENAI_EMBEDDING_DEPLOYMENT is required." >&2; exit 1; }
+test -n "$QDRANT_URL" || { echo "QDRANT_URL is required." >&2; exit 1; }
+test -n "$QDRANT_API_KEY" || { echo "QDRANT_API_KEY is required." >&2; exit 1; }
 
 az group create \
   --name "$AZURE_RESOURCE_GROUP" \
@@ -49,6 +55,7 @@ export POSTGRES_ADMIN_USER POSTGRES_PASSWORD JWT_SECRET BOOTSTRAP_ADMIN_EMAIL BO
 export INCIDENTOPS_TOKEN INCIDENTOPS_PROJECT_ID COLLECTOR_REPO_URL INCIDENTOPS_MCP_TOKEN CORS_ORIGINS
 export AZURE_OPENAI_ENDPOINT AZURE_OPENAI_API_KEY AZURE_OPENAI_API_VERSION
 export AZURE_OPENAI_CHAT_DEPLOYMENT AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+export QDRANT_URL QDRANT_API_KEY QDRANT_COLLECTION EMBEDDING_DIMENSION
 python3 - "$PARAMETERS_FILE" <<'PY'
 import json
 import os
@@ -78,12 +85,18 @@ param_names = {
     "azureOpenAIApiVersion": "AZURE_OPENAI_API_VERSION",
     "azureOpenAIChatDeployment": "AZURE_OPENAI_CHAT_DEPLOYMENT",
     "azureOpenAIEmbeddingDeployment": "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
+    "qdrantUrl": "QDRANT_URL",
+    "qdrantApiKey": "QDRANT_API_KEY",
+    "qdrantCollection": "QDRANT_COLLECTION",
+    "embeddingDimension": "EMBEDDING_DIMENSION",
 }
 
 def coerce_value(env_name: str):
     value = os.environ.get(env_name, "")
     if env_name == "DEPLOY_FRONTEND":
         return value.lower() == "true"
+    if env_name == "EMBEDDING_DIMENSION":
+        return int(value)
     return value
 
 payload = {

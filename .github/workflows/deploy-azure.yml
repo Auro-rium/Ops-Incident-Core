@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: postgres:16
         env:
           POSTGRES_USER: incidentops
           POSTGRES_PASSWORD: incidentops
@@ -54,12 +54,20 @@ jobs:
         image: redis:7-alpine
         ports:
           - 6379:6379
+      qdrant:
+        image: qdrant/qdrant:v1.12.4
+        ports:
+          - 6333:6333
     env:
       APP_ENV: local
       DB_CREATE_ALL: "false"
       DB_REQUIRE_MIGRATIONS: "true"
       DATABASE_URL: postgresql+asyncpg://incidentops:incidentops@127.0.0.1:5432/incidentops
       REDIS_URL: redis://127.0.0.1:6379/0
+      RETRIEVAL_BACKEND: qdrant
+      QDRANT_URL: http://127.0.0.1:6333
+      QDRANT_COLLECTION: incidentops_chunks_ci
+      VECTOR_INDEX_VERSION: current
       JWT_SECRET: incidentops-local-jwt-secret-change-me
       ALLOW_LOCAL_SEED_ADMIN: "true"
       DEMO_MODE_PUBLIC: "false"
@@ -147,6 +155,8 @@ jobs:
           test -n "${{ secrets.AZURE_OPENAI_API_KEY }}" || { echo "AZURE_OPENAI_API_KEY secret is required"; exit 1; }
           test -n "${{ vars.AZURE_OPENAI_CHAT_DEPLOYMENT }}" || { echo "AZURE_OPENAI_CHAT_DEPLOYMENT variable is required"; exit 1; }
           test -n "${{ vars.AZURE_OPENAI_EMBEDDING_DEPLOYMENT }}" || { echo "AZURE_OPENAI_EMBEDDING_DEPLOYMENT variable is required"; exit 1; }
+          test -n "${{ vars.QDRANT_URL }}" || { echo "QDRANT_URL variable is required"; exit 1; }
+          test -n "${{ secrets.QDRANT_API_KEY }}" || { echo "QDRANT_API_KEY secret is required"; exit 1; }
 
       - name: Build and push images
         working-directory: Ops-Incident-Core
@@ -171,6 +181,10 @@ jobs:
           AZURE_OPENAI_API_VERSION: ${{ vars.AZURE_OPENAI_API_VERSION || '2024-10-21' }}
           AZURE_OPENAI_CHAT_DEPLOYMENT: ${{ vars.AZURE_OPENAI_CHAT_DEPLOYMENT }}
           AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${{ vars.AZURE_OPENAI_EMBEDDING_DEPLOYMENT }}
+          QDRANT_URL: ${{ vars.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION || 'incidentops_chunks' }}
+          EMBEDDING_DIMENSION: ${{ vars.EMBEDDING_DIMENSION || '1024' }}
         run: scripts/azure_deploy.sh
 
       - name: Run migrations

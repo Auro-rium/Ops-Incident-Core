@@ -16,6 +16,7 @@ FAILURE_PARSER_EXCEPTION = "parser_exception"
 FAILURE_METADATA_INVALID = "metadata_invalid"
 FAILURE_CHUNK_LIMIT_EXCEEDED = "chunk_limit_exceeded"
 FAILURE_EMBEDDING_FAILED = "embedding_failed"
+FAILURE_VECTOR_INDEX_FAILED = "vector_index_failed"
 FAILURE_UNKNOWN = "unknown"
 
 FAILURE_REASONS = {
@@ -30,6 +31,7 @@ FAILURE_REASONS = {
     FAILURE_METADATA_INVALID,
     FAILURE_CHUNK_LIMIT_EXCEEDED,
     FAILURE_EMBEDDING_FAILED,
+    FAILURE_VECTOR_INDEX_FAILED,
     FAILURE_UNKNOWN,
 }
 
@@ -57,6 +59,7 @@ _ALIASES = {
     "metadata_too_large": FAILURE_METADATA_INVALID,
     "too_many_chunks": FAILURE_CHUNK_LIMIT_EXCEEDED,
     "embedding_error": FAILURE_EMBEDDING_FAILED,
+    "vector_index_failed": FAILURE_VECTOR_INDEX_FAILED,
     "index_error": FAILURE_UNKNOWN,
 }
 

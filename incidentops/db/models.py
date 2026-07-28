@@ -14,7 +14,6 @@ import enum
 import uuid
 from datetime import datetime
 
-from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
     DateTime,
@@ -288,7 +287,6 @@ class Chunk(Base):
     token_count: Mapped[int | None] = mapped_column(Integer)
     metadata_json: Mapped[dict | None] = mapped_column(JSONB, default=dict)
     search_tsvector: Mapped[str | None] = mapped_column(TSVECTOR)
-    embedding = mapped_column(Vector(384))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     project: Mapped["Project"] = relationship(back_populates="chunks")
@@ -309,34 +307,6 @@ class Chunk(Base):
         Index("ix_chunks_project_service_endpoint", "project_id", "service_name", "endpoint"),
         Index("ix_chunks_project_deploy_hash", "project_id", "deploy_hash"),
         Index("ix_chunks_project_timestamp_start", "project_id", "timestamp_start"),
-    )
-
-
-class ChunkEmbedding(Base):
-    """Versioned GPU-generated embedding kept separate from legacy v1 vectors."""
-
-    __tablename__ = "chunk_embeddings"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    chunk_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("chunks.id", ondelete="CASCADE"), nullable=False
-    )
-    project_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
-    )
-    model_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    model_revision: Mapped[str | None] = mapped_column(String(256))
-    index_version: Mapped[str] = mapped_column(String(64), nullable=False)
-    embedding_dim: Mapped[int] = mapped_column(Integer, nullable=False)
-    embedding = mapped_column(Vector(1024), nullable=False)
-    content_hash: Mapped[str] = mapped_column(String(128), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="published")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-    __table_args__ = (
-        UniqueConstraint("chunk_id", "index_version", "model_id", name="uq_chunk_embeddings_version"),
-        Index("ix_chunk_embeddings_project_version", "project_id", "index_version"),
-        Index("ix_chunk_embeddings_chunk_id", "chunk_id"),
     )
 
 

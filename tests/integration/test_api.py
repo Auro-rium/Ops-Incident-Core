@@ -63,7 +63,7 @@ class TestHealthEndpoint:
         payload = response.json()
         assert payload["status"] == "ready"
         assert payload["database"] == "ok"
-        assert payload["pgvector"] == "ok"
+        assert payload["vector_store"] == "ok"
         assert payload["required_tables"] == "ok"
         assert payload["migration"] == "ok"
 

@@ -78,8 +78,10 @@ def production_settings_errors(settings: Settings) -> list[str]:
         errors.append("RAG_GPU_ENDPOINT_REQUIRED=true requires RAG_ASYNC_INDEXING=true")
     if settings.rag_gpu_endpoint_required and not settings.rag_model_revision.strip():
         errors.append("RAG_GPU_ENDPOINT_REQUIRED=true requires an immutable RAG_MODEL_REVISION")
-    if settings.embedding_model.startswith("azure-ml") and settings.rag_retrieval_version != "v2":
-        errors.append("EMBEDDING_MODEL=azure-ml requires RAG_RETRIEVAL_VERSION=v2")
+    if settings.retrieval_backend != "qdrant":
+        errors.append("RETRIEVAL_BACKEND=qdrant is required in staging/production")
+    if not settings.qdrant_url.strip():
+        errors.append("QDRANT_URL is required in staging/production")
     if settings.reranker_model and not settings.rag_reranker_endpoint and settings.rag_rerank_mode != "disabled":
         errors.append("production reranking requires RAG_RERANKER_ENDPOINT or RAG_RERANK_MODE=disabled")
     if not 0 <= settings.rag_shadow_percent <= 100:

@@ -8,6 +8,7 @@ def test_failure_taxonomy_maps_legacy_parser_codes():
     assert normalize_failure_code("no_chunks_parsed") == "empty"
     assert normalize_failure_code("too_many_chunks") == "chunk_limit_exceeded"
     assert normalize_failure_code("embedding_error") == "embedding_failed"
+    assert normalize_failure_code("vector_index_failed") == "vector_index_failed"
 
 
 def test_failure_taxonomy_counts_public_reasons():

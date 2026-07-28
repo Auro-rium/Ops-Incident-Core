@@ -13,7 +13,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from incidentops.config.settings import get_settings
-from incidentops.db.models import Chunk, ChunkEmbedding, Document
+from incidentops.db.models import Chunk, Document
 from incidentops.ingestion.chunking.chunker import count_tokens, split_text_by_tokens
 from incidentops.ingestion.chunking.metadata import classify_doc_type, classify_source_type, extract_service_from_path
 from incidentops.ingestion.diagnostics import build_source_coverage
@@ -21,6 +21,7 @@ from incidentops.ingestion.failure_taxonomy import (
     FAILURE_CHUNK_LIMIT_EXCEEDED,
     FAILURE_EMBEDDING_FAILED,
     FAILURE_PARSER_EXCEPTION,
+    FAILURE_VECTOR_INDEX_FAILED,
     failure_reason_counts,
     normalize_failure_code,
 )
@@ -43,6 +44,7 @@ from incidentops.ingestion.parsers.incident_parser import parse_incident
 from incidentops.ingestion.parsers.log_parser import parse_logs
 from incidentops.ingestion.parsers.markdown_parser import parse_markdown
 from incidentops.ingestion.schemas import RawChunk
+from incidentops.retrieval.vector_store import QdrantVectorStore, VectorStoreError, chunk_point
 
 logger = logging.getLogger("incidentops.ingestion.indexer")
 
@@ -144,6 +146,7 @@ async def index_normalized_documents(
             FAILURE_CHUNK_LIMIT_EXCEEDED: parser_error_reasons.get(FAILURE_CHUNK_LIMIT_EXCEEDED, 0)
         },
         "embedding_failures": parser_error_reasons.get(FAILURE_EMBEDDING_FAILED, 0),
+        "vector_index_failures": parser_error_reasons.get(FAILURE_VECTOR_INDEX_FAILED, 0),
         "source_type_counts": result.source_type_counts,
         "chunk_type_counts": result.chunk_type_counts,
         "embedding_backend": result.embedding_backend,
@@ -247,9 +250,18 @@ async def _index_one_document(
             raise DocumentIndexingError("embedding_error", f"failed to embed document: {exc.__class__.__name__}") from exc
         if len(embeddings) != len(chunk_payloads):
             raise DocumentIndexingError("embedding_error", "embedding backend returned an unexpected result count")
-        if settings.rag_retrieval_version != "v2":
-            for chunk_payload, embedding in zip(chunk_payloads, embeddings):
-                chunk_payload["embedding"] = embedding
+
+    if current is not None:
+        try:
+            await QdrantVectorStore(settings).delete_by_filter(
+                project_id,
+                document_id=str(current.id),
+            )
+        except VectorStoreError as exc:
+            raise DocumentIndexingError(
+                "vector_index_failed",
+                "failed to replace document vectors",
+            ) from exc
 
     async with db.begin_nested():
         document_row = current
@@ -291,33 +303,34 @@ async def _index_one_document(
             db.add(chunk)
             persisted_chunks.append(chunk)
         await db.flush()
-        if settings.rag_retrieval_version == "v2" and embeddings:
-            for chunk, embedding in zip(persisted_chunks, embeddings):
-                if len(embedding) != settings.rag_embedding_dim:
-                    raise DocumentIndexingError(
-                        FAILURE_EMBEDDING_FAILED,
-                        "remote embedding dimension does not match the configured v2 index",
-                    )
-                db.add(
-                    ChunkEmbedding(
-                        chunk_id=chunk.id,
-                        project_id=project_id,
-                        model_id=settings.embedding_model,
-                        model_revision=settings.rag_model_revision or None,
-                        index_version=settings.rag_index_version,
-                        embedding_dim=len(embedding),
-                        embedding=embedding,
-                        content_hash=normalized.content_hash,
-                        status="published",
-                    )
-                )
-            await db.flush()
         await db.execute(
             update(Chunk)
             .where(Chunk.document_id == document_row.id)
             .values(search_tsvector=func.to_tsvector("english", Chunk.text))
         )
         await db.flush()
+        if embeddings:
+            if any(len(embedding) != settings.embedding_dim for embedding in embeddings):
+                raise DocumentIndexingError(
+                    FAILURE_EMBEDDING_FAILED,
+                    "embedding dimension does not match the configured vector index",
+                )
+            try:
+                points = [
+                    chunk_point(
+                        chunk,
+                        embedding,
+                        index_version=settings.vector_index_version,
+                        document_path=document_row.path,
+                    )
+                    for chunk, embedding in zip(persisted_chunks, embeddings)
+                ]
+                await QdrantVectorStore(settings).upsert(points, settings.embedding_dim)
+            except VectorStoreError as exc:
+                raise DocumentIndexingError(
+                    "vector_index_failed",
+                    "failed to publish document vectors",
+                ) from exc
 
     return {
         "created": created,

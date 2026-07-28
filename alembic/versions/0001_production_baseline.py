@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from alembic import op
 import sqlalchemy as sa
-from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects import postgresql
 
 
@@ -32,7 +31,6 @@ eval_status_enum = postgresql.ENUM("queued", "running", "completed", "failed", n
 
 def upgrade() -> None:
     bind = op.get_bind()
-    op.execute("CREATE EXTENSION IF NOT EXISTS vector")
 
     project_role_enum.create(bind, checkfirst=True)
     run_status_enum.create(bind, checkfirst=True)
@@ -186,7 +184,6 @@ def upgrade() -> None:
         sa.Column("token_count", sa.Integer(), nullable=True),
         sa.Column("metadata_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("search_tsvector", postgresql.TSVECTOR(), nullable=True),
-        sa.Column("embedding", Vector(384), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["document_id"], ["documents.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["project_id"], ["projects.id"], ondelete="CASCADE"),
@@ -205,9 +202,6 @@ def upgrade() -> None:
     op.create_index("ix_chunks_project_service_endpoint", "chunks", ["project_id", "service_name", "endpoint"])
     op.create_index("ix_chunks_project_deploy_hash", "chunks", ["project_id", "deploy_hash"])
     op.create_index("ix_chunks_project_timestamp_start", "chunks", ["project_id", "timestamp_start"])
-    # HNSW/IVFFlat is intentionally not part of the baseline because pgvector versions differ across dev/test.
-    # Add a dedicated online migration for vector ANN indexing after confirming the target extension version.
-
     op.create_table(
         "retrieval_runs",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True, nullable=False),

@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: postgres:16
     environment:
       POSTGRES_USER: incidentops
       POSTGRES_PASSWORD: incidentops
@@ -14,6 +14,22 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    ports:
+      - "127.0.0.1:${QDRANT_PORT:-6333}:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && printf \"GET /healthz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3 && IFS= read -r line <&3 && [[ \"$$line\" == *\"200\"* ]]'",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   redis:
     image: redis:7-alpine
@@ -35,6 +51,11 @@ services:
       ALLOW_LOCAL_SEED_ADMIN: ${ALLOW_LOCAL_SEED_ADMIN:-true}
       EMBEDDING_MODEL: local-hash-v1
       EMBEDDING_DIM: "384"
+      RETRIEVAL_BACKEND: qdrant
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-incidentops_chunks}
+      VECTOR_INDEX_VERSION: ${VECTOR_INDEX_VERSION:-current}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o}
@@ -68,6 +89,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      qdrant:
+        condition: service_healthy
     volumes:
       - model_cache:/root/.cache
       - ${INGEST_ROOT:-.}:${INGEST_CONTAINER_ROOT:-/workspace}:ro
@@ -90,6 +113,12 @@ services:
       JOB_QUEUE_BACKEND: ${JOB_QUEUE_BACKEND:-inline}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       EMBEDDING_MODEL: local-hash-v1
+      EMBEDDING_DIM: "384"
+      RETRIEVAL_BACKEND: qdrant
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-incidentops_chunks}
+      VECTOR_INDEX_VERSION: ${VECTOR_INDEX_VERSION:-current}
       RERANKER_MODEL: ${RERANKER_MODEL:-}
       ENABLE_OTEL: ${ENABLE_OTEL:-false}
       METRICS_BACKEND: ${METRICS_BACKEND:-memory}
@@ -100,6 +129,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      qdrant:
+        condition: service_healthy
     volumes:
       - model_cache:/root/.cache
       - ${INGEST_ROOT:-.}:${INGEST_CONTAINER_ROOT:-/workspace}:ro
@@ -116,4 +147,5 @@ services:
 
 volumes:
   pgdata:
+  qdrant_data:
   model_cache:

@@ -61,7 +61,7 @@ async def remote_embed(texts: list[str]) -> list[list[float]]:
     started = time.perf_counter()
     payload = {
         "model_id": settings.embedding_model,
-        "index_version": settings.rag_index_version,
+        "index_version": settings.vector_index_version,
         "inputs": [{"id": str(index), "text": text} for index, text in enumerate(texts)],
     }
     try:
@@ -78,7 +78,7 @@ async def remote_embed(texts: list[str]) -> list[list[float]]:
             raise RemoteModelError("remote embedding response count mismatch")
         if any(not isinstance(vector, list) for vector in vectors):
             raise RemoteModelError("remote embedding response contains invalid vectors")
-        if any(len(vector) != settings.rag_embedding_dim for vector in vectors):
+        if any(len(vector) != settings.embedding_dim for vector in vectors):
             raise RemoteModelError("remote embedding response dimension mismatch")
         incr("rag_remote_embedding_calls_total")
         observe_latency("rag_remote_embedding", (time.perf_counter() - started) * 1000)

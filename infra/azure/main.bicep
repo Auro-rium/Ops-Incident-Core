@@ -71,6 +71,19 @@ param azureOpenAIChatDeployment string = ''
 @description('Azure OpenAI / Foundry embedding deployment name. Required for production deployment.')
 param azureOpenAIEmbeddingDeployment string = ''
 
+@description('Qdrant HTTPS endpoint reachable from the Core API and worker.')
+param qdrantUrl string = ''
+
+@secure()
+@description('Qdrant API key. Store the supplied value in Key Vault.')
+param qdrantApiKey string = ''
+
+@description('Qdrant collection name used by Core.')
+param qdrantCollection string = 'incidentops_chunks'
+
+@description('Embedding vector dimension configured for the selected embedding deployment.')
+param embeddingDimension int = 1024
+
 @secure()
 @description('Core access token used by the MCP server to call Core APIs. Set after bootstrap or during redeploy.')
 param incidentopsMcpToken string = ''
@@ -174,15 +187,6 @@ resource postgresDatabase 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2
   properties: {}
 }
 
-resource postgresVectorAllowList 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2023-12-01-preview' = {
-  parent: postgresServer
-  name: 'azure.extensions'
-  properties: {
-    value: 'VECTOR'
-    source: 'user-override'
-  }
-}
-
 resource postgresAllowAzureServices 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2023-12-01-preview' = {
   parent: postgresServer
   name: 'allow-azure-services'
@@ -260,6 +264,14 @@ resource azureOpenAIKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   name: 'AZURE-OPENAI-API-KEY'
   properties: {
     value: empty(azureOpenAIApiKey) ? 'disabled' : azureOpenAIApiKey
+  }
+}
+
+resource qdrantApiKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: keyVault
+  name: 'QDRANT-API-KEY'
+  properties: {
+    value: empty(qdrantApiKey) ? 'disabled' : qdrantApiKey
   }
 }
 
@@ -383,7 +395,23 @@ var sharedCoreEnv = [
   }
   {
     name: 'EMBEDDING_DIM'
-    value: '384'
+    value: string(embeddingDimension)
+  }
+  {
+    name: 'RETRIEVAL_BACKEND'
+    value: 'qdrant'
+  }
+  {
+    name: 'QDRANT_URL'
+    value: qdrantUrl
+  }
+  {
+    name: 'QDRANT_COLLECTION'
+    value: qdrantCollection
+  }
+  {
+    name: 'VECTOR_INDEX_VERSION'
+    value: 'current'
   }
   {
     name: 'AZURE_OPENAI_ENDPOINT'
@@ -445,6 +473,10 @@ var sharedCoreEnv = [
     name: 'AZURE_OPENAI_API_KEY'
     secretRef: 'azure-openai-api-key'
   }
+  {
+    name: 'QDRANT_API_KEY'
+    secretRef: 'qdrant-api-key'
+  }
 ]
 
 var mcpSecrets = concat(coreSecrets, [
@@ -484,6 +516,11 @@ var coreSecrets = [
   {
     name: 'azure-openai-api-key'
     keyVaultUrl: azureOpenAIKeySecret.properties.secretUri
+    identity: appIdentity.id
+  }
+  {
+    name: 'qdrant-api-key'
+    keyVaultUrl: qdrantApiKeySecret.properties.secretUri
     identity: appIdentity.id
   }
 ]
@@ -542,7 +579,6 @@ resource coreApi 'Microsoft.App/containerApps@2024-03-01' = {
     acrPullAssignment
     keyVaultSecretsAssignment
     postgresDatabase
-    postgresVectorAllowList
     postgresAllowAzureServices
   ]
 }
@@ -1034,7 +1070,6 @@ resource migrationJob 'Microsoft.App/jobs@2024-03-01' = {
     acrPullAssignment
     keyVaultSecretsAssignment
     postgresDatabase
-    postgresVectorAllowList
     postgresAllowAzureServices
   ]
 }

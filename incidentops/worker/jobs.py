@@ -143,7 +143,7 @@ async def execute_index_document_job(payload: dict, settings: Settings) -> None:
             index_job.finished_at = datetime.now(timezone.utc)
             await db.commit()
             return
-        if index_job.index_version != settings.rag_index_version:
+        if index_job.index_version != settings.vector_index_version:
             index_job.status = "stale"
             index_job.error_code = "index_version_changed"
             index_job.finished_at = datetime.now(timezone.utc)
