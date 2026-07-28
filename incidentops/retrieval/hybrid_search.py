@@ -92,28 +92,53 @@ _CHUNK_TYPE_BOOSTS = {
     "go_function": 0.14,
     "go_method": 0.14,
     "go_type": 0.12,
+    "go_struct": 0.12,
+    "go_interface": 0.12,
     "go_module": 0.08,
     "python_function": 0.14,
     "python_class": 0.12,
     "ts_function": 0.14,
     "ts_class": 0.12,
-    "java_function": 0.14,
+    "ts_interface": 0.12,
+    "java_method": 0.14,
     "java_class": 0.12,
+    "java_interface": 0.12,
     "function": 0.12,
     "class": 0.12,
     "module": 0.08,
     "code_file": 0.05,
+    "go_fallback": 0.04,
+    "python_fallback": 0.04,
+    "ts_fallback": 0.04,
+    "js_fallback": 0.04,
+    "java_fallback": 0.04,
     "config_section": 0.12,
+    "config_service_block": 0.14,
+    "env_var_block": 0.12,
+    "dependency_block": 0.12,
     "api_endpoint": 0.10,
+    "openapi_endpoint": 0.14,
+    "openapi_schema": 0.10,
     "proto_service": 0.12,
     "proto_rpc": 0.14,
     "proto_message": 0.08,
     "proto_enum": 0.08,
     "markdown_section": 0.08,
+    "markdown_heading_section": 0.08,
+    "markdown_procedure": 0.12,
+    "markdown_table": 0.08,
+    "markdown_faq": 0.08,
     "log_window": 0.12,
+    "log_time_window": 0.12,
     "error_cluster": 0.14,
+    "log_error_burst": 0.14,
     "deploy_diff": 0.12,
+    "deploy_commit": 0.12,
     "incident_section": 0.12,
+    "incident_symptom": 0.12,
+    "incident_timeline": 0.12,
+    "incident_root_cause": 0.14,
+    "incident_action": 0.12,
     "release_note": 0.10,
 }
 
@@ -406,34 +431,43 @@ def _chunk_source_type(chunk) -> str:
     if isinstance(raw, str):
         return _SOURCE_TYPE_ALIASES.get(raw, raw)
     chunk_type = (chunk.chunk_type or "").lower()
-    if chunk_type == "deploy_diff":
+    if chunk_type in {"deploy_diff", "deploy_commit"}:
         return "deploy"
-    if chunk_type in {"log_window", "error_cluster"}:
+    if chunk_type in {"log_window", "error_cluster", "log_time_window", "log_error_burst"}:
         return "logs"
     if chunk_type in {
         "function",
         "class",
         "module",
         "code_file",
+        "go_fallback",
+        "python_fallback",
+        "ts_fallback",
+        "js_fallback",
+        "java_fallback",
         "go_function",
         "go_method",
         "go_type",
+        "go_struct",
+        "go_interface",
         "go_module",
         "python_function",
         "python_class",
         "ts_function",
         "ts_class",
-        "java_function",
+        "ts_interface",
+        "java_method",
         "java_class",
+        "java_interface",
     }:
         return "code"
-    if chunk_type == "incident_section":
+    if chunk_type in {"incident_section", "incident_symptom", "incident_timeline", "incident_root_cause", "incident_action"}:
         return "incident"
-    if chunk_type in {"api_endpoint", "proto_service", "proto_rpc", "proto_message", "proto_enum"}:
+    if chunk_type in {"api_endpoint", "openapi_endpoint", "openapi_schema", "proto_service", "proto_rpc", "proto_message", "proto_enum", "proto_preamble", "proto_fallback"}:
         return "api_doc"
-    if chunk_type == "config_section":
+    if chunk_type in {"config_section", "config_service_block", "env_var_block", "dependency_block", "config_fallback"}:
         return "config"
-    if chunk_type == "markdown_section":
+    if chunk_type in {"markdown_section", "markdown_heading_section", "markdown_procedure", "markdown_table", "markdown_faq"}:
         doc_path = getattr(getattr(chunk, "document", None), "path", "") or metadata.get("document_path", "")
         lower_path = str(doc_path).lower()
         if "api" in lower_path or "openapi" in lower_path or "swagger" in lower_path:

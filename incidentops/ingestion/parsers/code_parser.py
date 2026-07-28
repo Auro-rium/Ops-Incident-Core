@@ -12,7 +12,6 @@ import yaml
 
 from incidentops.ingestion.schemas import RawChunk
 
-GO_DECL_RE = re.compile(r"^(func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)|type\s+([A-Za-z_]\w*)\s+(?:struct|interface|func|\w+))\b")
 GO_PACKAGE_RE = re.compile(r"^\s*package\s+([A-Za-z_]\w*)\b", re.MULTILINE)
 GO_FUNC_RE = re.compile(r"^\s*func\s+(?P<receiver>\([^)]*\)\s*)?(?P<name>[A-Za-z_]\w*)\s*\(")
 GO_TYPE_RE = re.compile(r"^\s*type\s+(?P<name>[A-Za-z_]\w*)\s+(?P<kind>struct|interface|func|\w+)\b")
@@ -20,7 +19,7 @@ PROTO_DECL_RE = re.compile(r"^\s*(service|message|enum)\s+([A-Za-z_]\w*)\s*\{?")
 PROTO_RPC_RE = re.compile(r"^\s*rpc\s+([A-Za-z_]\w*)\s*\(")
 PROTO_PACKAGE_RE = re.compile(r"^\s*package\s+([A-Za-z_][\w.]*)\s*;", re.MULTILINE)
 JS_DECL_RE = re.compile(
-    r"^\s*(?:export\s+)?(?:(class)\s+([A-Za-z_]\w*)|(async\s+)?function\s+([A-Za-z_]\w*)|const\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\(|let\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\(|var\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\()"
+    r"^\s*(?:export\s+)?(?:(class|interface|type|enum)\s+([A-Za-z_]\w*)|(async\s+)?function\s+([A-Za-z_]\w*)|const\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\(|let\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\(|var\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\()"
 )
 JAVA_DECL_RE = re.compile(
     r"^\s*(?:(?:public|private|protected|static|final|abstract)\s+)*(class|interface|enum|record|void|[A-Za-z_][\w<>\[\]]+)\s+([A-Za-z_]\w*)\s*(?:\(|\{)"
@@ -34,14 +33,14 @@ def parse_python(content: str, file_path: str, service_name: str | None = None) 
         return [
             RawChunk(
                 text=content,
-                chunk_type="code_file",
+                chunk_type="python_fallback",
                 source_type="code",
                 document_path=file_path,
                 doc_type="code",
                 service_name=service_name,
                 start_line=1,
                 end_line=content.count("\n") + 1,
-                metadata={"language": "py", "kind": "file"},
+                metadata={"language": "python", "kind": "file", "fallback_reason": "syntax_error"},
             )
         ]
 
@@ -60,7 +59,7 @@ def parse_python(content: str, file_path: str, service_name: str | None = None) 
             chunks.append(
                 RawChunk(
                     text=preamble,
-                    chunk_type="module",
+                    chunk_type="python_module",
                     source_type="code",
                     document_path=file_path,
                     doc_type="code",
@@ -68,7 +67,7 @@ def parse_python(content: str, file_path: str, service_name: str | None = None) 
                     section_title="module preamble",
                     start_line=1,
                     end_line=first_def_line - 1,
-                    metadata={"language": "py", "kind": "preamble"},
+                    metadata={"language": "python", "kind": "preamble"},
                 )
             )
 
@@ -82,7 +81,7 @@ def parse_python(content: str, file_path: str, service_name: str | None = None) 
         chunks.append(
             RawChunk(
                 text=text,
-                chunk_type="class" if is_class else "function",
+                chunk_type="python_class" if is_class else "python_function",
                 source_type="code",
                 document_path=file_path,
                 doc_type="code",
@@ -90,7 +89,12 @@ def parse_python(content: str, file_path: str, service_name: str | None = None) 
                 section_title=f"{'class' if is_class else 'def'} {node.name}",
                 start_line=start,
                 end_line=end,
-                metadata={"language": "py", "symbol": node.name, "kind": "class" if is_class else "function"},
+                metadata={
+                    "language": "python",
+                    "symbol": node.name,
+                    "symbol_name": node.name,
+                    "kind": "class" if is_class else "function",
+                },
             )
         )
 
@@ -98,14 +102,14 @@ def parse_python(content: str, file_path: str, service_name: str | None = None) 
         chunks.append(
             RawChunk(
                 text=content,
-                chunk_type="code_file",
+                chunk_type="python_fallback",
                 source_type="code",
                 document_path=file_path,
                 doc_type="code",
                 service_name=service_name,
                 start_line=1,
                 end_line=len(lines),
-                metadata={"language": "py", "kind": "file"},
+                metadata={"language": "python", "kind": "file", "fallback_reason": "no_declarations"},
             )
         )
 
@@ -128,7 +132,7 @@ def parse_go(content: str, file_path: str, service_name: str | None = None) -> l
             continue
         type_match = GO_TYPE_RE.match(stripped)
         if type_match:
-            declarations.append((index, "type", type_match.group("name")))
+            declarations.append((index, type_match.group("kind"), type_match.group("name")))
 
     chunks = _declaration_chunks(
         content,
@@ -138,9 +142,15 @@ def parse_go(content: str, file_path: str, service_name: str | None = None) -> l
         source_type="code",
         doc_type="code",
         preamble_chunk_type="go_module",
-        fallback_chunk_type="code_file",
+        fallback_chunk_type="go_fallback",
         language="go",
-        chunk_type_for_kind={"function": "go_function", "method": "go_method", "type": "go_type"},
+        chunk_type_for_kind={
+            "function": "go_function",
+            "method": "go_method",
+            "struct": "go_struct",
+            "interface": "go_interface",
+            "func": "go_type",
+        },
         package_name=package_name,
     )
     return chunks
@@ -170,7 +180,7 @@ def parse_proto(content: str, file_path: str, service_name: str | None = None) -
         source_type="api_doc",
         doc_type="api_doc",
         preamble_chunk_type="proto_preamble",
-        fallback_chunk_type="api_endpoint",
+        fallback_chunk_type="proto_fallback",
         language="proto",
         chunk_type_for_kind={
             "service": "proto_service",
@@ -190,14 +200,23 @@ def parse_jsts(
     service_name: str | None = None,
     language: str,
 ) -> list[RawChunk]:
+    prefix = "ts" if language in {"ts", "tsx"} else "js"
     return _parse_regex_language(
         content,
         file_path,
         service_name=service_name,
         source_type="code",
-        fallback_chunk_type="code_file",
+        fallback_chunk_type=f"{prefix}_fallback",
         declaration_re=JS_DECL_RE,
         language=language,
+        module_chunk_type=f"{prefix}_module",
+        chunk_type_for_kind={
+            "class": f"{prefix}_class",
+            "interface": f"{prefix}_interface",
+            "type": f"{prefix}_interface",
+            "enum": f"{prefix}_class",
+            "function": f"{prefix}_function",
+        },
     )
 
 
@@ -207,9 +226,17 @@ def parse_java(content: str, file_path: str, *, service_name: str | None = None)
         file_path,
         service_name=service_name,
         source_type="code",
-        fallback_chunk_type="code_file",
+        fallback_chunk_type="java_fallback",
         declaration_re=JAVA_DECL_RE,
         language="java",
+        module_chunk_type="java_package",
+        chunk_type_for_kind={
+            "class": "java_class",
+            "interface": "java_interface",
+            "enum": "java_class",
+            "record": "java_class",
+            "function": "java_method",
+        },
     )
 
 
@@ -237,10 +264,10 @@ def parse_structured_config(
             chunks.append(
                 RawChunk(
                     text=text,
-                    chunk_type="config_section",
+                    chunk_type=_config_chunk_type(str(key), source_type),
                     source_type=source_type,
                     document_path=file_path,
-                    doc_type="api_doc" if source_type == "api_doc" else "markdown",
+                    doc_type="api_doc" if source_type == "api_doc" else "config",
                     service_name=service_name,
                     section_title=f"config {key}",
                     start_line=1,
@@ -254,10 +281,10 @@ def parse_structured_config(
     return [
         RawChunk(
             text=content,
-            chunk_type="config_section",
+            chunk_type="config_fallback",
             source_type=source_type,
             document_path=file_path,
-            doc_type="api_doc" if source_type == "api_doc" else "markdown",
+            doc_type="api_doc" if source_type == "api_doc" else "config",
             service_name=service_name,
             section_title=file_path.rsplit("/", 1)[-1],
             start_line=1,
@@ -354,95 +381,6 @@ def _declaration_chunks(
     ]
 
 
-def _parse_declaration_language(
-    content: str,
-    file_path: str,
-    *,
-    service_name: str | None,
-    source_type: str,
-    fallback_chunk_type: str,
-    declaration_re: re.Pattern[str],
-    language: str,
-) -> list[RawChunk]:
-    lines = content.splitlines()
-    if not lines:
-        return []
-
-    declarations: list[tuple[int, str, str]] = []
-    for index, line in enumerate(lines, start=1):
-        match = declaration_re.match(line.strip())
-        if not match:
-            continue
-        groups = [group for group in match.groups() if group]
-        symbol = groups[-1] if groups else line.strip().split()[0]
-        kind = "service" if language == "proto" and line.strip().startswith("service ") else "declaration"
-        if language == "go":
-            kind = "function" if line.strip().startswith("func ") else "type"
-        elif language == "proto":
-            kind = line.strip().split()[0]
-        declarations.append((index, kind, symbol))
-
-    chunks: list[RawChunk] = []
-    if declarations and declarations[0][0] > 1:
-        preamble = "\n".join(lines[: declarations[0][0] - 1]).strip()
-        if preamble:
-            chunks.append(
-                RawChunk(
-                    text=preamble,
-                    chunk_type="module" if source_type == "code" else f"{language}_preamble",
-                    source_type=source_type,
-                    document_path=file_path,
-                    doc_type="code" if source_type == "code" else "api_doc",
-                    service_name=service_name,
-                    section_title="module preamble",
-                    start_line=1,
-                    end_line=declarations[0][0] - 1,
-                    metadata={"language": language, "kind": "preamble"},
-                )
-            )
-
-    for idx, (start_line, kind, symbol) in enumerate(declarations):
-        end_line = declarations[idx + 1][0] - 1 if idx + 1 < len(declarations) else len(lines)
-        text = "\n".join(lines[start_line - 1 : end_line]).strip()
-        if not text:
-            continue
-        chunk_type = "function" if source_type == "code" else _proto_chunk_type(kind)
-        if source_type == "code" and kind == "type":
-            chunk_type = "class"
-        chunks.append(
-            RawChunk(
-                text=text,
-                chunk_type=chunk_type,
-                source_type=source_type,
-                document_path=file_path,
-                doc_type="code" if source_type == "code" else "api_doc",
-                service_name=service_name,
-                section_title=f"{kind} {symbol}",
-                start_line=start_line,
-                end_line=end_line,
-                metadata={"language": language, "symbol": symbol, "kind": kind},
-            )
-        )
-
-    if chunks:
-        return chunks
-
-    return [
-        RawChunk(
-            text=content,
-            chunk_type=fallback_chunk_type,
-            source_type=source_type,
-            document_path=file_path,
-            doc_type="code" if source_type == "code" else "api_doc",
-            service_name=service_name,
-            section_title=file_path.rsplit("/", 1)[-1],
-            start_line=1,
-            end_line=len(lines),
-            metadata={"language": language, "kind": "file"},
-        )
-    ]
-
-
 def _match_first(pattern: re.Pattern[str], content: str) -> str | None:
     match = pattern.search(content)
     return match.group(1) if match else None
@@ -457,6 +395,8 @@ def _parse_regex_language(
     fallback_chunk_type: str,
     declaration_re: re.Pattern[str],
     language: str,
+    module_chunk_type: str,
+    chunk_type_for_kind: dict[str, str],
 ) -> list[RawChunk]:
     lines = content.splitlines()
     if not lines:
@@ -497,7 +437,7 @@ def _parse_regex_language(
             chunks.append(
                 RawChunk(
                     text=preamble,
-                    chunk_type="module",
+                    chunk_type=module_chunk_type,
                     source_type=source_type,
                     document_path=file_path,
                     doc_type="code",
@@ -517,7 +457,7 @@ def _parse_regex_language(
         chunks.append(
             RawChunk(
                 text=text,
-                chunk_type="class" if kind in {"class", "interface", "enum", "record"} else "function",
+                chunk_type=chunk_type_for_kind.get(kind, fallback_chunk_type),
                 source_type=source_type,
                 document_path=file_path,
                 doc_type="code",
@@ -525,7 +465,7 @@ def _parse_regex_language(
                 section_title=f"{kind} {symbol}",
                 start_line=start_line,
                 end_line=end_line,
-                metadata={"language": language, "symbol": symbol, "kind": kind},
+                metadata={"language": language, "symbol": symbol, "symbol_name": symbol, "kind": kind},
             )
         )
     return chunks
@@ -533,8 +473,8 @@ def _parse_regex_language(
 
 def _resolve_regex_declaration(groups: list[str], language: str) -> tuple[str, str]:
     if language in {"js", "ts"}:
-        if groups[0] == "class":
-            return "class", groups[1]
+        if groups[0] in {"class", "interface", "type", "enum"}:
+            return groups[0], groups[1]
         for symbol in groups[3:]:
             if symbol:
                 return "function", symbol
@@ -551,7 +491,12 @@ def _parse_openapi_like(content: str, file_path: str, *, service_name: str | Non
     if not isinstance(data, dict):
         return []
     paths = data.get("paths")
-    if not isinstance(paths, dict) or not paths:
+    schemas = data.get("components", {}).get("schemas", {}) if isinstance(data.get("components"), dict) else {}
+    if not isinstance(paths, dict):
+        paths = {}
+    if not isinstance(schemas, dict):
+        schemas = {}
+    if not paths and not schemas:
         return []
     lines = content.splitlines() or [content]
     chunks: list[RawChunk] = []
@@ -563,7 +508,7 @@ def _parse_openapi_like(content: str, file_path: str, *, service_name: str | Non
         chunks.append(
             RawChunk(
                 text=_render_structured_section(str(endpoint), value),
-                chunk_type="api_endpoint",
+                chunk_type="openapi_endpoint",
                 source_type="api_doc",
                 document_path=file_path,
                 doc_type="api_doc",
@@ -575,7 +520,39 @@ def _parse_openapi_like(content: str, file_path: str, *, service_name: str | Non
                 metadata={"language": _language_from_path(file_path.lower()), "endpoint": str(endpoint), "methods": methods, "kind": "openapi_path"},
             )
         )
+    for schema_name, value in list(schemas.items())[:100]:
+        chunks.append(
+            RawChunk(
+                text=_render_structured_section(str(schema_name), value),
+                chunk_type="openapi_schema",
+                source_type="api_doc",
+                document_path=file_path,
+                doc_type="api_doc",
+                service_name=service_name,
+                section_title=f"schema {schema_name}",
+                start_line=1,
+                end_line=len(lines),
+                metadata={
+                    "language": _language_from_path(file_path.lower()),
+                    "symbol_name": str(schema_name),
+                    "kind": "openapi_schema",
+                },
+            )
+        )
     return chunks
+
+
+def _config_chunk_type(key: str, source_type: str) -> str:
+    normalized = key.lower()
+    if source_type == "api_doc":
+        return "openapi_schema"
+    if normalized in {"service", "services", "application", "server"}:
+        return "config_service_block"
+    if normalized in {"env", "environment", "environmentvariables", "environment_variables"}:
+        return "env_var_block"
+    if normalized in {"dependency", "dependencies", "require", "requires"}:
+        return "dependency_block"
+    return "config_section"
 
 
 def _load_structured_data(content: str, lower_path: str):
@@ -605,11 +582,3 @@ def _render_structured_section(key: str, value) -> str:
 
 def _language_from_path(lower_path: str) -> str:
     return lower_path.rsplit(".", 1)[-1] if "." in lower_path else "text"
-
-
-def _proto_chunk_type(kind: str) -> str:
-    if kind == "service":
-        return "proto_service"
-    if kind == "message":
-        return "proto_message"
-    return "api_endpoint"

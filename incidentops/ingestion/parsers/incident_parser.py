@@ -65,7 +65,7 @@ def parse_incident(content: str, file_path: str) -> list[RawChunk]:
         chunks.append(
             RawChunk(
                 text=text,
-                chunk_type="incident_section",
+                chunk_type=_chunk_type(section["title"]),
                 source_type="incident",
                 document_path=file_path,
                 doc_type="incident",
@@ -77,6 +77,19 @@ def parse_incident(content: str, file_path: str) -> list[RawChunk]:
         )
 
     return chunks
+
+
+def _chunk_type(title: str) -> str:
+    normalized = title.lower()
+    if any(term in normalized for term in ("root cause", "cause")):
+        return "incident_root_cause"
+    if "timeline" in normalized:
+        return "incident_timeline"
+    if any(term in normalized for term in ("fix", "mitigation", "action", "lessons")):
+        return "incident_action"
+    if any(term in normalized for term in ("summary", "symptom", "impact", "severity", "overview")):
+        return "incident_symptom"
+    return "incident_section"
 
 
 def _extract_service(content: str, path: str) -> str | None:

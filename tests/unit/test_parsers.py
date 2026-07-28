@@ -46,7 +46,16 @@ class TestMarkdownParser:
     def test_chunk_type(self):
         md = "# Test\nContent"
         chunks = parse_markdown(md, "test.md")
-        assert all(c.chunk_type == "markdown_section" for c in chunks)
+        assert all(c.chunk_type == "markdown_heading_section" for c in chunks)
+
+    def test_identifies_procedure_table_and_faq_sections(self):
+        md = (
+            "# Runbook\n1. Restart the service\n"
+            "## FAQ\nWhat is healthy?\n"
+            "## Limits\n| Name | Value |\n| --- | --- |\n| retries | 3 |\n"
+        )
+        chunk_types = {chunk.chunk_type for chunk in parse_markdown(md, "runbook.md")}
+        assert {"markdown_procedure", "markdown_faq", "markdown_table"} <= chunk_types
 
     def test_source_type_propagated(self):
         md = "# Test\nContent"
@@ -81,7 +90,7 @@ class MyClass:
         chunks = parse_python(code, "test.py")
         class_chunks = [c for c in chunks if "class " in (c.section_title or "")]
         assert len(class_chunks) >= 1
-        assert any(chunk.chunk_type == "class" for chunk in class_chunks)
+        assert any(chunk.chunk_type == "python_class" for chunk in class_chunks)
 
     def test_preserves_line_numbers(self):
         code = "def foo():\n    pass\n\ndef bar():\n    pass"
@@ -115,13 +124,13 @@ func (h *Handler) StartWorkflowTask() error {
 """
         chunks = parse_go(code, "service/history/handler.go", service_name="history")
         titles = [chunk.section_title for chunk in chunks]
-        assert "type Handler" in titles
+        assert "struct Handler" in titles
         assert "function NewHandler" in titles
         assert "method StartWorkflowTask" in titles
         assert all(chunk.source_type == "code" for chunk in chunks)
         assert all(chunk.start_line is not None and chunk.end_line is not None for chunk in chunks)
         assert chunks[-1].metadata["language"] == "go"
-        assert any(chunk.chunk_type == "go_type" for chunk in chunks if chunk.section_title == "type Handler")
+        assert any(chunk.chunk_type == "go_struct" for chunk in chunks if chunk.section_title == "struct Handler")
         assert any(chunk.chunk_type == "go_function" for chunk in chunks if chunk.section_title == "function NewHandler")
         assert any(chunk.chunk_type == "go_method" for chunk in chunks if chunk.section_title == "method StartWorkflowTask")
         assert any(chunk.metadata.get("package_name") == "history" for chunk in chunks)
@@ -169,12 +178,18 @@ message StartWorkflowExecutionRequest {
         yaml_text = "database:\n  host: db\nserver:\n  port: 7233\n"
         chunks = parse_structured_config(yaml_text, "config/app.yaml", source_type="config")
         assert {chunk.section_title for chunk in chunks} >= {"config database", "config server"}
+        assert {chunk.chunk_type for chunk in chunks} >= {"config_section", "config_service_block"}
 
     def test_parses_openapi_paths(self):
         yaml_text = "openapi: 3.0.0\npaths:\n  /api/orders:\n    get:\n      responses: {}\n"
         chunks = parse_structured_config(yaml_text, "openapi.yaml", source_type="api_doc")
-        assert any(chunk.chunk_type == "api_endpoint" for chunk in chunks)
+        assert any(chunk.chunk_type == "openapi_endpoint" for chunk in chunks)
         assert any(chunk.endpoint == "GET /api/orders" for chunk in chunks)
+
+    def test_parses_openapi_schemas_without_paths(self):
+        yaml_text = "openapi: 3.0.0\ncomponents:\n  schemas:\n    Order:\n      type: object\n"
+        chunks = parse_structured_config(yaml_text, "openapi.yaml", source_type="api_doc")
+        assert any(chunk.chunk_type == "openapi_schema" and chunk.metadata["symbol_name"] == "Order" for chunk in chunks)
 
 
 # ── Log parser ────────────────────────────────
@@ -190,7 +205,7 @@ class TestLogParser:
         chunks = parse_logs(log, "checkout.log")
         assert len(chunks) >= 1
         chunk = chunks[0]
-        assert chunk.chunk_type == "log_window"
+        assert chunk.chunk_type == "log_time_window"
         assert chunk.deploy_hash == "8f13a2"
 
     def test_extracts_trace_ids(self):
@@ -218,7 +233,7 @@ class TestLogParser:
             ]
         )
         chunks = parse_logs(log, "logs/history.log")
-        error_chunks = [chunk for chunk in chunks if chunk.chunk_type == "error_cluster"]
+        error_chunks = [chunk for chunk in chunks if chunk.chunk_type == "log_error_burst"]
         assert len(error_chunks) == 1
         assert error_chunks[0].metadata["error_line_count"] == 2
 
@@ -237,7 +252,7 @@ class TestDeployParser:
         assert len(chunks) == 1
         assert chunks[0].deploy_hash == "8f13a2"
         assert chunks[0].service_name == "checkout"
-        assert chunks[0].chunk_type == "deploy_diff"
+        assert chunks[0].chunk_type == "deploy_commit"
 
     def test_parses_single_deploy_object_with_collector_aliases(self):
         json_content = """{
@@ -249,7 +264,7 @@ class TestDeployParser:
         assert len(chunks) == 1
         assert chunks[0].deploy_hash == "abcdef1234567890"
         assert chunks[0].service_name == "orders"
-        assert chunks[0].chunk_type == "deploy_diff"
+        assert chunks[0].chunk_type == "deploy_commit"
 
     def test_parses_patch_file(self):
         patch = (
@@ -290,7 +305,12 @@ class TestIncidentParser:
     def test_chunk_type(self):
         md = "# Incident\n## Summary\nText"
         chunks = parse_incident(md, "incident.md")
-        assert all(c.chunk_type == "incident_section" for c in chunks)
+        assert {chunk.chunk_type for chunk in chunks} == {"incident_section", "incident_symptom"}
+
+    def test_maps_incident_sections_to_evidence_types(self):
+        md = "# Incident\n## Timeline\nT0\n## Root Cause\nCause\n## Mitigation\nFix\n"
+        chunk_types = {chunk.chunk_type for chunk in parse_incident(md, "incident.md")}
+        assert {"incident_timeline", "incident_root_cause", "incident_action"} <= chunk_types
 
     def test_extracts_service(self):
         md = "# Checkout Timeout\n## Summary\nCheckout was slow"

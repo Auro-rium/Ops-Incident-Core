@@ -36,7 +36,7 @@ def parse_markdown(
                 chunks.append(
                     RawChunk(
                         text=text,
-                        chunk_type="markdown_section",
+                        chunk_type=_chunk_type(current_title, text),
                         source_type=source_type,
                         document_path=file_path,
                         doc_type="markdown",
@@ -62,7 +62,7 @@ def parse_markdown(
             chunks.append(
                 RawChunk(
                     text=text,
-                    chunk_type="markdown_section",
+                    chunk_type=_chunk_type(current_title, text),
                     source_type=source_type,
                     document_path=file_path,
                     doc_type="markdown",
@@ -74,3 +74,16 @@ def parse_markdown(
             )
 
     return chunks
+
+
+def _chunk_type(title: str | None, text: str) -> str:
+    normalized_title = (title or "").lower()
+    if re.search(r"^\s*\|.+\|\s*$\n^\s*\|\s*:?-{3,}", text, re.MULTILINE):
+        return "markdown_table"
+    if any(term in normalized_title for term in ("procedure", "runbook", "how to", "steps", "playbook")) or re.search(
+        r"^\s*\d+[.)]\s+", text, re.MULTILINE
+    ):
+        return "markdown_procedure"
+    if any(term in normalized_title for term in ("faq", "questions", "q&a")):
+        return "markdown_faq"
+    return "markdown_heading_section"

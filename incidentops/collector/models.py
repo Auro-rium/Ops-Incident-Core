@@ -27,6 +27,10 @@ class CollectorSummary:
     redaction_count: int = 0
     retry_attempted: int = 0
     retry_succeeded: int = 0
+    parser_error_count: int = 0
+    parser_error_reasons: dict[str, int] = field(default_factory=dict)
+    chunk_discard_reasons: dict[str, int] = field(default_factory=dict)
+    embedding_failures: int = 0
     skipped_reasons: dict[str, int] = field(default_factory=dict)
     source_type_counts: dict[str, int] = field(default_factory=dict)
     language_counts: dict[str, int] = field(default_factory=dict)
@@ -39,6 +43,23 @@ class CollectorSummary:
 
     def count(self, mapping: dict[str, int], value: str) -> None:
         mapping[value] = mapping.get(value, 0) + 1
+
+    def record_core_diagnostics(self, diagnostics: dict[str, Any]) -> None:
+        """Merge bounded aggregate counters returned by Core after a batch."""
+        self.parser_error_count += int(diagnostics.get("last_batch_error_count", 0) or 0)
+        self.embedding_failures += int(diagnostics.get("last_batch_embedding_failures", 0) or 0)
+        self._merge_counts(self.parser_error_reasons, diagnostics.get("last_batch_parser_error_reasons", {}))
+        self._merge_counts(self.chunk_discard_reasons, diagnostics.get("last_batch_chunk_discard_reasons", {}))
+
+    @staticmethod
+    def _merge_counts(destination: dict[str, int], incoming: Any) -> None:
+        if not isinstance(incoming, dict):
+            return
+        for key, value in incoming.items():
+            try:
+                destination[str(key)] = destination.get(str(key), 0) + int(value or 0)
+            except (TypeError, ValueError):
+                continue
 
     def diagnostics(self) -> dict[str, Any]:
         return {
@@ -55,10 +76,10 @@ class CollectorSummary:
             "redaction_count": self.redaction_count,
             "retry_attempted": self.retry_attempted,
             "retry_succeeded": self.retry_succeeded,
-            "parser_error_count": 0,
-            "parser_error_reasons": {},
-            "chunk_discard_reasons": {},
-            "embedding_failures": 0,
+            "parser_error_count": self.parser_error_count,
+            "parser_error_reasons": dict(sorted(self.parser_error_reasons.items())),
+            "chunk_discard_reasons": dict(sorted(self.chunk_discard_reasons.items())),
+            "embedding_failures": self.embedding_failures,
             "skipped_reasons": dict(sorted(self.skipped_reasons.items())),
             "source_type_counts": dict(sorted(self.source_type_counts.items())),
             "language_counts": dict(sorted(self.language_counts.items())),

@@ -37,7 +37,11 @@ class CoreCollectorClient:
             json={"name": name, "source_type": source_type, "sync_mode": "collector", "config": {}},
         )
         response.raise_for_status()
-        return response.json()["source_id"]
+        payload = response.json()
+        source_id = payload.get("source_id") or payload.get("id")
+        if not isinstance(source_id, str) or not source_id:
+            raise RuntimeError("Core source registration response did not include an identifier")
+        return source_id
 
     def start_sync(self, source_id: str, collector_id: str, diagnostics: dict[str, Any]) -> str:
         response = self._client.post(

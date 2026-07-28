@@ -184,6 +184,7 @@ _FILTER_FIELDS = {
     "endpoint",
     "commit_sha",
     "deploy_hash",
+    "content_hash",
     "index_version",
 }
 
@@ -212,6 +213,7 @@ def chunk_point(
         "endpoint": str(chunk.endpoint or ""),
         "commit_sha": str(metadata.get("commit_sha") or ""),
         "deploy_hash": str(chunk.deploy_hash or ""),
+        "content_hash": str(metadata.get("content_hash") or ""),
         "index_version": str(index_version),
     }
     return {"id": str(chunk.id), "vector": [float(value) for value in embedding], "payload": payload}

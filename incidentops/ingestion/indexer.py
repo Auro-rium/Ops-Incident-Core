@@ -541,6 +541,7 @@ def _build_chunk_metadata(normalized: NormalizedDocument, raw_chunk: RawChunk) -
     metadata: dict[str, Any] = {
         "source_type": raw_chunk.source_type,
         "document_path": raw_chunk.document_path,
+        "content_hash": normalized.content_hash,
     }
     for key in _CHUNK_METADATA_KEYS:
         value = normalized.metadata.get(key)

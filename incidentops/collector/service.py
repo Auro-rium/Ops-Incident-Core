@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
@@ -59,6 +60,12 @@ class CollectorService:
         summary = CollectorSummary()
         client = CoreCollectorClient(base_url, token)
         try:
+            repository_context = self._repository_context(
+                root,
+                repo_name=repo_name,
+                branch=branch,
+                commit_sha=commit_sha,
+            )
             capabilities = client.capabilities()
             limits = capabilities.get("limits", {})
             batch_size = min(batch_size, int(limits.get("max_documents_per_batch") or batch_size))
@@ -73,9 +80,9 @@ class CollectorService:
                 if reason:
                     summary.skip(reason)
                     continue
-                document = self._normalize(item, repo_name=repo_name, branch=branch, commit_sha=commit_sha)
+                document, normalize_reason = self._normalize(item, **repository_context)
                 if document is None:
-                    summary.skip("malformed_content")
+                    summary.skip(normalize_reason or "malformed_content")
                     continue
                 summary.documents_normalized += 1
                 summary.redaction_count += int(document["metadata"].get("redaction_count", 0))
@@ -96,7 +103,8 @@ class CollectorService:
                     batch = []
             if batch:
                 self._upload_batch(client, source_id, sync_id, collector_id, batch, summary)
-            client.finish_sync(source_id, sync_id, collector_id, "success", summary.diagnostics())
+            finish_status = "partial_success" if summary.parser_error_count or summary.embedding_failures else "success"
+            client.finish_sync(source_id, sync_id, collector_id, finish_status, summary.diagnostics())
             return summary
         except Exception:
             # Core records a failed sync when the upload operation reaches it. Do not leak document content.
@@ -117,14 +125,20 @@ class CollectorService:
         if unchanged:
             summary.skipped_reasons["unchanged"] = summary.skipped_reasons.get("unchanged", 0) + unchanged
         summary.chunks_created += int(response.get("chunks_created", 0))
+        diagnostics = response.get("diagnostics")
+        if isinstance(diagnostics, dict):
+            summary.record_core_diagnostics(diagnostics)
         summary.bytes_uploaded += sum(int(item["size_bytes"]) for item in batch)
 
-    def _normalize(self, item: DiscoveredFile, **repo_metadata: str | None) -> dict | None:
+    def _normalize(self, item: DiscoveredFile, **repo_metadata: str | None) -> tuple[dict | None, str | None]:
         try:
             text = Path(item.absolute_path).read_text(encoding="utf-8", errors="strict")
         except (OSError, UnicodeDecodeError):
-            return None
-        content, redaction_count = redact(text)
+            return None, "read_failed"
+        try:
+            content, redaction_count = redact(text)
+        except Exception:
+            return None, "redaction_failed"
         source_type = classify(item.relative_path, content)
         metadata = extract_metadata(item.relative_path, content, **repo_metadata)
         hints = build_hints(item.relative_path, content, source_type)
@@ -141,6 +155,24 @@ class CollectorService:
             "size_bytes": len(content.encode("utf-8")),
             "modified_at": item.modified_at.isoformat() if item.modified_at else None,
             "metadata": metadata,
+        }, None
+
+    @staticmethod
+    def _repository_context(
+        root: Path,
+        *,
+        repo_name: str | None,
+        branch: str | None,
+        commit_sha: str | None,
+    ) -> dict[str, str | None]:
+        """Resolve Git facts when available; explicit caller values win."""
+        root = root.resolve()
+        git_root = _git_value(root, ["rev-parse", "--show-toplevel"])
+        repository_root = Path(git_root) if git_root else root
+        return {
+            "repo_name": repo_name or repository_root.name,
+            "branch": branch or _git_value(repository_root, ["branch", "--show-current"]),
+            "commit_sha": commit_sha or _git_value(repository_root, ["rev-parse", "HEAD"]),
         }
 
     def _discover(self, root: Path, max_files: int | None) -> Iterator[DiscoveredFile]:
@@ -178,3 +210,18 @@ class CollectorService:
         if b"\x00" in sample:
             return "binary"
         return None
+
+
+def _git_value(root: Path, args: list[str]) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    value = completed.stdout.strip()
+    return value or None

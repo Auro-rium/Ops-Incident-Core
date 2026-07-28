@@ -60,6 +60,7 @@ def test_chunk_point_keeps_payload_bounded_and_citation_metadata():
             "language": "go",
             "symbol_name": "GetHistory",
             "package_name": "service/history",
+            "content_hash": "sha256-test-hash",
         },
         text="func GetHistory() { secret content must not be in vector payload }",
     )
@@ -70,6 +71,7 @@ def test_chunk_point_keeps_payload_bounded_and_citation_metadata():
     assert point["vector"] == [0.2, 0.8]
     assert point["payload"]["path"] == "service/history/api.go"
     assert point["payload"]["symbol_name"] == "GetHistory"
+    assert point["payload"]["content_hash"] == "sha256-test-hash"
     assert "text" not in point["payload"]
     assert "secret content" not in repr(point["payload"])
 

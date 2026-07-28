@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
+
+from incidentops.collector.client import CoreCollectorClient
 from incidentops.collector.hints import build
 from incidentops.collector.metadata import extract
 from incidentops.collector.redaction import redact
@@ -38,6 +41,64 @@ def test_collector_go_and_proto_metadata_and_hints_are_deterministic():
     proto_hints = build("api/history.proto", proto_text, "api_doc")
     assert {"History", "GetHistory", "Request"}.issubset(proto_metadata["symbol_names"])
     assert {hint["type"] for hint in proto_hints} == {"proto_symbol"}
+
+
+def test_collector_metadata_contains_repository_and_explainable_evidence_facts():
+    content = (
+        "# Deploy Guide\n"
+        "GET /v1/orders\n"
+        "release 2026.07\n"
+        "2026-07-01T12:00:00Z ERROR trace_id=tr-1 request_id=req-1 ERR_TIMEOUT\n"
+    )
+    metadata = extract(
+        "services/orders/docs/deploy.md",
+        content,
+        repo_name="orders-api",
+        branch="main",
+        commit_sha="abcdef123456",
+    )
+    assert metadata["repo_name"] == "orders-api"
+    assert metadata["branch"] == "main"
+    assert metadata["commit_sha"] == "abcdef123456"
+    assert metadata["package_path"] == "services/orders/docs"
+    assert metadata["service_name"] == "orders"
+    assert metadata["endpoint_candidates"] == ["/v1/orders"]
+    assert metadata["log_levels"] == ["ERROR"]
+    assert metadata["error_codes"] == ["ERR_TIMEOUT"]
+    assert metadata["trace_ids"] == ["tr-1"]
+    assert metadata["request_ids"] == ["req-1"]
+
+
+def test_collector_summary_merges_per_batch_core_diagnostics_without_raw_content():
+    from incidentops.collector.models import CollectorSummary
+
+    summary = CollectorSummary()
+    summary.record_core_diagnostics(
+        {
+            "last_batch_error_count": 2,
+            "last_batch_parser_error_reasons": {"malformed_content": 1, "embedding_failed": 1},
+            "last_batch_chunk_discard_reasons": {"chunk_limit_exceeded": 1},
+            "last_batch_embedding_failures": 1,
+        }
+    )
+    diagnostics = summary.diagnostics()
+    assert diagnostics["parser_error_count"] == 2
+    assert diagnostics["parser_error_reasons"] == {"embedding_failed": 1, "malformed_content": 1}
+    assert diagnostics["chunk_discard_reasons"] == {"chunk_limit_exceeded": 1}
+    assert diagnostics["embedding_failures"] == 1
+    assert "content" not in diagnostics
+
+
+def test_collector_source_registration_accepts_core_id_response():
+    client = CoreCollectorClient("http://core.test", "test-token")
+    client._client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(201, json={"id": "source-123"})),
+        base_url="http://core.test",
+    )
+    try:
+        assert client.register_source("project-123", "source") == "source-123"
+    finally:
+        client.close()
 
 
 def test_collector_inspection_reports_generated_and_unsupported_files(tmp_path: Path):

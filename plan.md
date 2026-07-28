@@ -156,7 +156,7 @@ Migration rules:
 - The cutover migration conditionally removes legacy vector artifacts for existing databases.
 - Validate clean installs and upgrades before every deployment.
 
-Azure preference is managed Qdrant Cloud in an Azure region with authentication and backups. A Qdrant Container App is a disposable demo option, not a production durability claim. Qdrant must not have unauthenticated public ingress.
+Azure target is a private self-hosted Qdrant service in Azure, with authenticated internal-only access, persistent storage, backups, health checks, and an explicit restore procedure. It must not have unauthenticated public ingress. This deployment choice still requires live Azure validation in Phase 5.
 
 ## Verification
 
@@ -185,6 +185,10 @@ Azure preference is managed Qdrant Cloud in an Azure region with authentication 
 
 Produce high-signal, inspectable retrieval units for broad engineering evidence before applying expensive ranking or generation.
 
+## Status
+
+Implemented and locally verified for the deterministic ingestion slice. Collector now resolves repository Git facts when present, adds bounded explainable metadata, and carries per-batch Core parser/indexing counters into sync diagnostics. Core emits source-aware chunks for the supported formats below, and retrieval/evidence packing recognizes those chunk types. A real local Collector-to-Core sync created six documents and nine chunks from the fixture; its repeat sync created zero chunks and marked all six documents unchanged. Remaining Phase 2 release gates are real-repository benchmarks, malformed-file coverage expansion, and Azure proof in Phase 5.
+
 ## Collector Deliverables
 
 Collector deterministically provides repository, branch, commit SHA, path, language, source type, size, modified time, content hash, and safe symbol/heading/endpoint hints. It redacts before transmission, negotiates Core capabilities, enforces batch limits, retries bounded failures, and reports partial success honestly.
@@ -202,20 +206,20 @@ Collector hints are advisory. Core creates canonical chunks and embeddings.
 ## Core Chunk Types
 
 ```text
-Go: go_package, go_function, go_method, go_struct, go_interface, go_fallback
+Go: go_module, go_function, go_method, go_struct, go_interface, go_fallback
 Python: python_module, python_function, python_class, python_fallback
 TypeScript: ts_module, ts_function, ts_class, ts_interface, ts_fallback
 Java: java_package, java_method, java_class, java_interface, java_fallback
 Protocol/API: proto_service, proto_rpc, proto_message, proto_enum,
-              openapi_endpoint, openapi_schema, openapi_security
+              openapi_endpoint, openapi_schema
 Docs: markdown_heading_section, markdown_table, markdown_procedure, markdown_faq
-Logs: log_time_window, log_error_burst, log_trace_group, log_exception_block
-Config: yaml_service_block, config_section, env_var_block, dependency_block
+Logs: log_time_window, log_error_burst
+Config: config_service_block, config_section, env_var_block, dependency_block
 Deploy: deploy_commit, deploy_diff, release_marker
 Incident: incident_symptom, incident_timeline, incident_root_cause, incident_action
 ```
 
-Every chunk preserves project/source/document/chunk IDs, source/chunk type, path, language, symbol, package, service, endpoint, line range, commit/deploy hashes, content hash, generated/vendor flags, and index version.
+Every chunk preserves project/source/document/chunk IDs, source/chunk type, path, line range, and available metadata such as language, symbol, package, service, endpoint, commit/deploy hashes, content hash, and index version. Generated and vendor paths are excluded before normalization rather than represented as searchable chunks.
 
 Chunking rules:
 

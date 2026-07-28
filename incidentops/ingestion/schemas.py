@@ -16,7 +16,7 @@ class RawChunk:
     """
 
     text: str
-    chunk_type: str  # function, log_window, markdown_section, deploy_diff, incident_section, api_endpoint
+    chunk_type: str  # source-aware type such as go_function, log_time_window, or markdown_heading_section
     source_type: str  # code, logs, runbook, incident, deploy, api_doc
 
     # Document-level context

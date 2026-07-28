@@ -114,3 +114,15 @@ def test_pack_evidence_prefers_highest_score_and_dedupes():
     assert packed[0]["chunk_type"] == "go_function"
     assert "code_path_match" in packed[0]["why_retrieved"]
     assert sum(len(item["text"]) for item in packed) <= 120
+
+
+def test_pack_evidence_recognizes_source_aware_chunk_types():
+    results = [
+        {"chunk": _chunk("service/history/handler.go", chunk_type="go_struct", source_type="unknown_text"), "fused_score": 0.9},
+        {"chunk": _chunk("api/history.yaml", chunk_type="openapi_endpoint", source_type="unknown_text"), "fused_score": 0.8},
+        {"chunk": _chunk("logs/history.log", chunk_type="log_error_burst", source_type="unknown_text"), "fused_score": 0.7},
+    ]
+
+    packed = pack_evidence(results)
+
+    assert [item["source_type"] for item in packed] == ["code", "api_doc", "logs"]

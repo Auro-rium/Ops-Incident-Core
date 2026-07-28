@@ -181,7 +181,7 @@ def classify_query_intent(query: str) -> QueryIntent:
         return QueryIntent(
             intent=INTENT_PREVIOUS_INCIDENT,
             preferred_source_types=["incident", "runbook", "logs"],
-            preferred_chunk_types=["incident_section", "markdown_section", "log_window"],
+            preferred_chunk_types=["incident_section", "incident_root_cause", "incident_timeline", "markdown_heading_section", "log_time_window"],
             query_terms=query_terms,
             explanation="query asks for previous incidents or historical comparisons",
         )
@@ -189,7 +189,7 @@ def classify_query_intent(query: str) -> QueryIntent:
         return QueryIntent(
             intent=INTENT_RUNBOOK_LOOKUP,
             preferred_source_types=["runbook", "incident", "deploy", "config"],
-            preferred_chunk_types=["markdown_section", "incident_section", "deploy_diff", "config_section"],
+            preferred_chunk_types=["markdown_procedure", "markdown_heading_section", "incident_action", "deploy_commit", "deploy_diff", "config_section"],
             query_terms=query_terms,
             explanation="query asks for runbooks, remediation, or operational procedures",
         )
@@ -201,18 +201,23 @@ def classify_query_intent(query: str) -> QueryIntent:
                 "go_function",
                 "go_method",
                 "go_type",
+                "go_struct",
+                "go_interface",
                 "python_function",
                 "python_class",
                 "ts_function",
                 "ts_class",
-                "java_function",
+                "ts_interface",
+                "java_method",
                 "java_class",
+                "java_interface",
                 "function",
                 "class",
                 "module",
                 "go_module",
                 "code_file",
-                "api_endpoint",
+                "openapi_endpoint",
+                "openapi_schema",
                 "proto_service",
                 "proto_rpc",
                 "proto_message",
@@ -233,7 +238,7 @@ def classify_query_intent(query: str) -> QueryIntent:
                 if _contains_any(lower, terms)
             ],
             preferred_source_types=["logs", "deploy", "incident", "runbook", "code"],
-            preferred_chunk_types=["log_window", "deploy_diff", "incident_section", "go_function", "function", "markdown_section"],
+            preferred_chunk_types=["log_time_window", "log_error_burst", "deploy_commit", "deploy_diff", "incident_root_cause", "incident_section", "go_function", "markdown_heading_section"],
             query_terms=query_terms,
             explanation="query asks for incident explanation, causality, or investigation support",
         )
@@ -241,7 +246,7 @@ def classify_query_intent(query: str) -> QueryIntent:
         return QueryIntent(
             intent=INTENT_DEPLOY_REGRESSION,
             preferred_source_types=["deploy", "logs", "incident", "code"],
-            preferred_chunk_types=["deploy_diff", "release_note", "log_window", "go_function", "function", "config_section"],
+            preferred_chunk_types=["deploy_commit", "deploy_diff", "release_note", "log_time_window", "go_function", "config_service_block", "config_section"],
             query_terms=query_terms,
             explanation="query asks about deploys, releases, diffs, or changes before an incident",
         )
@@ -249,7 +254,7 @@ def classify_query_intent(query: str) -> QueryIntent:
         return QueryIntent(
             intent=INTENT_RUNTIME_INCIDENT,
             preferred_source_types=["logs", "runbook", "deploy", "incident"],
-            preferred_chunk_types=["log_window", "error_cluster", "markdown_section", "deploy_diff"],
+            preferred_chunk_types=["log_time_window", "log_error_burst", "markdown_procedure", "deploy_commit", "deploy_diff"],
             query_terms=query_terms,
             explanation="query asks for runtime symptoms, errors, traces, or timeouts",
         )
@@ -258,7 +263,7 @@ def classify_query_intent(query: str) -> QueryIntent:
             intent=INTENT_API_CONTRACT,
             secondary_intents=[INTENT_CODE_LOCATION] if "implemented" in lower else [],
             preferred_source_types=["api_doc", "code", "runbook", "config"],
-            preferred_chunk_types=["api_endpoint", "proto_service", "proto_rpc", "proto_message", "proto_enum", "go_function", "function", "markdown_section"],
+            preferred_chunk_types=["openapi_endpoint", "openapi_schema", "proto_service", "proto_rpc", "proto_message", "proto_enum", "go_function", "markdown_heading_section"],
             query_terms=query_terms,
             explanation="query asks about API, route, RPC, protobuf, or endpoint contracts",
         )
@@ -267,7 +272,7 @@ def classify_query_intent(query: str) -> QueryIntent:
             intent=INTENT_CONFIG_LOOKUP,
             secondary_intents=[INTENT_CODE_LOCATION] if "implemented" in lower else [],
             preferred_source_types=["config", "deploy", "runbook", "code"],
-            preferred_chunk_types=["config_section", "deploy_diff", "markdown_section", "go_function", "function"],
+            preferred_chunk_types=["config_service_block", "env_var_block", "dependency_block", "config_section", "deploy_commit", "deploy_diff", "markdown_heading_section", "go_function"],
             query_terms=query_terms,
             explanation="query asks about configuration, deployment config, environment, or dependency settings",
         )
@@ -275,14 +280,14 @@ def classify_query_intent(query: str) -> QueryIntent:
         return QueryIntent(
             intent=INTENT_ARCHITECTURE,
             preferred_source_types=["runbook", "api_doc", "code", "config"],
-            preferred_chunk_types=["markdown_section", "module", "go_module", "proto_service", "proto_message", "config_section"],
+            preferred_chunk_types=["markdown_heading_section", "markdown_table", "python_module", "go_module", "proto_service", "proto_message", "config_service_block", "config_section"],
             query_terms=query_terms,
             explanation="query asks for architecture, boundaries, or design context",
         )
     return QueryIntent(
         intent=INTENT_GENERIC,
         preferred_source_types=["runbook", "code", "config", "api_doc"],
-        preferred_chunk_types=["markdown_section", "module", "go_module", "go_function", "function", "config_section"],
+        preferred_chunk_types=["markdown_heading_section", "python_module", "go_module", "go_function", "config_section"],
         query_terms=query_terms,
         explanation="balanced retrieval because query intent is ambiguous",
     )

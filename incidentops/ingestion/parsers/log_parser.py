@@ -107,7 +107,7 @@ def _build_log_chunk(
 
     return RawChunk(
         text=text,
-        chunk_type="log_window",
+        chunk_type="log_time_window",
         source_type="logs",
         document_path=file_path,
         doc_type="log",
@@ -147,7 +147,7 @@ def _error_clusters(lines: list[str], *, file_path: str, service_name: str | Non
             end_line=start_line + len(bounded) - 1,
         )
         if window:
-            window.chunk_type = "error_cluster"
+            window.chunk_type = "log_error_burst"
             window.metadata["error_line_count"] = len(error_lines)
             window.metadata["cluster_end_line"] = end_line
             clusters.append(window)

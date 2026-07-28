@@ -217,6 +217,9 @@ def test_source_registry_and_collector_sync_batch_ingest_flow():
     assert batch_payload["diagnostics"]["collector_version"] == "0.1.1"
     assert batch_payload["diagnostics"]["schema_version"] == "normalized-document-v1"
     assert batch_payload["diagnostics"]["core_api_version"] == "0.5.0"
+    assert batch_payload["diagnostics"]["last_batch_parser_error_reasons"] == {}
+    assert batch_payload["diagnostics"]["last_batch_chunk_discard_reasons"].get("chunk_limit_exceeded", 0) == 0
+    assert batch_payload["diagnostics"]["last_batch_embedding_failures"] == 0
 
     finish = client.post(
         f"/v1/sources/{source_id}/syncs/{sync_id}/finish",
@@ -478,6 +481,7 @@ def test_batch_errors_do_not_fail_whole_request():
     assert len(payload["errors"]) == 1
     assert payload["errors"][0]["code"] == "parser_exception"
     assert payload["diagnostics"]["parser_error_reasons"]["parser_exception"] == 1
+    assert payload["diagnostics"]["last_batch_parser_error_reasons"] == {"parser_exception": 1}
 
     finish = client.post(
         f"/v1/sources/{source_id}/syncs/{sync_id}/finish",

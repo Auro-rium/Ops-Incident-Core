@@ -31,35 +31,43 @@ def _source_type_from_chunk(chunk) -> str:
     if raw_source_type == "deploy_history":
         return "deploy"
     ct = chunk.chunk_type or ""
-    if ct == "deploy_diff":
+    if ct in {"deploy_diff", "deploy_commit"}:
         return "deploy"
-    if ct in {"log_window", "error_cluster"}:
+    if ct in {"log_window", "error_cluster", "log_time_window", "log_error_burst"}:
         return "logs"
     if ct in {
         "function",
         "class",
         "module",
         "code_file",
+        "go_fallback",
+        "python_fallback",
+        "ts_fallback",
+        "js_fallback",
+        "java_fallback",
         "go_function",
         "go_method",
         "go_type",
+        "go_struct",
+        "go_interface",
         "go_module",
-        "go_fallback",
         "python_function",
         "python_class",
         "ts_function",
         "ts_class",
-        "java_function",
+        "ts_interface",
+        "java_method",
         "java_class",
+        "java_interface",
     }:
         return "code"
-    if ct == "incident_section":
+    if ct in {"incident_section", "incident_symptom", "incident_timeline", "incident_root_cause", "incident_action"}:
         return "incident"
-    if ct in ("api_endpoint", "proto_service", "proto_rpc", "proto_message", "proto_enum", "proto_preamble", "proto_fallback"):
+    if ct in ("api_endpoint", "openapi_endpoint", "openapi_schema", "proto_service", "proto_rpc", "proto_message", "proto_enum", "proto_preamble", "proto_fallback"):
         return "api_doc"
-    if ct == "config_section":
+    if ct in ("config_section", "config_service_block", "env_var_block", "dependency_block", "config_fallback"):
         return "config"
-    if ct in ("markdown_section",):
+    if ct in ("markdown_section", "markdown_heading_section", "markdown_procedure", "markdown_table", "markdown_faq"):
         doc_path = metadata.get("document_path", "")
         path = getattr(chunk, "document_path", doc_path) or ""
         lower_path = path.lower()

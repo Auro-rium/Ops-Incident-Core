@@ -65,7 +65,7 @@ def parse_deploy_history(content: str, file_path: str) -> list[RawChunk]:
         chunks.append(
             RawChunk(
                 text=text,
-                chunk_type="deploy_diff",
+                chunk_type="deploy_commit",
                 source_type="deploy",
                 document_path=file_path,
                 doc_type="deploy",
@@ -75,7 +75,7 @@ def parse_deploy_history(content: str, file_path: str) -> list[RawChunk]:
                 section_title=f"deploy {deploy_hash}",
                 start_line=1,
                 end_line=1,
-                metadata=deploy,
+                metadata={**deploy, "kind": "deploy_commit"},
             )
         )
     return chunks

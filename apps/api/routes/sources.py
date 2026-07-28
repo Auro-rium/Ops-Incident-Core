@@ -697,6 +697,11 @@ def _merge_batch_diagnostics(
     diagnostics["last_batch_skipped_invalid"] = result.skipped_invalid
     diagnostics["last_batch_chunks_created"] = result.chunks_created
     diagnostics["last_batch_error_count"] = error_count
+    diagnostics["last_batch_parser_error_reasons"] = dict(
+        result.diagnostics.get("parser_error_reasons") or failure_reason_counts(error.code for error in result.errors)
+    )
+    diagnostics["last_batch_chunk_discard_reasons"] = dict(result.diagnostics.get("chunk_discard_reasons") or {})
+    diagnostics["last_batch_embedding_failures"] = int(result.diagnostics.get("embedding_failures", 0) or 0)
     diagnostics["documents_created"] = int(diagnostics.get("documents_created", 0) or 0) + result.created
     diagnostics["documents_updated"] = int(diagnostics.get("documents_updated", 0) or 0) + result.updated
     diagnostics["skipped_unchanged"] = int(diagnostics.get("skipped_unchanged", 0) or 0) + result.skipped_unchanged
