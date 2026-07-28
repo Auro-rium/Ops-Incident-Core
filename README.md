@@ -34,6 +34,7 @@ The governing principle is: **deterministic ingestion first; model use only afte
 | Retrieval | Combines Qdrant vector candidates, PostgreSQL lexical search, exact metadata/path matches, and a bounded architecture graph with weighted reciprocal-rank fusion. |
 | Answers | Uses direct cited evidence for decisive code/config/API lookups; optional synthesis is evidence-only and compact. |
 | Operations | Provides typed ingestion failures, sync diagnostics, readiness reports, workers, queues, evaluator/observer/logging runs, metrics, traces, purge, and reindex semantics. |
+| Operator console | Uses same-origin `/api` proxying to Core and surfaces readiness, retrieval, investigations, evaluations, and operational findings without browser access to storage or model credentials. |
 
 ## Architecture
 
@@ -91,6 +92,20 @@ Reranking is conditional. Exact symbol, path, configuration, and API-contract ma
 - Project/source purge and reindex endpoints with admin authorization.
 - A small, safe MCP server that proxies Core capabilities.
 - Deterministic local-hash embeddings for development and CI without a paid key.
+
+## Operator Console
+
+`apps/web` is a compact Next.js operations console, not a separate source of
+truth. It stores a login token only in browser session storage and proxies every
+request through its same-origin `/api/*` route to `CORE_API_BASE_URL`. The
+browser does not receive Qdrant, PostgreSQL, Redis, Collector, Azure OpenAI, or
+GPU endpoint credentials.
+
+After sign-in, the console can create or select a membership-scoped project and
+display Core-backed runtime status, readiness coverage/gaps, Collector sources,
+cited search results, cautious investigations, workflow events, evaluations,
+and observer findings. It intentionally has no local-folder ingestion control:
+production ingestion remains an authenticated Collector workflow.
 
 ## What We Do Not Claim
 
@@ -164,6 +179,7 @@ Project data routes require a bearer token and project membership. The complete 
 |---|---|
 | Login | `POST /v1/auth/login` |
 | Create a project | `POST /v1/projects` |
+| List accessible projects | `GET /v1/projects` |
 | Register a source | `POST /v1/projects/{project_id}/sources` |
 | Register a Collector | `POST /v1/projects/{project_id}/collectors/register` |
 | Start, upload, finish a sync | `POST /v1/sources/{source_id}/syncs/start`, `POST /documents/batch`, `POST /finish` |
@@ -173,6 +189,7 @@ Project data routes require a bearer token and project membership. The complete 
 | Run a cautious investigation | `POST /v1/investigate` |
 | Inspect safe runtime status | `GET /v1/runtime/status` |
 | Purge evidence | `DELETE /v1/projects/{project_id}/sources/{source_id}`, `DELETE /v1/projects/{project_id}` |
+| Inspect source integrity | `GET /v1/projects/{project_id}/sources/{source_id}/integrity` |
 | Run operational checks | `POST /v1/projects/{project_id}/operations/observer/runs`, `POST /v1/projects/{project_id}/operations/logging/runs` |
 | Inspect operational results | `GET /v1/projects/{project_id}/operations/runs`, `GET /v1/projects/{project_id}/operations/findings` |
 
@@ -199,7 +216,12 @@ Development and tests can use deterministic local-hash embeddings. Production co
 
 No production model should be loaded inside Collector or Core. Private GPU endpoints need private networking and immutable model revisions; that live path is not yet proven. Details are in [technical.md](technical.md#model-boundary).
 
-Pushes to `core` run lint, migration checks, API startup checks, and unit/integration tests. Azure build, deployment, migrations, bootstrap, and smoke are intentionally **manual-only** through GitHub Actions `workflow_dispatch`, so a normal push cannot create cloud cost.
+Pushes to `core` run Core lint/migration/API/unit/integration checks plus the
+Next.js typecheck and production build. Azure image build, deployment,
+migrations, bootstrap, smoke, and the bounded release benchmark remain
+**manual-only** through GitHub Actions `workflow_dispatch`, so a normal push
+cannot create cloud cost. Select `run_release_benchmark` only when the required
+Azure secrets, Qdrant endpoint, and bounded benchmark budget are available.
 
 ## Documentation Map
 

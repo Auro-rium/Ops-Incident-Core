@@ -383,12 +383,34 @@ Deployment order:
 7. Run health, readiness, Collector sync, search, investigate, workflow, and
    MCP smoke checks.
 
-GitHub Actions runs lint, migrations, API startup, and unit/integration tests
-on pushes to `core`. Azure build/deploy/migration/smoke is manual-only through
-`workflow_dispatch`; this prevents an ordinary code push from creating cloud
-resources or costs. The manual deployment job validates Bicep after Azure OIDC
-login and before resource creation. A successful manual run is required before
-claiming live Azure validation.
+GitHub Actions runs lint, migrations, API startup, unit/integration tests, and
+a Next.js production type/build check on pushes to `core`. Azure
+build/deploy/migration/smoke is manual-only through `workflow_dispatch`; this
+prevents an ordinary code push from creating cloud resources or costs. The
+manual deployment job builds the Core and frontend images, validates both Bicep
+templates, runs migrations/bootstrap/smoke, and can run the bounded release
+benchmark only when `run_release_benchmark=true`. A successful manual run is
+required before claiming live Azure validation.
+
+### Browser Boundary
+
+The Next.js console in `apps/web` is a same-origin client of Core. Its
+`/api/[...path]` route forwards selected browser headers to the fixed runtime
+`CORE_API_BASE_URL`; it does not proxy arbitrary URLs. Qdrant, PostgreSQL,
+Redis, Collector, and model credentials are never browser configuration. The
+container serves port 3000, so Azure Container Apps ingress targets port 3000.
+The console displays Core-backed project/readiness/source/search/investigation/
+workflow/evaluation/operations state and intentionally has no local-path ingest
+control.
+
+### Benchmark Harness Boundary
+
+`python -m incidentops.collector benchmark` is a release harness, not Collector
+daemon behavior. It can query Core only after a sync to record authorized search
+and source-integrity counters. The production Collector daemon still only
+discovers, redacts, normalizes, batches, and syncs evidence. Integrity output is
+aggregate-only: document/chunk counts and duplicate chunk rows grouped by
+document, type, line range, and text digest; it never returns source text.
 
 ## Evaluation and Proof Standard
 

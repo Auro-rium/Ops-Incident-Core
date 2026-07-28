@@ -67,6 +67,21 @@ class TestHealthEndpoint:
 
 
 class TestIngestEndpoint:
+    def test_project_listing_is_authenticated_and_membership_scoped(self, client):
+        headers = login(client)
+        created = client.post(
+            "/v1/projects",
+            headers=headers,
+            json={"name": f"project-list-{os.urandom(4).hex()}", "demo_mode": False},
+        )
+        assert created.status_code == 201
+
+        assert client.get("/v1/projects").status_code == 401
+        response = client.get("/v1/projects", headers=headers)
+        assert response.status_code == 200
+        project = next(item for item in response.json() if item["project_id"] == created.json()["project_id"])
+        assert project["role"] == "admin"
+
     def test_ingest_fixture_data(self, client):
         headers = login(client)
         response = client.post(

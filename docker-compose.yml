@@ -139,7 +139,8 @@ services:
     build:
       context: ./apps/web
     environment:
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8000}
+      NEXT_PUBLIC_API_BASE_URL: /api
+      CORE_API_BASE_URL: ${CORE_API_BASE_URL:-http://api:8000}
     ports:
       - "3000:3000"
     depends_on:

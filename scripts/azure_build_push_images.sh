@@ -8,7 +8,7 @@ AZURE_LOCATION="${AZURE_LOCATION:?AZURE_LOCATION is required}"
 ACR_NAME="${ACR_NAME:?ACR_NAME is required}"
 IMAGE_TAG="${IMAGE_TAG:-$(git -C "$ROOT_DIR" rev-parse --short HEAD)}"
 CORE_REPO_PATH="${CORE_REPO_PATH:-$ROOT_DIR}"
-BUILD_FRONTEND="${BUILD_FRONTEND:-false}"
+BUILD_FRONTEND="${BUILD_FRONTEND:-true}"
 
 detect_repo() {
   local env_value="$1"
@@ -27,9 +27,10 @@ detect_repo() {
   return 1
 }
 
+FRONTEND_REPO_PATH_INPUT="${FRONTEND_REPO_PATH:-}"
 FRONTEND_REPO_PATH=""
 if [[ "$BUILD_FRONTEND" == "true" ]]; then
-  FRONTEND_REPO_PATH="$(detect_repo "${FRONTEND_REPO_PATH:-}" \
+  FRONTEND_REPO_PATH="$(detect_repo "$FRONTEND_REPO_PATH_INPUT" \
     "$ROOT_DIR/apps/web")" || {
     echo "Frontend build context not found. Set FRONTEND_REPO_PATH." >&2
     exit 1

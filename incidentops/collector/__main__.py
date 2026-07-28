@@ -12,6 +12,7 @@ from pathlib import Path
 from incidentops.config.settings import Settings
 
 from .service import CollectorService
+from .benchmark import CoreBenchmarkClient
 
 
 def main() -> None:
@@ -47,6 +48,9 @@ def main() -> None:
     benchmark.add_argument("--batch-size", type=int, default=100)
     benchmark.add_argument("--changed-file-target", default="README.md")
     benchmark.add_argument("--output", type=Path)
+    benchmark.add_argument("--include-path", action="append", default=[])
+    benchmark.add_argument("--exclude-path", action="append", default=[])
+    benchmark.add_argument("--query", action="append", default=[])
     args = parser.parse_args()
     service = CollectorService(Settings())
     if args.command == "inspect":
@@ -89,12 +93,16 @@ def main() -> None:
                 collector_name="incidentops-benchmark", environment="azure",
                 batch_size=args.batch_size, max_files=args.max_files,
                 repo_name=Path(args.repo_url.rstrip("/")).stem,
+                include_paths=args.include_path or None,
+                exclude_paths=args.exclude_path or None,
             )
             repeat_summary = service.sync(
                 checkout, project_id=args.project_id, source_name=args.source_name,
                 collector_name="incidentops-benchmark", environment="azure",
                 batch_size=args.batch_size, max_files=args.max_files,
                 repo_name=Path(args.repo_url.rstrip("/")).stem,
+                include_paths=args.include_path or None,
+                exclude_paths=args.exclude_path or None,
             )
             changed = checkout / args.changed_file_target
             changed_file_update_detected = False
@@ -107,8 +115,32 @@ def main() -> None:
                     collector_name="incidentops-benchmark", environment="azure",
                     batch_size=args.batch_size, max_files=args.max_files,
                     repo_name=Path(args.repo_url.rstrip("/")).stem,
+                    include_paths=args.include_path or None,
+                    exclude_paths=args.exclude_path or None,
                 )
                 changed_file_update_detected = changed_summary.documents_updated > 0
+            benchmark_client = CoreBenchmarkClient(
+                os.environ["INCIDENTOPS_API_URL"], os.environ["INCIDENTOPS_TOKEN"]
+            )
+            try:
+                latest_sync = benchmark_client.latest_sync(summary.source_id or "")
+                integrity = benchmark_client.source_integrity(args.project_id, summary.source_id or "")
+                searches = []
+                for query in args.query:
+                    response = benchmark_client.search(args.project_id, query)
+                    results = response.get("results") or []
+                    searches.append(
+                        {
+                            "query": query,
+                            "search_result_count": int(response.get("total", len(results)) or 0),
+                            "query_intent": response.get("query_intent"),
+                            "top_evidence_paths": [item.get("document_path") for item in results[:5]],
+                            "latency_ms": response.get("latency_ms"),
+                            "source_type_distribution": (response.get("debug") or {}).get("source_type_distribution", {}),
+                        }
+                    )
+            finally:
+                benchmark_client.close()
             report = {
                 "benchmark": True,
                 "repo_url": args.repo_url,
@@ -117,6 +149,12 @@ def main() -> None:
                 "changed_file_path": args.changed_file_target,
                 "changed_file_update_detected": changed_file_update_detected,
                 "changed_sync_documents": changed_summary.documents_synced if changed_summary else 0,
+                "latest_core_sync_status": latest_sync.get("status"),
+                "latest_core_sync_diagnostics": latest_sync.get("diagnostics", {}),
+                "duplicate_chunks_after_update": integrity.get("duplicate_chunk_rows"),
+                "duplicate_chunk_groups_after_update": integrity.get("duplicate_chunk_groups"),
+                "search_queries": searches,
+                "search_pass": bool(searches) and all(item["search_result_count"] > 0 for item in searches),
             }
             if args.output:
                 args.output.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")

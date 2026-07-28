@@ -42,6 +42,7 @@ from incidentops.schemas.api import (
     CollectorRegisterResponse,
     PurgeResponse,
     ReindexResponse,
+    SourceIntegrityResponse,
     SourceCreateRequest,
     SourceResponse,
     SyncFinishRequest,
@@ -252,6 +253,51 @@ async def reindex_source(
         chunks_reindexed=chunks_reindexed,
         chunks_created=0,
         diagnostics=diagnostics,
+    )
+
+
+@router.get("/projects/{project_id}/sources/{source_id}/integrity", response_model=SourceIntegrityResponse)
+async def source_integrity(
+    project_id: uuid.UUID,
+    source_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+    user=Depends(get_current_user),
+):
+    """Expose bounded source integrity counters without exposing evidence text."""
+    await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.viewer)
+    source = await _require_source(db, source_id)
+    if source.project_id != project_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Source not found for project")
+    document_count = await _count(
+        db, select(func.count()).select_from(Document).where(Document.project_id == project_id, Document.source_id == source_id)
+    )
+    chunk_count = await _count(
+        db, select(func.count()).select_from(Chunk).where(Chunk.project_id == project_id, Chunk.source_id == source_id)
+    )
+    duplicate_groups = (
+        select(
+            Chunk.document_id,
+            Chunk.chunk_type,
+            Chunk.start_line,
+            Chunk.end_line,
+            func.md5(Chunk.text).label("text_digest"),
+            func.count().label("row_count"),
+        )
+        .where(Chunk.project_id == project_id, Chunk.source_id == source_id)
+        .group_by(Chunk.document_id, Chunk.chunk_type, Chunk.start_line, Chunk.end_line, func.md5(Chunk.text))
+        .having(func.count() > 1)
+        .subquery()
+    )
+    duplicate_chunk_groups = await _count(db, select(func.count()).select_from(duplicate_groups))
+    duplicate_chunk_rows = await _count(db, select(func.coalesce(func.sum(duplicate_groups.c.row_count), 0)))
+    return SourceIntegrityResponse(
+        source_id=source_id,
+        document_count=document_count,
+        chunk_count=chunk_count,
+        duplicate_chunk_groups=duplicate_chunk_groups,
+        duplicate_chunk_rows=duplicate_chunk_rows,
+        active_index_version=settings.vector_index_version,
     )
 
 

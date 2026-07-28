@@ -111,3 +111,18 @@ def test_collector_inspection_reports_generated_and_unsupported_files(tmp_path: 
     assert summary.source_type_counts["code"] == 1
     assert summary.skipped_reasons["generated_file"] == 1
     assert summary.skipped_reasons["unsupported_extension"] == 1
+
+
+def test_collector_inspection_honors_explicit_benchmark_scope(tmp_path: Path):
+    (tmp_path / "README.md").write_text("# Read me", encoding="utf-8")
+    (tmp_path / "service").mkdir()
+    (tmp_path / "service" / "history.go").write_text("package service", encoding="utf-8")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "helper.go").write_text("package tools", encoding="utf-8")
+    summary = CollectorService(Settings()).inspect(
+        tmp_path,
+        include_paths=["README.md", "service/**", "tools/**"],
+        exclude_paths=["tools/**"],
+    )
+    assert summary.files_seen == 2
+    assert summary.source_type_counts["code"] == 1

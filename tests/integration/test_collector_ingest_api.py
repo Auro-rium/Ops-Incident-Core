@@ -148,6 +148,7 @@ def test_capabilities_endpoint_returns_collector_contract():
     assert payload["endpoints"]["batch_upload"] == "/v1/sources/{source_id}/documents/batch"
     assert payload["endpoints"]["register_collector"] == "/v1/projects/{project_id}/collectors/register"
     assert payload["endpoints"]["run_events"] == "/v1/runs/{run_id}/events"
+    assert payload["endpoints"]["source_integrity"] == "/v1/projects/{project_id}/sources/{source_id}/integrity"
 
 
 def test_source_registry_and_collector_sync_batch_ingest_flow():
@@ -262,6 +263,12 @@ def test_source_registry_and_collector_sync_batch_ingest_flow():
     assert latest_payload["diagnostics"]["collector_version"] == "0.1.1"
     assert latest_payload["diagnostics"]["schema_version"] == "normalized-document-v1"
     assert latest_payload["diagnostics"]["core_api_version"] == "0.5.0"
+
+    integrity = client.get(f"/v1/projects/{project_id}/sources/{source_id}/integrity", headers=headers)
+    assert integrity.status_code == 200
+    assert integrity.json()["document_count"] == 6
+    assert integrity.json()["chunk_count"] == batch_payload["chunks_created"]
+    assert integrity.json()["duplicate_chunk_rows"] == 0
 
     listed_sources = client.get(f"/v1/projects/{project_id}/sources", headers=headers)
     source_payload = next(item for item in listed_sources.json() if item["id"] == source_id)

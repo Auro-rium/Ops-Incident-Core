@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import os
 import subprocess
@@ -25,9 +26,15 @@ class CollectorService:
     def __init__(self, settings: Settings):
         self.settings = settings
 
-    def inspect(self, root: Path, max_files: int | None = None) -> CollectorSummary:
+    def inspect(
+        self,
+        root: Path,
+        max_files: int | None = None,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
+    ) -> CollectorSummary:
         summary = CollectorSummary()
-        for item in self._discover(root, max_files):
+        for item in self._discover(root, max_files, include_paths=include_paths, exclude_paths=exclude_paths):
             summary.files_seen += 1
             reason = self._skip_reason(item)
             if reason:
@@ -52,6 +59,8 @@ class CollectorService:
         repo_name: str | None = None,
         branch: str | None = None,
         commit_sha: str | None = None,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
     ) -> CollectorSummary:
         token = os.getenv("INCIDENTOPS_TOKEN", "").strip()
         base_url = os.getenv("INCIDENTOPS_API_URL", "").strip()
@@ -72,9 +81,11 @@ class CollectorService:
             collector_id = client.register_collector(project_id, collector_name, environment, "core-collector/1.0.0")
             source_id = client.register_source(project_id, source_name)
             sync_id = client.start_sync(source_id, collector_id, summary.diagnostics())
+            summary.source_id = source_id
+            summary.sync_id = sync_id
             batch: list[dict] = []
             max_batch_bytes = int(limits.get("max_batch_bytes") or self.settings.max_batch_bytes)
-            for item in self._discover(root, max_files):
+            for item in self._discover(root, max_files, include_paths=include_paths, exclude_paths=exclude_paths):
                 summary.files_seen += 1
                 reason = self._skip_reason(item)
                 if reason:
@@ -175,7 +186,14 @@ class CollectorService:
             "commit_sha": commit_sha or _git_value(repository_root, ["rev-parse", "HEAD"]),
         }
 
-    def _discover(self, root: Path, max_files: int | None) -> Iterator[DiscoveredFile]:
+    def _discover(
+        self,
+        root: Path,
+        max_files: int | None,
+        *,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
+    ) -> Iterator[DiscoveredFile]:
         root = root.resolve()
         if not root.is_dir():
             raise ValueError(f"collector root is not a directory: {root}")
@@ -184,6 +202,10 @@ class CollectorService:
             if not path.is_file():
                 continue
             relative = path.relative_to(root).as_posix()
+            if include_paths and not any(fnmatch.fnmatchcase(relative, pattern) for pattern in include_paths):
+                continue
+            if exclude_paths and any(fnmatch.fnmatchcase(relative, pattern) for pattern in exclude_paths):
+                continue
             stat = path.stat()
             yield DiscoveredFile(str(path), relative, stat.st_size, datetime.fromtimestamp(stat.st_mtime, timezone.utc))
             emitted += 1

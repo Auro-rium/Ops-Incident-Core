@@ -14,6 +14,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_release_benchmark:
+        description: "Run the bounded cloud benchmark and query-class release proof after smoke."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -115,10 +120,27 @@ jobs:
             kill "$(cat api.pid)" >/dev/null 2>&1 || true
           fi
 
+  frontend-tests:
+    name: Frontend build and typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - working-directory: apps/web
+        run: npm ci
+      - working-directory: apps/web
+        run: npm run typecheck
+      - working-directory: apps/web
+        run: npm run build
+
   deploy:
     name: Build, deploy, migrate, and smoke Azure
     runs-on: ubuntu-latest
-    needs: core-tests
+    needs: [core-tests, frontend-tests]
     if: github.event_name == 'workflow_dispatch'
     environment: azure-demo
     steps:
@@ -151,7 +173,9 @@ jobs:
 
       - name: Validate Azure infrastructure template
         working-directory: Ops-Incident-Core
-        run: az bicep build --file infra/azure/main.bicep --stdout >/dev/null
+        run: |
+          az bicep build --file infra/azure/main.bicep --stdout >/dev/null
+          az bicep build --file infra/azure/benchmark-job.bicep --stdout >/dev/null
 
       - name: Validate required variables
         run: |
@@ -175,13 +199,13 @@ jobs:
       - name: Build and push images
         working-directory: Ops-Incident-Core
         env:
-          BUILD_FRONTEND: "false"
+          BUILD_FRONTEND: "true"
         run: scripts/azure_build_push_images.sh
 
       - name: Deploy Azure resources
         working-directory: Ops-Incident-Core
         env:
-          DEPLOY_FRONTEND: "false"
+          DEPLOY_FRONTEND: "true"
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           BOOTSTRAP_ADMIN_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
@@ -212,7 +236,15 @@ jobs:
       - name: Azure smoke
         working-directory: Ops-Incident-Core
         env:
-          FRONTEND_URL: ""
+          FRONTEND_APP_NAME: ${{ vars.AZURE_NAME_PREFIX }}-frontend
           SMOKE_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
           SMOKE_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
         run: scripts/azure_smoke.sh
+
+      - name: Bounded Azure release benchmark
+        if: inputs.run_release_benchmark
+        working-directory: Ops-Incident-Core
+        env:
+          SMOKE_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
+          SMOKE_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
+        run: scripts/azure_user_e2e.sh

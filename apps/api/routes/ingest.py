@@ -41,6 +41,7 @@ from incidentops.schemas.api import (
     CreateProjectResponse,
     IngestRequest,
     IngestResponse,
+    ProjectSummaryResponse,
     PurgeResponse,
 )
 from incidentops.security.audit import record_audit_event
@@ -85,6 +86,30 @@ async def create_project(
     await db.commit()
     await db.refresh(project)
     return CreateProjectResponse(project_id=project.id, name=project.name, created_at=project.created_at.isoformat())
+
+
+@router.get("/projects", response_model=list[ProjectSummaryResponse])
+async def list_projects(
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_user),
+):
+    """Return only projects to which the caller has an explicit membership."""
+    result = await db.execute(
+        select(Project, ProjectMember.role)
+        .join(ProjectMember, ProjectMember.project_id == Project.id)
+        .where(ProjectMember.user_id == user.id)
+        .order_by(Project.created_at.desc())
+        .limit(100)
+    )
+    return [
+        ProjectSummaryResponse(
+            project_id=project.id,
+            name=project.name,
+            role=role.value,
+            created_at=project.created_at,
+        )
+        for project, role in result.all()
+    ]
 
 
 @router.delete("/projects/{project_id}", response_model=PurgeResponse)

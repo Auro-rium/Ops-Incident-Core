@@ -15,6 +15,8 @@ class DiscoveredFile:
 
 @dataclass
 class CollectorSummary:
+    source_id: str | None = None
+    sync_id: str | None = None
     files_seen: int = 0
     files_skipped: int = 0
     documents_normalized: int = 0
@@ -63,6 +65,8 @@ class CollectorSummary:
 
     def diagnostics(self) -> dict[str, Any]:
         return {
+            "source_id": self.source_id,
+            "sync_id": self.sync_id,
             "total_files_seen": self.files_seen,
             "files_seen": self.files_seen,
             "files_skipped": self.files_skipped,

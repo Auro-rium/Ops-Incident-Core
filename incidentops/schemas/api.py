@@ -28,6 +28,15 @@ class CreateProjectResponse(BaseModel):
     created_at: str
 
 
+class ProjectSummaryResponse(BaseModel):
+    """Membership-scoped project metadata for the operator console."""
+
+    project_id: UUID
+    name: str
+    role: str
+    created_at: datetime
+
+
 class IngestRequest(BaseModel):
     path: str = Field(..., min_length=1)
 
@@ -106,6 +115,15 @@ class ReindexResponse(BaseModel):
     chunks_reindexed: int
     chunks_created: int = 0
     diagnostics: dict[str, Any] = Field(default_factory=dict)
+
+
+class SourceIntegrityResponse(BaseModel):
+    source_id: UUID
+    document_count: int
+    chunk_count: int
+    duplicate_chunk_groups: int = 0
+    duplicate_chunk_rows: int = 0
+    active_index_version: str
 
 
 class CollectorRegisterRequest(BaseModel):

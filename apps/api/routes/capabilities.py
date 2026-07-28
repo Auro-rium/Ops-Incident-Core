@@ -43,6 +43,7 @@ async def get_capabilities(settings: Settings = Depends(get_settings_dep)) -> Ca
             "run_status": "/v1/runs/{run_id}",
             "run_events": "/v1/runs/{run_id}/events",
             "readiness": "/v1/projects/{project_id}/readiness",
+            "source_integrity": "/v1/projects/{project_id}/sources/{source_id}/integrity",
             "mcp": settings.mcp_path,
         },
     )

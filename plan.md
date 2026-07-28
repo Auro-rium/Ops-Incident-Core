@@ -421,6 +421,21 @@ Core MCP exposes authenticated capability, runtime, readiness, search, investiga
 
 Expose the real system clearly, deploy it reproducibly, and prove the architecture on broad repositories and operational evidence without fake metrics or local services.
 
+## Implementation Status
+
+The Core-backed operator console, same-origin browser-to-Core proxy,
+membership-scoped project listing, source-integrity counters, Azure frontend
+Container App port wiring, bounded benchmark-job arguments, and manual CI
+release-benchmark gate are implemented and locally statically validated. The
+frontend image is now included by the manual Azure workflow instead of being
+deliberately skipped.
+
+This is not live Azure proof. No current document may claim that the frontend,
+private Qdrant connectivity, Collector benchmark, GPU reranker, browser smoke,
+or release thresholds ran successfully in Azure until an actual manual workflow
+run produces retained measurements. Azure network exposure also requires a live
+security review before it can be called production-grade.
+
 ## Basic Frontend
 
 Use the existing `apps/web` Next.js application unless an audit proves replacement is necessary. Keep it compact and operational.

@@ -22,7 +22,7 @@ param collectorImageTag string = 'latest'
 param frontendImageTag string = 'latest'
 
 @description('Whether to deploy the frontend Container App.')
-param deployFrontend bool = false
+param deployFrontend bool = true
 
 @secure()
 @description('PostgreSQL admin password.')
@@ -734,7 +734,7 @@ resource frontend 'Microsoft.App/containerApps@2024-03-01' = if (deployFrontend)
       ]
       ingress: {
         external: true
-        targetPort: 8080
+        targetPort: 3000
         transport: 'auto'
         allowInsecure: false
       }
@@ -750,12 +750,12 @@ resource frontend 'Microsoft.App/containerApps@2024-03-01' = if (deployFrontend)
           image: frontendImage
           env: [
             {
-              name: 'NEXT_PUBLIC_INCIDENTOPS_API_URL'
+              name: 'CORE_API_BASE_URL'
               value: 'https://${coreApi.properties.configuration.ingress.fqdn}'
             }
             {
               name: 'NEXT_PUBLIC_API_BASE_URL'
-              value: 'https://${coreApi.properties.configuration.ingress.fqdn}'
+              value: '/api'
             }
             {
               name: 'NEXT_PUBLIC_APP_ENV'
@@ -909,47 +909,44 @@ set -eu
 : "${INCIDENTOPS_PROJECT_ID:?INCIDENTOPS_PROJECT_ID is required}"
 : "${INCIDENTOPS_TOKEN:?INCIDENTOPS_TOKEN is required}"
 REPORT="/tmp/incidentops-benchmark-report.json"
-WORKDIR="/tmp/incidentops-benchmark"
 REPO_URL="${REPO_URL:-https://github.com/temporalio/temporal.git}"
 SOURCE_NAME="${SOURCE_NAME:-temporal}"
 MAX_FILES="${MAX_FILES:-1500}"
 BATCH_SIZE="${BATCH_SIZE:-100}"
 CHANGED_FILE_TARGET="${CHANGED_FILE_TARGET:-README.md}"
-set -- benchmark \
+set -- python -m incidentops.collector benchmark \
   --repo-url "$REPO_URL" \
-  --core-url "$INCIDENTOPS_API_URL" \
   --project-id "$INCIDENTOPS_PROJECT_ID" \
   --source-name "$SOURCE_NAME" \
   --output "$REPORT" \
-  --workdir "$WORKDIR" \
   --max-files "$MAX_FILES" \
   --batch-size "$BATCH_SIZE" \
   --changed-file-target "$CHANGED_FILE_TARGET" \
-  --include-path README.md \
-  --include-path docs/** \
-  --include-path api/** \
-  --include-path proto/** \
-  --include-path schema/** \
-  --include-path service/** \
-  --include-path common/** \
-  --include-path temporal/** \
-  --include-path cmd/** \
-  --include-path config/** \
-  --include-path develop/** \
-  --exclude-path .git/** \
-  --exclude-path .github/** \
-  --exclude-path temporaltest/** \
-  --exclude-path tools/** \
-  --exclude-path bin/** \
-  --exclude-path dist/** \
-  --exclude-path coverage/**
+  --include-path "README.md" \
+  --include-path "docs/**" \
+  --include-path "api/**" \
+  --include-path "proto/**" \
+  --include-path "schema/**" \
+  --include-path "service/**" \
+  --include-path "common/**" \
+  --include-path "temporal/**" \
+  --include-path "cmd/**" \
+  --include-path "config/**" \
+  --include-path "develop/**" \
+  --exclude-path ".git/**" \
+  --exclude-path ".github/**" \
+  --exclude-path "temporaltest/**" \
+  --exclude-path "tools/**" \
+  --exclude-path "bin/**" \
+  --exclude-path "dist/**" \
+  --exclude-path "coverage/**"
 for key in QUERY_1 QUERY_2 QUERY_3 QUERY_4 QUERY_5; do
   eval value="\${$key:-}"
   if [ -n "$value" ]; then
     set -- "$@" --query "$value"
   fi
 done
-python -m incidentops.collector benchmark --repo-url "$REPO_URL" --project-id "$INCIDENTOPS_PROJECT_ID" --source-name "$SOURCE_NAME" --max-files "$MAX_FILES" --batch-size "$BATCH_SIZE" --changed-file-target "$CHANGED_FILE_TARGET" --output "$REPORT"
+"$@"
 python - "$REPORT" <<'INNERPY'
 import json, sys
 report = json.load(open(sys.argv[1], encoding='utf-8'))

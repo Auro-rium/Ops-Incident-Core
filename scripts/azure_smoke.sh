@@ -8,6 +8,7 @@ NAME_PREFIX="${NAME_PREFIX:?NAME_PREFIX is required}"
 CORE_API_APP_NAME="${CORE_API_APP_NAME:-${NAME_PREFIX}-core-api}"
 COLLECTOR_APP_NAME="${COLLECTOR_APP_NAME:-${NAME_PREFIX}-collector}"
 MCP_APP_NAME="${MCP_APP_NAME:-${NAME_PREFIX}-mcp}"
+FRONTEND_APP_NAME="${FRONTEND_APP_NAME:-${NAME_PREFIX}-frontend}"
 API_URL="${API_URL:-}"
 FRONTEND_URL="${FRONTEND_URL:-}"
 SMOKE_EMAIL="${SMOKE_EMAIL:-${BOOTSTRAP_ADMIN_EMAIL:-admin@incidentops.local}}"
@@ -32,7 +33,7 @@ fi
 if [[ -z "$FRONTEND_URL" ]]; then
   FRONTEND_URL="$(az containerapp show \
     --resource-group "$AZURE_RESOURCE_GROUP" \
-    --name incidentops-frontend \
+    --name "$FRONTEND_APP_NAME" \
     --query 'properties.configuration.ingress.fqdn' \
     --output tsv \
     --only-show-errors 2>/dev/null || true)"
@@ -75,7 +76,9 @@ def request(method: str, path_or_url: str, *, token: str | None = None, payload:
             try:
                 return json.loads(body)
             except json.JSONDecodeError:
-                return {"_raw": body[:300]}
+                # The caller may verify a public HTML marker. Keep it in memory
+                # for that check, but never print the response body.
+                return {"_raw": body}
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise SystemExit(f"{method} {url} failed with HTTP {exc.code}: {body[:300]}") from exc
@@ -97,7 +100,9 @@ runtime = request("GET", "/v1/runtime/status", token=token)
 if runtime.get("local_fallback_active"):
     raise SystemExit(f"Runtime status reports local_fallback_active=true: {runtime}")
 if frontend_url:
-    request("GET", frontend_url)
+    page = request("GET", frontend_url)
+    if "IncidentOps Console" not in page.get("_raw", ""):
+        raise SystemExit("Frontend did not return the IncidentOps Console shell.")
 with open(work_file, "w", encoding="utf-8") as handle:
     json.dump({"token": token, "project_id": project_id}, handle)
 print("Core health/ready/capabilities/login/project/runtime checks passed.")

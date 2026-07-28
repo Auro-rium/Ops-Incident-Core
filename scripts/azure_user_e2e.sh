@@ -39,7 +39,7 @@ FRONTEND_URL="${FRONTEND_URL:-https://$frontend_fqdn}"
 echo "Frontend URL: $FRONTEND_URL"
 echo "Core API URL: $API_URL"
 
-python3 - "$API_URL" "$SMOKE_EMAIL" "$SMOKE_PASSWORD" "$PROJECT_ID" "$PROJECT_NAME" "$SEARCH_QUERY" "$INVESTIGATE_QUERY" "$STATE_FILE" <<'PY'
+python3 - "$API_URL" "$FRONTEND_URL" "$SMOKE_EMAIL" "$SMOKE_PASSWORD" "$PROJECT_ID" "$PROJECT_NAME" "$SEARCH_QUERY" "$INVESTIGATE_QUERY" "$STATE_FILE" <<'PY'
 from __future__ import annotations
 
 import json
@@ -48,7 +48,7 @@ import time
 import urllib.error
 import urllib.request
 
-api_url, email, password, project_id, project_name, search_query, investigate_query, state_file = sys.argv[1:9]
+api_url, frontend_url, email, password, project_id, project_name, search_query, investigate_query, state_file = sys.argv[1:10]
 api_url = api_url.rstrip('/')
 
 
@@ -77,6 +77,11 @@ def request(method: str, path: str, *, token: str | None = None, payload: dict |
 health = request('GET', '/health')[1]
 ready = request('GET', '/ready')[1]
 capabilities = request('GET', '/v1/capabilities')[1]
+frontend_request = urllib.request.Request(frontend_url)
+with urllib.request.urlopen(frontend_request, timeout=30) as response:
+    frontend_page = response.read().decode('utf-8', errors='replace')
+if 'IncidentOps Console' not in frontend_page:
+    raise SystemExit('Frontend did not return the IncidentOps Console shell.')
 login = request('POST', '/v1/auth/login', payload={'email': email, 'password': password})[1]
 token = login['access_token']
 if not project_id:
@@ -98,7 +103,7 @@ state = {
 }
 with open(state_file, 'w', encoding='utf-8') as handle:
     json.dump(state, handle)
-print('Core health/ready/capabilities/login/runtime checks passed.')
+print('Frontend/Core health/ready/capabilities/login/runtime checks passed.')
 print(f"project_id: {project_id}")
 print(f"runtime: provider={runtime.get('llm_provider')} embedding={runtime.get('embedding_backend')} retrieval={runtime.get('retrieval_backend')} worker={runtime.get('worker_mode')}")
 PY
@@ -214,7 +219,8 @@ for source in sources:
     latest_sync = payload
     break
 _, readiness, readiness_latency = request('GET', f'/v1/projects/{project_id}/readiness')
-_, search, search_latency = request('POST', '/v1/search', payload={'project_id': project_id, 'query': search_query, 'top_k': 5})
+_, search, search_latency = request('POST', '/v1/search', payload={'project_id': project_id, 'query': search_query, 'top_k': 5, 'debug': True})
+_, answer, answer_latency = request('POST', '/v1/answer', payload={'project_id': project_id, 'query': search_query, 'top_k': 5})
 _, investigation, investigation_latency = request('POST', '/v1/investigate', payload={'project_id': project_id, 'query': investigate_query, 'top_k': 5})
 search_results = search.get('results', []) or []
 if int(search.get('total', len(search_results)) or 0) <= 0:
@@ -231,8 +237,13 @@ metrics = {
     'top_evidence_paths': [item.get('document_path') for item in search_results[:5]],
     'investigation_citation_count': len(investigation.get('citations') or investigation.get('evidence') or []),
     'search_latency_ms': search.get('latency_ms', search_latency),
+    'answer_latency_ms': answer.get('latency_ms', answer_latency),
     'investigation_latency_ms': investigation.get('latency_ms', investigation_latency),
     'readiness_latency_ms': readiness_latency,
+    'query_intent': search.get('query_intent'),
+    'retrieval_branch_latencies': (search.get('debug') or {}).get('retrieval_branch_latencies', {}),
+    'llm_usage': answer.get('llm_usage') or {},
+    'llm_latency_ms': answer.get('llm_latency_ms'),
 }
 state['metrics'] = metrics
 state['latest_sync'] = latest_sync
@@ -268,6 +279,10 @@ print(f"readiness_score: {metrics.get('readiness_score')}")
 print(f"search_result_count: {metrics.get('search_result_count')}")
 print(f"investigation_citation_count: {metrics.get('investigation_citation_count')}")
 print(f"search_latency_ms: {metrics.get('search_latency_ms')}")
+print(f"answer_latency_ms: {metrics.get('answer_latency_ms')}")
 print(f"investigation_latency_ms: {metrics.get('investigation_latency_ms')}")
-print('token_usage: unavailable unless Core provider response includes it')
+print(f"query_intent: {metrics.get('query_intent')}")
+print(f"retrieval_branch_latencies: {metrics.get('retrieval_branch_latencies')}")
+print(f"token_usage: {metrics.get('llm_usage')}")
+print(f"llm_latency_ms: {metrics.get('llm_latency_ms')}")
 PY
