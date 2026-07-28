@@ -11,6 +11,7 @@ from incidentops.db.models import ProjectRole
 from incidentops.llm.prompts import build_answer_prompt
 from incidentops.llm.provider import get_llm_provider
 from incidentops.observability.metrics import incr, observe_latency
+from incidentops.operations.service import record_operational_event
 from incidentops.retrieval.citation_builder import build_citations
 from incidentops.retrieval.evidence_packer import pack_evidence
 from incidentops.retrieval.hybrid_search import hybrid_search
@@ -136,6 +137,22 @@ async def answer(
     incr("answer_requests_total")
     observe_latency("answer", latency_ms)
     observe_latency("answer_latency", latency_ms)
+    await record_operational_event(
+        db,
+        project_id=body.project_id,
+        category="answer",
+        event_type="answer_completed",
+        severity="medium" if synthesis_mode == "insufficient_evidence" else "info",
+        payload={
+            "query_intent": query_intent.intent,
+            "synthesis_mode": synthesis_mode,
+            "latency_ms": latency_ms,
+            "llm_latency_ms": llm_latency_ms,
+            "citation_count": len(evidence_items),
+            "warning_count": len(warnings),
+            "llm_usage": llm_usage or {},
+        },
+    )
     return AnswerResponse(
         question=body.query,
         query_intent=query_intent.intent,

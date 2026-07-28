@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from incidentops.observability.metrics import incr, observe_latency
+from incidentops.observability.tracing import traced
 from incidentops.retrieval.model_gateway import RemoteModelError, remote_rerank
 
 logger = logging.getLogger("incidentops.retrieval.reranker")
@@ -140,13 +141,14 @@ async def rerank_with_debug_async(
             started = time.time()
             candidate_limit = min(len(results), settings.rag_rerank_max_candidates)
             candidates = results[:candidate_limit]
-            scores = await remote_rerank(
-                query,
-                [
-                    {"id": result["chunk"].id, "text": result["chunk"].text}
-                    for result in candidates
-                ],
-            )
+            with traced("retrieval.rerank"):
+                scores = await remote_rerank(
+                    query,
+                    [
+                        {"id": result["chunk"].id, "text": result["chunk"].text}
+                        for result in candidates
+                    ],
+                )
             for result, score in zip(candidates, scores):
                 result["rerank_score"] = score
             candidates.sort(key=lambda item: item.get("rerank_score", 0.0), reverse=True)

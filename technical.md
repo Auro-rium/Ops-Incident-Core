@@ -154,6 +154,7 @@ Core data ownership is project-scoped:
 | Qdrant collection | embeddings and bounded vector filter payloads |
 | `index_jobs` | durable async parse/embed/publish work |
 | runs, events, approvals, evals | workflow and evaluation state |
+| `operational_runs`, `operational_findings`, `operational_events` | durable evaluator/observer/logging state and redacted runtime observations |
 | audit events | security and destructive-operation traceability |
 
 Changed `external_id` content replaces old chunks before publishing new chunks.
@@ -312,11 +313,49 @@ POST   /v1/search
 POST   /v1/answer
 POST   /v1/investigate
 POST   /v1/runs
+GET    /v1/projects/{project_id}/operations/runs
+GET    /v1/projects/{project_id}/operations/findings
+POST   /v1/projects/{project_id}/operations/observer/runs
+POST   /v1/projects/{project_id}/operations/logging/runs
 ```
 
 `/v1/runtime/status` is authenticated and returns only safe configuration
 state, such as selected provider/backend, worker mode, and local-fallback
 status. It never returns tokens, connection strings, passwords, or API keys.
+
+## Operational Agents and Runtime Hardening
+
+Phase 4 adds three bounded operational agents. They are worker jobs with
+durable project-scoped records, not autonomous services with data-plane
+authority.
+
+| Agent | Input | Output | Explicit non-authority |
+|---|---|---|---|
+| Evaluator | persisted query-class evaluation cases | recall, source-type, zero-result, citation, latency, and deterministic model-usage summaries | cannot change ranking or configuration |
+| Observer | recent syncs, index-job state, and latest evaluation summary | typed threshold findings and recommended actions | cannot delete, reindex, or modify evidence |
+| Logging aggregate | bounded, redacted operational events | category/severity/event-type counts | cannot retain raw documents or prompts |
+
+`operational_events` records bounded metadata from ingestion, async indexing,
+search, answer, investigation, evaluator, observer, and worker failures. The
+redaction boundary removes content, evidence, prompts, credentials, tokens,
+passwords, API keys, authorization values, and connection strings before an
+event is persisted. Events are useful for identifying where a pipeline is
+degrading; they are not an evidence archive.
+
+Worker jobs use per-type timeouts. Indexing, evaluator, observer, and logging
+jobs can retry within `WORKER_JOB_MAX_RETRIES`; workflow approval actions are
+not retried by this mechanism. Terminal job failures store only a safe error
+code and emit a redacted operational event. The API exposes read-only
+operational runs and findings to project viewers and restricts job submission
+to project administrators.
+
+OpenTelemetry spans cover worker dispatch, query embeddings, retrieval score
+fusion, remote reranking, and evaluator execution when `ENABLE_OTEL=true`.
+Metrics are best effort: a metrics failure must never fail a request or a
+worker job. Project cache invalidation occurs after indexing changes, source
+purge, project purge, and reindex refresh. At this stage query classification
+is cached project-safely; full retrieval-result caching remains a later,
+measured optimization rather than an undocumented correctness risk.
 
 ## Runtime and Deployment
 
@@ -402,6 +441,7 @@ implemented but not live-validated cloud GPU retrieval path.
 | Redis Streams queue and durable index jobs | Yes | Unit/integration coverage | Postgres remains the business-state authority. |
 | Azure OpenAI and Azure ML client contracts | Yes | Configuration/startup validation | No current live Azure proof is recorded. |
 | Azure Container Apps infrastructure and scripts | Yes | Static/script validation only | Manual deployment is required and cloud resources incur cost. |
+| Phase 4 operational agents and event redaction | Yes | Unit/integration coverage | Cloud durability and thresholds still need live Azure validation. |
 | MCP facade | Yes | Unit/integration coverage | MCP delegates to Core HTTP APIs and cannot ingest. |
 
 ## Operational Invariants

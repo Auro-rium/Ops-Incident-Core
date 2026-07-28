@@ -24,12 +24,17 @@ from incidentops.db.models import (
     ProjectRole,
     RetrievalResult,
     RetrievalRun,
+    OperationalEvent,
+    OperationalFinding,
+    OperationalRun,
     Source,
     SourceSync,
 )
 from incidentops.ingestion.pipeline import run_ingestion
 from incidentops.observability.metrics import incr
+from incidentops.operations.service import record_operational_event
 from incidentops.retrieval.embeddings import embed_texts_async
+from incidentops.retrieval.cache import invalidate_project
 from incidentops.retrieval.vector_store import QdrantVectorStore, VectorStoreError
 from incidentops.schemas.api import (
     CreateProjectRequest,
@@ -107,6 +112,18 @@ async def delete_project(
         ),
         "agent_runs": await _count(db, select(func.count()).select_from(AgentRun).where(AgentRun.project_id == project_id)),
         "eval_runs": await _count(db, select(func.count()).select_from(EvalRun).where(EvalRun.project_id == project_id)),
+        "operational_runs": await _count(
+            db,
+            select(func.count()).select_from(OperationalRun).where(OperationalRun.project_id == project_id),
+        ),
+        "operational_findings": await _count(
+            db,
+            select(func.count()).select_from(OperationalFinding).where(OperationalFinding.project_id == project_id),
+        ),
+        "operational_events": await _count(
+            db,
+            select(func.count()).select_from(OperationalEvent).where(OperationalEvent.project_id == project_id),
+        ),
         "memberships": await _count(
             db,
             select(func.count()).select_from(ProjectMember).where(ProjectMember.project_id == project_id),
@@ -149,6 +166,7 @@ async def delete_project(
     )
     await db.execute(delete(Project).where(Project.id == project_id))
     await db.commit()
+    await invalidate_project(project_id)
     return PurgeResponse(deleted=True, resource_type="project", resource_id=project_id, counts=counts)
 
 
@@ -208,6 +226,21 @@ async def ingest(
     incr("chunks_created_total", stats["chunks_created"])
     incr("documents_skipped_total", stats["files_skipped"])
     incr("parser_errors_total", len(stats.get("parser_errors", [])))
+    await record_operational_event(
+        db,
+        project_id=project_id,
+        category="ingestion",
+        event_type="local_ingest_completed",
+        severity="medium" if stats.get("parser_errors") else "info",
+        payload={
+            "documents_ingested": stats["documents_ingested"],
+            "chunks_created": stats["chunks_created"],
+            "files_skipped": stats["files_skipped"],
+            "parser_error_count": len(stats.get("parser_errors", [])),
+            "source_type_counts": stats.get("source_type_counts", {}),
+            "chunk_type_counts": stats.get("chunk_type_counts", {}),
+        },
+    )
     await record_audit_event(
         db,
         action="local_ingest_finished",

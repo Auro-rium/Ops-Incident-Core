@@ -73,6 +73,8 @@ jobs:
       DEMO_MODE_PUBLIC: "false"
       ALLOW_DEMO_PROJECT_BYPASS: "true"
       RATE_LIMIT_BACKEND: memory
+      USER_REQUEST_LIMIT: 1000
+      PROJECT_INGESTION_LIMIT: 1000
       WORKER_MODE: inline
       JOB_QUEUE_BACKEND: inline
       METRICS_BACKEND: memory
@@ -88,6 +90,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv run --extra dev ruff check .
       - run: uv run --extra dev alembic upgrade head
+      - run: uv run --extra dev python scripts/check_migrations.py
       - name: Bootstrap local CI admin
         run: uv run --extra dev python -m incidentops.security.bootstrap_admin --email admin@incidentops.local --password incidentops
       - name: Start API for integration tests

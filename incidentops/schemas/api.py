@@ -180,6 +180,39 @@ class RuntimeStatusResponse(BaseModel):
     gpu_rag_configured: bool = False
 
 
+class OperationalRunRequest(BaseModel):
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class OperationalRunResponse(BaseModel):
+    operational_run_id: UUID
+    project_id: UUID
+    run_type: str
+    status: str
+    summary: dict[str, Any] = Field(default_factory=dict)
+    attempts: int = 0
+    model_call_count: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    error_code: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class OperationalFindingResponse(BaseModel):
+    finding_id: UUID
+    operational_run_id: UUID
+    project_id: UUID
+    finding_type: str
+    severity: str
+    status: str
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    threshold: dict[str, Any] = Field(default_factory=dict)
+    recommended_action: str
+    created_at: datetime
+
+
 class ReadinessLatestSync(BaseModel):
     sync_id: str | None = None
     status: str | None = None

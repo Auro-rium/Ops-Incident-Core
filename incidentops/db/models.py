@@ -69,6 +69,13 @@ class EvalStatus(str, enum.Enum):
     failed = "failed"
 
 
+class OperationalRunStatus(str, enum.Enum):
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -414,6 +421,95 @@ class RetrievalResult(Base):
     run: Mapped["RetrievalRun"] = relationship(back_populates="results")
 
     __table_args__ = (Index("ix_retrieval_results_run_id", "retrieval_run_id"),)
+
+
+class OperationalRun(Base):
+    """Durable, project-scoped execution record for bounded operational agents."""
+
+    __tablename__ = "operational_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    run_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[OperationalRunStatus] = mapped_column(
+        Enum(OperationalRunStatus), nullable=False, default=OperationalRunStatus.queued
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_json: Mapped[dict | None] = mapped_column(JSONB, default=dict)
+    summary_json: Mapped[dict | None] = mapped_column(JSONB, default=dict)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    model_call_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "run_type", "idempotency_key", name="uq_operational_runs_idempotency"),
+        Index("ix_operational_runs_project_created", "project_id", "created_at"),
+        Index("ix_operational_runs_status_created", "status", "created_at"),
+        Index("ix_operational_runs_project_type", "project_id", "run_type"),
+    )
+
+
+class OperationalFinding(Base):
+    """A bounded, sanitized observer finding; it never contains raw evidence."""
+
+    __tablename__ = "operational_findings"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    operational_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("operational_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    finding_type: Mapped[str] = mapped_column(String(96), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
+    evidence_json: Mapped[dict | None] = mapped_column(JSONB, default=dict)
+    threshold_json: Mapped[dict | None] = mapped_column(JSONB, default=dict)
+    recommended_action: Mapped[str] = mapped_column(Text, nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_operational_findings_project_created", "project_id", "created_at"),
+        Index("ix_operational_findings_run", "operational_run_id"),
+        Index("ix_operational_findings_project_severity", "project_id", "severity"),
+    )
+
+
+class OperationalEvent(Base):
+    """Sanitized event data used by the logging agent and operational summaries."""
+
+    __tablename__ = "operational_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    operational_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("operational_runs.id", ondelete="SET NULL")
+    )
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(96), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, default="info")
+    payload_json: Mapped[dict | None] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_operational_events_project_created", "project_id", "created_at"),
+        Index("ix_operational_events_run", "operational_run_id"),
+        Index("ix_operational_events_category_created", "category", "created_at"),
+    )
 
 
 class AgentRun(Base):

@@ -136,6 +136,7 @@ def test_runtime_status_reports_cloud_mode_without_secret_values():
             mcp_token="token-value",
             mcp_transport="streamable-http",
             qdrant_url="https://qdrant.example.com",
+            qdrant_collection="incidentops_chunks",
         )
     )
 

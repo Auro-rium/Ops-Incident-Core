@@ -7,6 +7,7 @@ from apps.api.deps import check_rate_limit, enforce_query_limits, ensure_project
 from incidentops.config.settings import Settings
 from incidentops.db.models import ProjectRole
 from incidentops.investigation.service import investigate as run_investigation
+from incidentops.operations.service import record_operational_event
 from incidentops.schemas.api import (
     CitationInfo,
     EvidenceItem,
@@ -61,6 +62,22 @@ async def investigate(
         resource_id=body.project_id,
         request=request,
         metadata={"task_type": investigation.task_type, "top_k": body.top_k},
+    )
+    await record_operational_event(
+        db,
+        project_id=body.project_id,
+        category="investigation",
+        event_type="investigation_completed",
+        severity="medium" if investigation.confidence in {"low", "unknown"} else "info",
+        payload={
+            "task_type": investigation.task_type,
+            "query_intent": investigation.query_intent,
+            "confidence": investigation.confidence,
+            "latency_ms": latency_ms,
+            "citation_count": len(investigation.citations),
+            "missing_data_count": len(investigation.missing_data),
+            "investigation_supported": investigation.investigation_supported,
+        },
     )
     return InvestigationResponse(
         question=investigation.question,

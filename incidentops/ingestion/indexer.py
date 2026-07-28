@@ -45,6 +45,7 @@ from incidentops.ingestion.parsers.log_parser import parse_logs
 from incidentops.ingestion.parsers.markdown_parser import parse_markdown
 from incidentops.ingestion.schemas import RawChunk
 from incidentops.retrieval.graph_relations import build_chunk_relations
+from incidentops.retrieval.cache import invalidate_project
 from incidentops.retrieval.vector_store import QdrantVectorStore, VectorStoreError, chunk_point
 
 logger = logging.getLogger("incidentops.ingestion.indexer")
@@ -152,6 +153,8 @@ async def index_normalized_documents(
         "chunk_type_counts": result.chunk_type_counts,
         "embedding_backend": result.embedding_backend,
     }
+    if result.created or result.updated:
+        await invalidate_project(project_id)
     return result
 
 

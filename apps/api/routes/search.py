@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from apps.api.deps import check_rate_limit, enforce_query_limits, ensure_project_access, get_current_user, get_db, get_settings_dep
 from incidentops.config.settings import Settings
 from incidentops.observability.metrics import incr, observe_latency
+from incidentops.operations.service import record_operational_event
 from incidentops.retrieval.citation_builder import build_citations
 from incidentops.retrieval.evidence_packer import pack_evidence
 from incidentops.retrieval.hybrid_search import hybrid_search, hybrid_search_with_debug
@@ -92,6 +93,21 @@ async def search(
         "source_types": _count_values(item["source_type"] for item in evidence),
         "chunk_types": _count_values(item.get("chunk_type") or "unknown" for item in evidence),
     }
+    await record_operational_event(
+        db,
+        project_id=body.project_id,
+        category="retrieval",
+        event_type="search_completed",
+        severity="medium" if not evidence else "info",
+        payload={
+            "query_intent": query_intent.intent,
+            "result_count": len(hits),
+            "latency_ms": latency_ms,
+            "source_type_distribution": evidence_mix["source_types"],
+            "chunk_type_distribution": evidence_mix["chunk_types"],
+            "rerank_mode": (rerank_debug or {}).get("mode"),
+        },
+    )
     return SearchResponse(
         query=body.query,
         results=hits,

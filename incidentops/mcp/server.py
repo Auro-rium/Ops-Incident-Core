@@ -103,6 +103,24 @@ async def get_run_events(run_id: str) -> list[dict[str, Any]]:
     return [payload]
 
 
+@mcp.tool()
+async def get_eval_summary(project_id: str) -> dict[str, Any]:
+    """Return the latest persisted deterministic evaluation summary for a project."""
+    payload = await _request("GET", "/v1/evals")
+    if not isinstance(payload, list):
+        return {"status": "unavailable"}
+    matches = [item for item in payload if item.get("project_id") == project_id]
+    if not matches:
+        return {"status": "no_eval_runs", "project_id": project_id}
+    latest = matches[0]
+    return {
+        "project_id": project_id,
+        "eval_run_id": latest.get("eval_run_id"),
+        "status": latest.get("status"),
+        "summary": latest.get("summary") or {},
+    }
+
+
 def main() -> None:
     transport = settings.mcp_transport.strip().lower()
     if transport not in {"stdio", "sse", "streamable-http"}:

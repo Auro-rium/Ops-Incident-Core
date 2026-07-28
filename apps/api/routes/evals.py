@@ -11,6 +11,7 @@ from incidentops.config.settings import Settings
 from incidentops.db.models import EvalRun, EvalStatus, ProjectMember, ProjectRole
 from incidentops.eval.runner import create_eval_run, resolve_cases_path, run_eval_persisted
 from incidentops.observability.metrics import incr
+from incidentops.operations.service import RUN_EVALUATOR, create_operational_run
 from incidentops.schemas.api import EvalRunRequest, EvalRunResponse
 from incidentops.security.audit import record_audit_event
 from incidentops.worker.queue import get_job_queue
@@ -65,8 +66,16 @@ async def run_eval_endpoint(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if settings.worker_mode == "queue":
         run = await create_eval_run(db, body.project_id)
+        operational_run = await create_operational_run(
+            db,
+            body.project_id,
+            RUN_EVALUATOR,
+            request={"eval_run_id": str(run.id), "top_k": body.top_k},
+            idempotency_key=f"eval:{run.id}",
+        )
     else:
         run = await run_eval_persisted(db, body.project_id, top_k=body.top_k, cases_path=cases_path, settings=settings)
+        operational_run = None
     await record_audit_event(
         db,
         action="eval_run_created",
@@ -88,14 +97,14 @@ async def run_eval_endpoint(
             resource_type="eval_run",
             resource_id=run.id,
             request=request,
-            metadata={"top_k": body.top_k, "queue_backend": settings.job_queue_backend},
+            metadata={"top_k": body.top_k, "queue_backend": settings.job_queue_backend, "operational_run_id": str(operational_run.id)},
         )
         await db.flush()
         await db.commit()
         try:
             await get_job_queue(settings).enqueue(
-                "execute_eval_run",
-                {"eval_run_id": str(run.id), "top_k": body.top_k, "cases_path": cases_path},
+                "execute_evaluator_agent",
+                {"eval_run_id": str(run.id), "operational_run_id": str(operational_run.id), "top_k": body.top_k, "cases_path": cases_path},
             )
         except Exception as exc:
             error = _safe_error(exc)
@@ -127,7 +136,7 @@ async def run_eval_endpoint(
 
 
 def _safe_error(exc: Exception) -> str:
-    return str(exc).replace("\n", " ")[:1000]
+    return exc.__class__.__name__.lower()[:64]
 
 
 @router.get("/{eval_run_id}", response_model=EvalRunResponse)

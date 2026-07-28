@@ -30,7 +30,9 @@ from incidentops.ingestion.normalized import (
     validate_normalized_document,
 )
 from incidentops.observability.metrics import incr
+from incidentops.operations.service import record_operational_event
 from incidentops.retrieval.embeddings import embed_texts_async
+from incidentops.retrieval.cache import invalidate_project
 from incidentops.retrieval.vector_store import QdrantVectorStore, VectorStoreError
 from incidentops.schemas.api import (
     BatchIngestErrorResponse,
@@ -165,6 +167,7 @@ async def delete_source(
         metadata={"source_id": str(source_id), "source_name": source.name, "delete_counts": counts},
     )
     await db.commit()
+    await invalidate_project(project_id)
     return PurgeResponse(deleted=True, resource_type="source", resource_id=source_id, counts=counts)
 
 
@@ -229,7 +232,20 @@ async def reindex_source(
             "chunks_created": 0,
         },
     )
+    await record_operational_event(
+        db,
+        project_id=project_id,
+        category="indexing",
+        event_type="source_reindex_refreshed",
+        payload={
+            "source_id": str(source_id),
+            "reindex_mode": "refresh_existing_chunks",
+            "documents_reindexed": documents_reindexed,
+            "chunks_reindexed": chunks_reindexed,
+        },
+    )
     await db.commit()
+    await invalidate_project(project_id)
     return ReindexResponse(
         source_id=source_id,
         documents_reindexed=documents_reindexed,
@@ -463,6 +479,29 @@ async def ingest_documents_batch(
     incr("chunks_created_total", result.chunks_created)
     incr("documents_skipped_total", result.skipped_unchanged + result.skipped_invalid)
     incr("parser_errors_total", len(all_errors))
+    await record_operational_event(
+        db,
+        project_id=source.project_id,
+        category="ingestion",
+        event_type="documents_batch_completed",
+        severity="medium" if all_errors else "info",
+        payload={
+            "source_id": str(source.id),
+            "sync_id": str(sync.id),
+            "received": len(body.documents),
+            "created": result.created,
+            "updated": result.updated,
+            "skipped_unchanged": result.skipped_unchanged,
+            "skipped_invalid": result.skipped_invalid,
+            "chunks_created": result.chunks_created,
+            "parser_error_count": len(all_errors),
+            "embedding_failures": int(
+                (result.diagnostics or {}).get("embedding_failures", 0) or 0
+            ),
+            "async_indexing": settings.rag_async_indexing,
+            "index_jobs_queued": queued_index_jobs,
+        },
+    )
     await record_audit_event(
         db,
         action="documents_batch_ingested",

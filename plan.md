@@ -21,7 +21,7 @@ Evidence source
   -> frontend, MCP, metrics, traces, and audit events
 ```
 
-The work is organized into five phases. A phase is complete only after its acceptance criteria and verification gates pass. Static compilation is not cloud proof, and no metric may be published without a real measured run.
+The work is organized into six phases. A phase is complete only after its acceptance criteria and verification gates pass. Static compilation is not cloud proof, and no metric may be published without a real measured run.
 
 ## Current Context
 
@@ -349,6 +349,15 @@ Authorized diagnostics expose intent/confidence, budgets, branch counts/latencie
 
 # Phase 4: Evaluator, Observer, and Logging Agents with Runtime Hardening
 
+## Implementation Status
+
+Implemented in Core with migration-backed operational runs/findings/events,
+worker dispatch, bounded retry/timeout handling, project-scoped endpoints,
+redacted event payloads, metrics, tracing hooks, and local unit/integration/
+smoke verification. Cloud queue durability, OpenTelemetry export, and
+threshold behavior remain Phase 5 Azure validation gates; they are not claimed
+as live proof by this document.
+
 ## Goal
 
 Operate RAG quality as a measurable system using bounded worker agents with durable state, typed inputs/outputs, timeouts, retries, audit events, and model-call budgets.
@@ -406,7 +415,7 @@ Core MCP exposes authenticated capability, runtime, readiness, search, investiga
 - Cached repeat retrieval is below 250 ms where cloud network conditions permit.
 - Cache invalidation prevents deleted or stale vectors from appearing.
 
-# Phase 5: Basic Frontend, Azure Deployment, Live Benchmarks, and Release Proof
+# Phase 5: Basic Frontend, Azure Validation, Live Benchmarks, and Release Proof
 
 ## Goal
 
@@ -450,6 +459,11 @@ Only frontend and authenticated Core API ingress are public. MCP is protected. C
 
 CI/CD must run lint/tests/evals, build images, validate Bicep, push to ACR, run migrations/checks, deploy, verify Qdrant dimension, bootstrap through secrets, and run cloud, MCP, browser, and bounded post-deploy eval smokes. GitHub OIDC subscription and role configuration must be proven before claiming CI/CD works.
 
+Azure is the active cloud target through the end of this phase. Azure workflows,
+Bicep, deployment scripts, model manifests, and smoke coverage must continue to
+be maintained until the Phase 6 AWS cutover gates pass. They are not removed or
+allowed to silently rot before then.
+
 ## Live Benchmark Matrix
 
 - Temporal for Go, proto, services, and architecture.
@@ -476,9 +490,73 @@ Required reports include repository/commit, file and skip counts, documents, chu
 - No local service or model is required for final cloud proof.
 - Browser and MCP paths return real Core-backed data.
 
+# Phase 6: AWS-Only Production Cutover
+
+## Goal
+
+Make AWS the only supported cloud deployment target, prove the complete product
+path there, then remove Azure runtime and delivery code after AWS validation.
+This is a clean reingestion cutover, not a database or vector copy.
+
+## AWS Target
+
+```text
+us-east-1
+ECS Fargate: Core API, worker, Collector, frontend, MCP, migration/bootstrap jobs
+RDS PostgreSQL: business state, chunks, full-text, audit, durable jobs
+ElastiCache Redis: queue, cache, rate limits
+Private EC2 + encrypted EBS: self-hosted Qdrant, backups, restore drills
+ALB: frontend and authenticated Core API only
+ECR, Secrets Manager, CloudWatch, OpenTelemetry, GitHub Actions OIDC
+Amazon Bedrock: Titan Text Embeddings V2 at 1024 dimensions and Claude synthesis
+Private SageMaker GPU endpoint: bounded BGE-compatible reranking
+```
+
+Qdrant, Redis, PostgreSQL, Collector, worker, MCP, and SageMaker endpoints
+remain private. No Azure service, model endpoint, secret, vector store, or
+deployment workflow participates in the final runtime.
+
+## Cutover Rules
+
+1. Create a clean AWS environment; do not copy Azure PostgreSQL data, Qdrant
+   points, raw documents, or secrets.
+2. Re-register projects, sources, and Collectors, then reingest through the
+   `NormalizedDocument` contract.
+3. Rebuild chunks, lexical indexes, relations, embeddings, and Qdrant points
+   on AWS from Collector-owned evidence.
+4. Validate clean sync, repeat sync, changed-file replacement, duplicate-point
+   checks, purge/cache invalidation, retrieval, answer, investigate, workflow,
+   MCP, browser, and query-class evals.
+5. Use GitHub Actions OIDC only. The AWS pipeline must validate infrastructure,
+   build/push ECR images, run migrations/checks, deploy services, verify model
+   contracts and Qdrant dimension, then run smoke and bounded eval gates.
+
+## Azure Retirement Gate
+
+Remove Azure workflows, scripts, Bicep, Azure ML manifests, Azure settings,
+dependencies, and documentation only after all AWS gates pass: migration and
+readiness, Collector sync, model preflight, Qdrant backup/restore, search,
+investigation, workflow, MCP, browser, post-deploy evals, and a successful OIDC
+deployment. After removal, retain only a non-executable migration-history note.
+
+## AWS Release Gates
+
+- Bedrock and SageMaker preflight verifies model access, private connectivity,
+  embedding dimension, and bounded reranker contract before traffic serves.
+- Clean reingestion produces no duplicate Qdrant points and changed-file
+  replacement remains 100% correct in benchmark cases.
+- Purge/cache invalidation never returns deleted or stale evidence.
+- Search p50 is below 500 ms and p95 below 1.5 seconds on the defined AWS corpus.
+- Direct code/config/API answers are below 2 seconds; model-backed answer p50
+  is 4-8 seconds and p95 below 15 seconds.
+- Reports include corpus, index/model versions, recall, wrong-source rate,
+  zero-result rate, citations, branch/model latency, tokens, calls, cache rate,
+  estimated cost, and limitations.
+- No Azure dependency remains after retirement.
+
 ## Final Definition of Done
 
-IncidentOps is credible only when all five phases pass live validation:
+IncidentOps is credible only when all six phases pass live validation:
 
 1. Collector deterministically ingests broad engineering evidence and explains every skip.
 2. Core creates source-aware chunks with precise citations.
@@ -491,8 +569,10 @@ IncidentOps is credible only when all five phases pass live validation:
 9. Redis caching accelerates repeated queries without stale evidence.
 10. The basic frontend exposes ingestion, readiness, retrieval, investigation, evals, and operations.
 11. MCP exposes authenticated Core tools without becoming an ingestion or storage path.
-12. Azure CI/CD, migrations, Qdrant, models, smokes, browser, MCP, and eval gates pass.
-13. Multiple real repositories and a complete incident evidence pack produce honest, repeatable reports.
-14. Published metrics identify the exact environment, corpus, model/index versions, and limitations.
+12. Azure CI/CD and live validation remain maintained through Phase 5.
+13. AWS CI/CD, migrations, Qdrant, Bedrock, SageMaker, smokes, browser, MCP, and eval gates pass.
+14. Azure runtime and delivery code are removed only after AWS validation passes.
+15. Multiple real repositories and a complete incident evidence pack produce honest, repeatable reports.
+16. Published metrics identify the exact environment, corpus, model/index versions, and limitations.
 
 Until then, the accurate description is: **an implemented and testable IncidentOps architecture under validation**, not a production-grade RAG platform.

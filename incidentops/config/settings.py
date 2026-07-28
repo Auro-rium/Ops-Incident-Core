@@ -128,6 +128,14 @@ class Settings(BaseSettings):
     job_queue_consumer_group: str = "incidentops-workers"
     job_queue_consumer_name: str = Field(default_factory=lambda: f"core-worker-{socket.gethostname()}")
     job_queue_claim_idle_ms: int = 60000
+    worker_job_max_retries: int = 2
+    operational_agent_timeout_seconds: int = 180
+    observer_sync_window: int = 20
+    observer_parser_error_rate_threshold: float = 0.10
+    observer_min_eval_recall: float = 0.60
+    observer_max_wrong_source_type_rate: float = 0.25
+    observer_eval_p95_latency_ms: int = 1500
+    logging_aggregate_event_limit: int = 500
     enable_otel: bool = False
     otel_service_name: str = "incidentops-core"
     otel_exporter_otlp_endpoint: str = ""

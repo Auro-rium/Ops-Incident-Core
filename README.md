@@ -33,7 +33,7 @@ The governing principle is: **deterministic ingestion first; model use only afte
 | Core API | Owns auth/RBAC, projects, sources, sync state, chunking, indexing, search, investigation, workflows, evals, readiness, audit, and MCP-facing APIs. |
 | Retrieval | Combines Qdrant vector candidates, PostgreSQL lexical search, exact metadata/path matches, and a bounded architecture graph with weighted reciprocal-rank fusion. |
 | Answers | Uses direct cited evidence for decisive code/config/API lookups; optional synthesis is evidence-only and compact. |
-| Operations | Provides typed ingestion failures, sync diagnostics, readiness reports, workers, queues, metrics, traces, purge, and reindex semantics. |
+| Operations | Provides typed ingestion failures, sync diagnostics, readiness reports, workers, queues, evaluator/observer/logging runs, metrics, traces, purge, and reindex semantics. |
 
 ## Architecture
 
@@ -173,6 +173,8 @@ Project data routes require a bearer token and project membership. The complete 
 | Run a cautious investigation | `POST /v1/investigate` |
 | Inspect safe runtime status | `GET /v1/runtime/status` |
 | Purge evidence | `DELETE /v1/projects/{project_id}/sources/{source_id}`, `DELETE /v1/projects/{project_id}` |
+| Run operational checks | `POST /v1/projects/{project_id}/operations/observer/runs`, `POST /v1/projects/{project_id}/operations/logging/runs` |
+| Inspect operational results | `GET /v1/projects/{project_id}/operations/runs`, `GET /v1/projects/{project_id}/operations/findings` |
 
 `/v1/runtime/status` reports safe configuration state only. It never returns keys, connection strings, passwords, tokens, or raw document content.
 
@@ -202,7 +204,7 @@ Pushes to `core` run lint, migration checks, API startup checks, and unit/integr
 ## Documentation Map
 
 - [technical.md](technical.md): authoritative architecture, data contracts, security boundaries, retrieval design, deployment state, and known limits.
-- [plan.md](plan.md): five-phase delivery plan, separating complete work from future runtime, benchmark, and release gates.
+- [plan.md](plan.md): six-phase delivery plan, separating implemented work from Azure validation and the later AWS-only release gates.
 - [`.env.example`](.env.example): safe local-development settings shape.
 - [`.env.production.example`](.env.production.example): production contract without secrets.
 - [`eval/query_classes/`](eval/query_classes): deterministic retrieval fixtures.

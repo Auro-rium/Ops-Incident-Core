@@ -15,10 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from incidentops.config.settings import get_settings
 from incidentops.ingestion.chunking.metadata import extract_deploy_hash
 from incidentops.retrieval.embeddings import embed_query_async
+from incidentops.retrieval.cache import get_project_json, set_project_json
 from incidentops.retrieval.graph_search import graph_search
 from incidentops.retrieval.lexical_search import lexical_search
 from incidentops.retrieval.metadata_search import metadata_search
 from incidentops.observability.metrics import incr, observe_latency
+from incidentops.observability.tracing import traced
 from incidentops.retrieval.query_intent import (
     INTENT_API_CONTRACT,
     INTENT_ARCHITECTURE,
@@ -196,12 +198,16 @@ async def hybrid_search_with_debug(
     settings = get_settings()
     started = time.perf_counter()
     branch_latencies: dict[str, int] = {}
-    query_info = analyze_query(query)
+    query_info = await get_project_json("query_classification", project_id, query)
+    if query_info is None:
+        query_info = analyze_query(query)
+        await set_project_json("query_classification", project_id, query, query_info)
     intent = classify_query_intent(query)
     incr(f"retrieval_intent_{intent.intent}_total")
     logger.info("query classified intent=%s", intent.intent)
     embed_started = time.perf_counter()
-    query_embedding = await embed_query_async(query, settings.embedding_model)
+    with traced("retrieval.query_embedding"):
+        query_embedding = await embed_query_async(query, settings.embedding_model)
     branch_latencies["query_embedding_ms"] = _elapsed_ms(embed_started)
     fetch_k = _fetch_budget(top_k, intent)
     branches, branch_errors = await _retrieve_branches(
@@ -223,17 +229,18 @@ async def hybrid_search_with_debug(
     graph_results = branches["graph"]
 
     fusion_started = time.perf_counter()
-    scores = _weighted_rrf(
-        vector_results=vec_results,
-        lexical_results=lex_results,
-        metadata_results=metadata_results,
-        graph_results=graph_results,
-        vector_weight=settings.vector_weight,
-        lexical_weight=settings.lexical_weight,
-        metadata_weight=settings.metadata_weight,
-        graph_weight=settings.rag_graph_weight,
-        rrf_k=settings.rag_rrf_k,
-    )
+    with traced("retrieval.score_fusion"):
+        scores = _weighted_rrf(
+            vector_results=vec_results,
+            lexical_results=lex_results,
+            metadata_results=metadata_results,
+            graph_results=graph_results,
+            vector_weight=settings.vector_weight,
+            lexical_weight=settings.lexical_weight,
+            metadata_weight=settings.metadata_weight,
+            graph_weight=settings.rag_graph_weight,
+            rrf_k=settings.rag_rrf_k,
+        )
     for entry in scores.values():
         boost, reasons = _metadata_boost(entry["chunk"], query_info, intent)
         entry["metadata_boost"] = min(boost, 0.45)

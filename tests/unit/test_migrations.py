@@ -65,8 +65,8 @@ async def test_production_startup_does_not_call_create_all(monkeypatch):
     )
 
 
-def test_alembic_head_resolves_to_evidence_relations_migration():
-    assert get_head_revision() == "0005_evidence_relations"
+def test_alembic_head_resolves_to_operational_agents_migration():
+    assert get_head_revision() == "0006_operational_agents"
 
 
 def test_required_tables_match_current_models():

@@ -209,6 +209,9 @@ async def execute_eval_run(
     forbidden_hits = sum(1 for result in results if result["forbidden_hits"])
     failed_cases = sum(1 for result in results if result.get("error"))
     passed_cases = len(results) - failed_cases
+    zero_result_count = sum(1 for result in results if not result.get("retrieved_documents"))
+    citation_count = sum(len(result.get("retrieved_documents") or []) for result in results)
+    citation_rate = sum(1 for result in results if result.get("retrieved_documents")) / len(results) if results else 0.0
     avg_latency_ms = sum(int(result.get("latency_ms") or 0) for result in results) / len(results) if results else 0.0
     latency_values = [int(result.get("latency_ms") or 0) for result in results]
     avg_source_type_hit_rate = sum(float(result["source_type_hit_rate"]) for result in results) / len(results) if results else 0.0
@@ -226,6 +229,19 @@ async def execute_eval_run(
         "latency_p95_ms": _percentile(latency_values, 95),
         "avg_source_type_hit_rate": avg_source_type_hit_rate,
         "wrong_source_type_rate": wrong_source_type_rate,
+        "zero_result_count": zero_result_count,
+        "citation_count": citation_count,
+        "citation_rate": citation_rate,
+        "model_call_count": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "estimated_cost_usd": 0.0,
+        "rerank_gain_available": False,
+        "rerank_gain_cases": 0,
+        "retrieval_backend": settings.retrieval_backend,
+        "embedding_model": settings.embedding_model,
+        "vector_index_version": settings.vector_index_version,
+        "reranker_model": settings.reranker_model or None,
         # Backward-compatible keys used by existing tests and scripts.
         "cases": len(results),
         "avg_recall": avg_recall,

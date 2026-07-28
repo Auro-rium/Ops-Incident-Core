@@ -8,11 +8,21 @@ from sqlalchemy import select
 
 from incidentops.agent.service import execute_run
 from incidentops.config.settings import Settings
-from incidentops.db.models import AgentRun, EvalRun, EvalStatus, IndexJob, RunStatus, Source, SourceSync
+from incidentops.db.models import AgentRun, EvalRun, EvalStatus, IndexJob, OperationalRun, OperationalRunStatus, RunStatus, Source, SourceSync
 from incidentops.db.session import _get_session_factory
 from incidentops.eval.runner import execute_eval_run
 from incidentops.ingestion.indexer import index_normalized_documents
 from incidentops.ingestion.normalized import NormalizedDocument
+from incidentops.observability.metrics import incr, observe_latency
+from incidentops.observability.tracing import traced
+from incidentops.operations.service import (
+    RUN_EVALUATOR,
+    RUN_LOGGING,
+    RUN_OBSERVER,
+    record_operational_event,
+    run_logging_aggregate,
+    run_observer,
+)
 from incidentops.retrieval.embeddings import embed_texts_async
 from incidentops.security.audit import record_audit_event
 from incidentops.worker.schemas import Job
@@ -34,6 +44,15 @@ async def execute_job(job: Job, settings: Settings) -> None:
         return
     if job.job_type == "execute_eval_run":
         await execute_eval_run_job(job.payload, settings)
+        return
+    if job.job_type == "execute_evaluator_agent":
+        await execute_evaluator_agent_job(job.payload, settings)
+        return
+    if job.job_type == "execute_observer_agent":
+        await execute_operational_agent_job(job.payload, settings, RUN_OBSERVER)
+        return
+    if job.job_type == "aggregate_operational_events":
+        await execute_operational_agent_job(job.payload, settings, RUN_LOGGING)
         return
     if job.job_type == "index_document":
         await execute_index_document_job(job.payload, settings)
@@ -123,6 +142,94 @@ async def execute_eval_run_job(payload: dict, settings: Settings) -> None:
         await db.commit()
 
 
+async def execute_evaluator_agent_job(payload: dict, settings: Settings) -> None:
+    """Run persisted eval cases inside a durable operational-agent envelope."""
+    eval_run_id = uuid.UUID(str(payload["eval_run_id"]))
+    operational_run_id = uuid.UUID(str(payload["operational_run_id"]))
+    top_k = int(payload.get("top_k") or settings.default_top_k)
+    cases_path = payload.get("cases_path")
+    factory = _get_session_factory()
+    async with factory() as db:
+        eval_run = (await db.execute(select(EvalRun).where(EvalRun.id == eval_run_id))).scalar_one_or_none()
+        op_run = (await db.execute(select(OperationalRun).where(OperationalRun.id == operational_run_id))).scalar_one_or_none()
+        if not eval_run or not op_run:
+            logger.warning("evaluator job references missing run eval=%s operational=%s", eval_run_id, operational_run_id)
+            return
+        if op_run.run_type != RUN_EVALUATOR or op_run.status.value in {"completed", "failed"}:
+            return
+        op_run.status = OperationalRunStatus.running
+        op_run.attempts += 1
+        op_run.started_at = datetime.now(timezone.utc)
+        await record_operational_event(
+            db,
+            project_id=op_run.project_id,
+            operational_run_id=op_run.id,
+            category="evaluator",
+            event_type="evaluator_started",
+            payload={"eval_run_id": str(eval_run.id), "top_k": top_k, "attempt": op_run.attempts},
+        )
+        await db.flush()
+        started = datetime.now(timezone.utc)
+        with traced("evaluator.run"):
+            completed_eval = await execute_eval_run(
+                db,
+                eval_run,
+                top_k=top_k,
+                cases_path=cases_path,
+                settings=settings,
+            )
+        summary = dict(completed_eval.summary_json or {})
+        op_run.model_call_count = 0
+        op_run.input_tokens = 0
+        op_run.output_tokens = 0
+        op_run.summary_json = {
+            "status": "completed" if completed_eval.status != EvalStatus.failed else "failed",
+            "eval_run_id": str(completed_eval.id),
+            "total_cases": int(summary.get("total_cases") or 0),
+            "failed_cases": int(summary.get("failed_cases") or 0),
+            "avg_evidence_recall": float(summary.get("avg_evidence_recall") or summary.get("avg_recall") or 0.0),
+            "wrong_source_type_rate": float(summary.get("wrong_source_type_rate") or 0.0),
+            "latency_p95_ms": float(summary.get("latency_p95_ms") or 0.0),
+            "model_judging_used": False,
+        }
+        op_run.status = OperationalRunStatus.completed if completed_eval.status != EvalStatus.failed else OperationalRunStatus.failed
+        op_run.finished_at = datetime.now(timezone.utc)
+        incr("operational_runs_total")
+        incr("evaluator_runs_total")
+        if op_run.status == OperationalRunStatus.failed:
+            incr("operational_run_failures_total")
+        observe_latency("evaluator_run", (op_run.finished_at - started).total_seconds() * 1000)
+        await record_operational_event(
+            db,
+            project_id=op_run.project_id,
+            operational_run_id=op_run.id,
+            category="evaluator",
+            event_type="evaluator_completed" if op_run.status.value == "completed" else "evaluator_failed",
+            severity="info" if op_run.status.value == "completed" else "high",
+            payload={"eval_run_id": str(completed_eval.id), "total_cases": summary.get("total_cases", 0), "failed_cases": summary.get("failed_cases", 0)},
+        )
+        await db.commit()
+
+
+async def execute_operational_agent_job(payload: dict, settings: Settings, expected_type: str) -> None:
+    operational_run_id = uuid.UUID(str(payload["operational_run_id"]))
+    factory = _get_session_factory()
+    async with factory() as db:
+        run = (await db.execute(select(OperationalRun).where(OperationalRun.id == operational_run_id))).scalar_one_or_none()
+        if not run:
+            logger.warning("operational job references missing run_id=%s", operational_run_id)
+            return
+        if run.run_type != expected_type or run.status.value in {"completed", "failed"}:
+            return
+        if expected_type == RUN_OBSERVER:
+            await run_observer(db, run, settings)
+        elif expected_type == RUN_LOGGING:
+            await run_logging_aggregate(db, run, settings)
+        else:  # pragma: no cover - dispatch guard
+            raise ValueError(f"unsupported operational agent type: {expected_type}")
+        await db.commit()
+
+
 async def execute_index_document_job(payload: dict, settings: Settings) -> None:
     """Parse, embed, and publish a redacted pending document by durable ID."""
     index_job_id = uuid.UUID(str(payload["index_job_id"]))
@@ -207,6 +314,19 @@ async def execute_index_document_job(payload: dict, settings: Settings) -> None:
                 resource_id=index_job.id,
                 metadata={"index_version": index_job.index_version, "chunks_created": indexed.chunks_created},
             )
+            await record_operational_event(
+                db,
+                project_id=index_job.project_id,
+                category="indexing",
+                event_type="index_document_completed" if index_job.status == "completed" else "index_document_failed",
+                severity="info" if index_job.status == "completed" else "high",
+                payload={
+                    "index_job_id": str(index_job.id),
+                    "index_version": index_job.index_version,
+                    "chunks_created": indexed.chunks_created,
+                    "error_code": index_job.error_code,
+                },
+            )
             await db.commit()
         except Exception as exc:
             logger.exception("index job failed index_job_id=%s", index_job_id)
@@ -222,6 +342,14 @@ async def execute_index_document_job(payload: dict, settings: Settings) -> None:
                 resource_type="index_job",
                 resource_id=index_job.id,
                 metadata={"index_version": index_job.index_version, "error_code": index_job.error_code},
+            )
+            await record_operational_event(
+                db,
+                project_id=index_job.project_id,
+                category="indexing",
+                event_type="index_document_retry" if retryable else "index_document_failed",
+                severity="medium" if retryable else "high",
+                payload={"index_job_id": str(index_job.id), "index_version": index_job.index_version, "error_code": index_job.error_code},
             )
             await db.commit()
             raise
