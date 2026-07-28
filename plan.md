@@ -262,6 +262,12 @@ Required diagnostics include files, skips and reasons, documents created/updated
 
 Build general retrieval that adapts to question type, combines independent evidence channels, minimizes expensive model calls, and refuses unsupported conclusions.
 
+## Status
+
+Implemented and locally verified for the retrieval foundation. Core now runs bounded vector, lexical, exact metadata/path, and architecture-only deterministic graph branches. It fuses their independently ranked candidates with weighted reciprocal-rank fusion, records per-branch latency and failure diagnostics, and keeps candidate output project-scoped. The graph is built only from indexed facts: paths, services, packages, symbols, endpoints, and deploy hashes. It does not infer relationships or permit model-created edges.
+
+Remote reranking now redacts and bounds query/candidate payloads, limits candidate count, and is skipped for decisive direct lookups or unsupported runtime investigations. The CRAG-style evidence gate therefore returns missing-evidence guidance before an unnecessary remote reranker call. A clean PostgreSQL/Qdrant API harness passed all unit and integration tests after the migration. Remaining release gates are measured query-class eval gains, Azure GPU reranker validation, cache behavior, and live Azure latency/token benchmarks.
+
 ## Query Routing
 
 Classify queries as:

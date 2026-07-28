@@ -138,23 +138,29 @@ async def rerank_with_debug_async(
             }
         try:
             started = time.time()
+            candidate_limit = min(len(results), settings.rag_rerank_max_candidates)
+            candidates = results[:candidate_limit]
             scores = await remote_rerank(
                 query,
                 [
                     {"id": result["chunk"].id, "text": result["chunk"].text}
-                    for result in results
+                    for result in candidates
                 ],
             )
-            for result, score in zip(results, scores):
+            for result, score in zip(candidates, scores):
                 result["rerank_score"] = score
-            results.sort(key=lambda item: item.get("rerank_score", 0.0), reverse=True)
+            candidates.sort(key=lambda item: item.get("rerank_score", 0.0), reverse=True)
+            remaining = sorted(results[candidate_limit:], key=lambda item: item.get("fused_score", 0.0), reverse=True)
+            reranked = [*candidates, *remaining]
             latency_ms = int((time.time() - started) * 1000)
             observe_latency("rerank", latency_ms)
-            return results[:top_k], {
+            return reranked[:top_k], {
                 "mode": "remote_cross_encoder",
                 "reason": "ambiguous_results",
                 "used_model": model_name or settings.reranker_model,
                 "latency_ms": latency_ms,
+                "candidate_count": candidate_limit,
+                "max_chars_per_candidate": settings.rag_rerank_max_chars_per_candidate,
             }
         except RemoteModelError:
             incr("rerank_failures_total")

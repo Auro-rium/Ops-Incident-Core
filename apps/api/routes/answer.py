@@ -62,12 +62,22 @@ async def answer(
     query_intent = classify_query_intent(body.query)
     raw_results = await hybrid_search(db, body.project_id, body.query, top_k=max(body.top_k * 3, 30))
     rerank_limit = max(body.top_k * 3, settings.answer_max_evidence_chunks * 2)
-    reranked, rerank_debug = await rerank_with_debug_async(
-        body.query,
-        raw_results,
-        model_name=settings.reranker_model,
-        top_k=rerank_limit,
-    )
+    raw_source_types = _raw_source_types(raw_results)
+    supported, support_reasons = investigate_supported(query_intent, raw_source_types)
+    if _skip_rerank_for_intent(query_intent.intent, supported):
+        reranked = sorted(raw_results, key=lambda item: item.get("fused_score", 0.0), reverse=True)[:rerank_limit]
+        rerank_debug = {
+            "mode": "skipped",
+            "reason": "direct_lookup" if not query_intent.is_incident_like else "missing_required_evidence",
+            "used_model": None,
+        }
+    else:
+        reranked, rerank_debug = await rerank_with_debug_async(
+            body.query,
+            raw_results,
+            model_name=settings.reranker_model,
+            top_k=rerank_limit,
+        )
     evidence = pack_evidence(
         reranked,
         max_evidence=min(body.top_k, settings.answer_max_evidence_chunks),
@@ -83,10 +93,6 @@ async def answer(
     llm_latency_ms = None
     synthesis_mode = "retrieval_only"
     warnings = _answer_warnings(query_intent.intent, evidence, rerank_debug)
-    supported, support_reasons = investigate_supported(
-        query_intent,
-        {item.get("source_type") for item in evidence if item.get("source_type")},
-    )
     if query_intent.is_incident_like and not supported:
         answer_body = _insufficient_evidence_answer(body.query, evidence, warnings + support_reasons)
         synthesis_mode = "insufficient_evidence"
@@ -142,6 +148,22 @@ async def answer(
         latency_ms=latency_ms,
         warnings=warnings,
     )
+
+
+def _raw_source_types(results: list[dict]) -> set[str]:
+    source_types: set[str] = set()
+    for result in results:
+        metadata = result["chunk"].metadata_json or {}
+        source_type = metadata.get("source_type")
+        if isinstance(source_type, str) and source_type:
+            source_types.add(source_type)
+    return source_types
+
+
+def _skip_rerank_for_intent(query_intent: str, supported: bool) -> bool:
+    if query_intent in {INTENT_CODE_LOCATION, INTENT_CONFIG_LOOKUP, INTENT_API_CONTRACT}:
+        return True
+    return query_intent in {INTENT_RUNTIME_INCIDENT, INTENT_DEPLOY_REGRESSION, INTENT_PREVIOUS_INCIDENT} and not supported
 
 
 def _answer_warnings(query_intent: str, evidence: list[dict], rerank_debug: dict | None = None) -> list[str]:

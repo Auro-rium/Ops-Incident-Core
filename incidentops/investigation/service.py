@@ -64,12 +64,22 @@ async def investigate(
             filters=scope["filters"] or None,
         )
         retrieval_debug = {}
-    reranked, rerank_debug = await rerank_with_debug_async(
-        query,
-        raw_results,
-        model_name=reranker_model,
-        top_k=top_k,
-    )
+    raw_source_types = _raw_source_types(raw_results)
+    preflight_supported, _ = investigate_supported(query_intent, raw_source_types)
+    if not preflight_supported:
+        reranked = sorted(raw_results, key=lambda item: item.get("fused_score", 0.0), reverse=True)[:top_k]
+        rerank_debug = {
+            "mode": "skipped",
+            "reason": "missing_required_evidence_or_lookup_intent",
+            "used_model": None,
+        }
+    else:
+        reranked, rerank_debug = await rerank_with_debug_async(
+            query,
+            raw_results,
+            model_name=reranker_model,
+            top_k=top_k,
+        )
     evidence = pack_evidence(reranked, max_evidence=top_k)
     build_citations(evidence)
 
@@ -166,6 +176,16 @@ async def investigate(
         incr("weak_evidence_total")
     observe_latency("investigation", latency_ms)
     return result, latency_ms
+
+
+def _raw_source_types(results: list[dict]) -> set[str]:
+    source_types: set[str] = set()
+    for result in results:
+        metadata = result["chunk"].metadata_json or {}
+        source_type = metadata.get("source_type")
+        if isinstance(source_type, str) and source_type:
+            source_types.add(source_type)
+    return source_types
 
 
 def _score_confidence(

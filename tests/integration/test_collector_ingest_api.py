@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from incidentops.config.settings import get_settings
-from incidentops.db.models import AuditEvent, Chunk, Document
+from incidentops.db.models import AuditEvent, Chunk, Document, EvidenceRelation
 
 BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 FIXTURE_ROOT = (Path(__file__).resolve().parents[1] / "fixtures" / "basic_incident").resolve()
@@ -108,6 +108,17 @@ async def _audit_count(action: str) -> int:
     factory, engine = _test_session_factory()
     async with factory() as db:
         result = await db.execute(select(func.count()).select_from(AuditEvent).where(AuditEvent.action == action))
+        count = int(result.scalar_one())
+    await engine.dispose()
+    return count
+
+
+async def _project_relation_count(project_id: str) -> int:
+    factory, engine = _test_session_factory()
+    async with factory() as db:
+        result = await db.execute(
+            select(func.count()).select_from(EvidenceRelation).where(EvidenceRelation.project_id == uuid.UUID(project_id))
+        )
         count = int(result.scalar_one())
     await engine.dispose()
     return count
@@ -220,6 +231,7 @@ def test_source_registry_and_collector_sync_batch_ingest_flow():
     assert batch_payload["diagnostics"]["last_batch_parser_error_reasons"] == {}
     assert batch_payload["diagnostics"]["last_batch_chunk_discard_reasons"].get("chunk_limit_exceeded", 0) == 0
     assert batch_payload["diagnostics"]["last_batch_embedding_failures"] == 0
+    assert asyncio.run(_project_relation_count(project_id)) > 0
 
     finish = client.post(
         f"/v1/sources/{source_id}/syncs/{sync_id}/finish",
@@ -262,6 +274,22 @@ def test_source_registry_and_collector_sync_batch_ingest_flow():
     )
     assert search.status_code == 200
     assert search.json()["total"] > 0
+
+    architecture_search = client.post(
+        "/v1/search",
+        headers=headers,
+        json={
+            "project_id": project_id,
+            "query": "How is the docs architecture organized?",
+            "top_k": 8,
+            "debug": True,
+        },
+    )
+    assert architecture_search.status_code == 200
+    architecture_debug = architecture_search.json()["debug"]
+    assert architecture_debug["query_intent"]["intent"] == "architecture"
+    assert architecture_debug["graph_candidates_count"] > 0
+    assert architecture_debug["fusion"]["method"] == "weighted_reciprocal_rank_fusion"
 
     investigate = client.post(
         "/v1/investigate",

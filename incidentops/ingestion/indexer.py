@@ -13,7 +13,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from incidentops.config.settings import get_settings
-from incidentops.db.models import Chunk, Document
+from incidentops.db.models import Chunk, Document, EvidenceRelation
 from incidentops.ingestion.chunking.chunker import count_tokens, split_text_by_tokens
 from incidentops.ingestion.chunking.metadata import classify_doc_type, classify_source_type, extract_service_from_path
 from incidentops.ingestion.diagnostics import build_source_coverage
@@ -44,6 +44,7 @@ from incidentops.ingestion.parsers.incident_parser import parse_incident
 from incidentops.ingestion.parsers.log_parser import parse_logs
 from incidentops.ingestion.parsers.markdown_parser import parse_markdown
 from incidentops.ingestion.schemas import RawChunk
+from incidentops.retrieval.graph_relations import build_chunk_relations
 from incidentops.retrieval.vector_store import QdrantVectorStore, VectorStoreError, chunk_point
 
 logger = logging.getLogger("incidentops.ingestion.indexer")
@@ -303,6 +304,10 @@ async def _index_one_document(
             db.add(chunk)
             persisted_chunks.append(chunk)
         await db.flush()
+        relations = build_chunk_relations(document_row, persisted_chunks)
+        if relations:
+            db.add_all(EvidenceRelation(**relation) for relation in relations)
+            await db.flush()
         await db.execute(
             update(Chunk)
             .where(Chunk.document_id == document_row.id)

@@ -13,6 +13,7 @@ import httpx
 
 from incidentops.config.settings import get_settings
 from incidentops.observability.metrics import incr, observe_latency
+from incidentops.security.secret_redaction import redact_secrets
 
 
 class RemoteModelError(RuntimeError):
@@ -97,10 +98,13 @@ async def remote_rerank(query: str, candidates: list[dict[str, Any]]) -> list[fl
     started = time.perf_counter()
     payload = {
         "model_id": settings.reranker_model,
-        "query": query,
+        "query": redact_secrets(query)[: settings.rag_rerank_max_query_chars],
         "candidates": [
-            {"id": str(candidate["id"]), "text": str(candidate["text"])}
-            for candidate in candidates
+            {
+                "id": str(candidate["id"]),
+                "text": redact_secrets(str(candidate["text"]))[: settings.rag_rerank_max_chars_per_candidate],
+            }
+            for candidate in candidates[: settings.rag_rerank_max_candidates]
         ],
     }
     try:
@@ -113,7 +117,7 @@ async def remote_rerank(query: str, candidates: list[dict[str, Any]]) -> list[fl
             response.raise_for_status()
             data = response.json()
         scores = data.get("scores")
-        if not isinstance(scores, list) or len(scores) != len(candidates):
+        if not isinstance(scores, list) or len(scores) != len(payload["candidates"]):
             raise RemoteModelError("remote reranker response count mismatch")
         incr("rag_remote_rerank_calls_total")
         observe_latency("rag_remote_rerank", (time.perf_counter() - started) * 1000)

@@ -15,7 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from incidentops.config.settings import get_settings
 from incidentops.ingestion.chunking.metadata import extract_deploy_hash
 from incidentops.retrieval.embeddings import embed_query_async
+from incidentops.retrieval.graph_search import graph_search
 from incidentops.retrieval.lexical_search import lexical_search
+from incidentops.retrieval.metadata_search import metadata_search
 from incidentops.observability.metrics import incr, observe_latency
 from incidentops.retrieval.query_intent import (
     INTENT_API_CONTRACT,
@@ -202,80 +204,41 @@ async def hybrid_search_with_debug(
     query_embedding = await embed_query_async(query, settings.embedding_model)
     branch_latencies["query_embedding_ms"] = _elapsed_ms(embed_started)
     fetch_k = _fetch_budget(top_k, intent)
-    if settings.rag_parallel_retrieval:
-        try:
-            from incidentops.db.session import _get_session_factory
+    branches, branch_errors = await _retrieve_branches(
+        db,
+        project_id,
+        query,
+        query_embedding,
+        query_info,
+        intent,
+        fetch_k,
+        filters,
+        parallel=settings.rag_parallel_retrieval,
+        timeout_seconds=settings.rag_branch_timeout_seconds,
+        branch_latencies=branch_latencies,
+    )
+    vec_results = branches["vector"]
+    lex_results = branches["lexical"]
+    metadata_results = branches["metadata"]
+    graph_results = branches["graph"]
 
-            factory = _get_session_factory()
-            vector_started = time.perf_counter()
-            lexical_started = time.perf_counter()
-
-            async def _vector_branch():
-                async with factory() as branch_db:
-                    return await vector_search(branch_db, project_id, query_embedding, top_k=fetch_k, filters=filters)
-
-            async def _lexical_branch():
-                async with factory() as branch_db:
-                    return await lexical_search(branch_db, project_id, query, top_k=fetch_k, filters=filters)
-
-            vec_results, lex_results = await asyncio.gather(_vector_branch(), _lexical_branch())
-            branch_latencies["vector_search_ms"] = _elapsed_ms(vector_started)
-            branch_latencies["lexical_search_ms"] = _elapsed_ms(lexical_started)
-            branch_latencies["retrieval_parallel"] = 1
-        except Exception:
-            logger.warning("Parallel retrieval unavailable; using request session", exc_info=True)
-            vector_started = time.perf_counter()
-            vec_results = await vector_search(db, project_id, query_embedding, top_k=fetch_k, filters=filters)
-            branch_latencies["vector_search_ms"] = _elapsed_ms(vector_started)
-            lexical_started = time.perf_counter()
-            lex_results = await lexical_search(db, project_id, query, top_k=fetch_k, filters=filters)
-            branch_latencies["lexical_search_ms"] = _elapsed_ms(lexical_started)
-            branch_latencies["retrieval_parallel"] = 0
-    else:
-        vector_started = time.perf_counter()
-        vec_results = await vector_search(db, project_id, query_embedding, top_k=fetch_k, filters=filters)
-        branch_latencies["vector_search_ms"] = _elapsed_ms(vector_started)
-        lexical_started = time.perf_counter()
-        lex_results = await lexical_search(db, project_id, query, top_k=fetch_k, filters=filters)
-        branch_latencies["lexical_search_ms"] = _elapsed_ms(lexical_started)
-        branch_latencies["retrieval_parallel"] = 0
-
-    scores: dict[uuid.UUID, dict[str, Any]] = {}
-    vec_max = max((result["score"] for result in vec_results), default=1.0)
-    for result in vec_results:
-        chunk_id = result["chunk"].id
-        scores[chunk_id] = {
-            "chunk": result["chunk"],
-            "vector_score": result["score"] / vec_max if vec_max else 0.0,
-            "lexical_score": 0.0,
-            "metadata_boost": 0.0,
-        }
-
-    lex_max = max((result["score"] for result in lex_results), default=1.0)
-    for result in lex_results:
-        chunk_id = result["chunk"].id
-        lexical_score = result["score"] / lex_max if lex_max else 0.0
-        if chunk_id in scores:
-            scores[chunk_id]["lexical_score"] = lexical_score
-        else:
-            scores[chunk_id] = {
-                "chunk": result["chunk"],
-                "vector_score": 0.0,
-                "lexical_score": lexical_score,
-                "metadata_boost": 0.0,
-            }
-
+    fusion_started = time.perf_counter()
+    scores = _weighted_rrf(
+        vector_results=vec_results,
+        lexical_results=lex_results,
+        metadata_results=metadata_results,
+        graph_results=graph_results,
+        vector_weight=settings.vector_weight,
+        lexical_weight=settings.lexical_weight,
+        metadata_weight=settings.metadata_weight,
+        graph_weight=settings.rag_graph_weight,
+        rrf_k=settings.rag_rrf_k,
+    )
     for entry in scores.values():
         boost, reasons = _metadata_boost(entry["chunk"], query_info, intent)
         entry["metadata_boost"] = min(boost, 0.45)
         entry["metadata_boost_reasons"] = reasons
-        entry["fused_score"] = (
-            settings.vector_weight * entry["vector_score"]
-            + settings.lexical_weight * entry["lexical_score"]
-            + settings.metadata_weight * entry["metadata_boost"]
-        )
-
-    fusion_started = time.perf_counter()
+        entry["fused_score"] = entry["rrf_score"] + entry["metadata_boost"]
     ranked_all = sorted(scores.values(), key=lambda item: item["fused_score"], reverse=True)
     branch_latencies["score_fusion_ms"] = _elapsed_ms(fusion_started)
     ranked = ranked_all[:top_k]
@@ -284,6 +247,8 @@ async def hybrid_search_with_debug(
             "chunk": item["chunk"],
             "vector_score": item["vector_score"],
             "lexical_score": item["lexical_score"],
+            "metadata_score": item["metadata_score"],
+            "rrf_score": item["rrf_score"],
             "metadata_boost": item["metadata_boost"],
             "metadata_boost_reasons": item["metadata_boost_reasons"],
             "fused_score": item["fused_score"],
@@ -304,18 +269,165 @@ async def hybrid_search_with_debug(
         "retrieval_budget": _retrieval_budget_summary(intent, fetch_k),
         "vector_candidates_count": len(vec_results),
         "lexical_candidates_count": len(lex_results),
+        "metadata_candidates_count": len(metadata_results),
+        "graph_candidates_count": len(graph_results),
         "merged_candidates_count": len(scores),
         "source_type_distribution": evidence_mix["source_types"],
         "chunk_type_distribution": evidence_mix["chunk_types"],
         "applied_boosts": _reason_counts(ranked, positive=True),
         "applied_penalties": _reason_counts(ranked, positive=False),
         "retrieval_branch_latencies": branch_latencies,
+        "retrieval_branch_failures": branch_errors,
+        "fusion": {
+            "method": "weighted_reciprocal_rank_fusion",
+            "rrf_k": settings.rag_rrf_k,
+            "weights": {
+                "vector": settings.vector_weight,
+                "lexical": settings.lexical_weight,
+                "metadata": settings.metadata_weight,
+                "graph": settings.rag_graph_weight,
+            },
+        },
         "total_retrieval_latency_ms": total_latency_ms,
         "metadata_boosts_used": _summarize_boosts(ranked_all[: min(10, len(ranked_all))]),
         "evidence_mix": evidence_mix,
         "top_rejected": _top_rejected_candidates(ranked_all, top_k),
     }
     return results, debug
+
+
+async def _retrieve_branches(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    query: str,
+    query_embedding: list[float],
+    query_info: dict[str, Any],
+    intent: QueryIntent,
+    fetch_k: int,
+    filters: dict[str, Any] | None,
+    *,
+    parallel: bool,
+    timeout_seconds: float,
+    branch_latencies: dict[str, int],
+) -> tuple[dict[str, list[dict]], dict[str, str]]:
+    """Run independent candidate branches with bounded failures.
+
+    A failed vector or lexical service must reduce recall, not turn an
+    authenticated search request into a server error when another branch can
+    still supply evidence.
+    """
+    errors: dict[str, str] = {}
+
+    async def _run(name: str, operation) -> list[dict]:
+        started = time.perf_counter()
+        try:
+            return await asyncio.wait_for(operation(), timeout=max(timeout_seconds, 0.1))
+        except Exception as exc:
+            errors[name] = _safe_branch_error(exc)
+            logger.warning("retrieval branch failed branch=%s error=%s", name, errors[name])
+            return []
+        finally:
+            branch_latencies[f"{name}_search_ms"] = _elapsed_ms(started)
+
+    if parallel:
+        from incidentops.db.session import _get_session_factory
+
+        factory = _get_session_factory()
+
+        async def _vector():
+            async with factory() as branch_db:
+                return await vector_search(branch_db, project_id, query_embedding, top_k=fetch_k, filters=filters)
+
+        async def _lexical():
+            async with factory() as branch_db:
+                return await lexical_search(branch_db, project_id, query, top_k=fetch_k, filters=filters)
+
+        async def _metadata():
+            async with factory() as branch_db:
+                return await metadata_search(branch_db, project_id, query_info, top_k=fetch_k, filters=filters)
+
+        async def _graph():
+            if intent.intent != INTENT_ARCHITECTURE:
+                return []
+            async with factory() as branch_db:
+                return await graph_search(branch_db, project_id, query_info, top_k=fetch_k)
+
+        vector, lexical, metadata, graph = await asyncio.gather(
+            _run("vector", _vector),
+            _run("lexical", _lexical),
+            _run("metadata", _metadata),
+            _run("graph", _graph),
+        )
+        branch_latencies["retrieval_parallel"] = 1
+    else:
+        vector = await _run(
+            "vector", lambda: vector_search(db, project_id, query_embedding, top_k=fetch_k, filters=filters)
+        )
+        lexical = await _run("lexical", lambda: lexical_search(db, project_id, query, top_k=fetch_k, filters=filters))
+        metadata = await _run(
+            "metadata", lambda: metadata_search(db, project_id, query_info, top_k=fetch_k, filters=filters)
+        )
+        graph = await _run(
+            "graph",
+            lambda: graph_search(db, project_id, query_info, top_k=fetch_k)
+            if intent.intent == INTENT_ARCHITECTURE
+            else _empty_results(),
+        )
+        branch_latencies["retrieval_parallel"] = 0
+    return {"vector": vector, "lexical": lexical, "metadata": metadata, "graph": graph}, errors
+
+
+def _weighted_rrf(
+    *,
+    vector_results: list[dict],
+    lexical_results: list[dict],
+    metadata_results: list[dict],
+    graph_results: list[dict],
+    vector_weight: float,
+    lexical_weight: float,
+    metadata_weight: float,
+    graph_weight: float,
+    rrf_k: int,
+) -> dict[uuid.UUID, dict[str, Any]]:
+    """Fuse independently ranked candidates without comparing score scales."""
+    candidates: dict[uuid.UUID, dict[str, Any]] = {}
+    branches = (
+        ("vector", vector_results, vector_weight),
+        ("lexical", lexical_results, lexical_weight),
+        ("metadata", metadata_results, metadata_weight),
+        ("graph", graph_results, graph_weight),
+    )
+    denominator_offset = max(rrf_k, 1)
+    for branch_name, results, weight in branches:
+        for rank, result in enumerate(results, start=1):
+            chunk = result["chunk"]
+            entry = candidates.setdefault(
+                chunk.id,
+                {
+                    "chunk": chunk,
+                    "vector_score": 0.0,
+                    "lexical_score": 0.0,
+                    "metadata_score": 0.0,
+                    "rrf_score": 0.0,
+                    "metadata_boost": 0.0,
+                    "metadata_boost_reasons": [],
+                    "branch_ranks": {},
+                },
+            )
+            entry[f"{branch_name}_score"] = float(result.get("score", 0.0) or 0.0)
+            entry["branch_ranks"][branch_name] = rank
+            entry["rrf_score"] += (max(weight, 0.0) / (denominator_offset + rank)) * 100.0
+    return candidates
+
+
+def _safe_branch_error(exc: Exception) -> str:
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    return exc.__class__.__name__
+
+
+async def _empty_results() -> list[dict]:
+    return []
 
 
 def _fetch_budget(top_k: int, intent: QueryIntent) -> int:

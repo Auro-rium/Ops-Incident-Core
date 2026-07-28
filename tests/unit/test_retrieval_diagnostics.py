@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import uuid
 
 from incidentops.retrieval.evidence_packer import pack_evidence
-from incidentops.retrieval.hybrid_search import _metadata_boost
+from incidentops.retrieval.hybrid_search import _metadata_boost, _weighted_rrf
 from incidentops.retrieval.query_intent import classify_query_intent
 
 
@@ -126,3 +127,25 @@ def test_pack_evidence_recognizes_source_aware_chunk_types():
     packed = pack_evidence(results)
 
     assert [item["source_type"] for item in packed] == ["code", "api_doc", "logs"]
+
+
+def test_weighted_rrf_rewards_agreement_across_independent_branches():
+    agreed = _chunk("service/history/handler.go", chunk_type="go_function", source_type="code")
+    lexical_only = _chunk("docs/history.md", chunk_type="markdown_heading_section", source_type="runbook")
+    agreed.id = uuid.uuid4()
+    lexical_only.id = uuid.uuid4()
+
+    candidates = _weighted_rrf(
+        vector_results=[{"chunk": agreed, "score": 0.8}],
+        lexical_results=[{"chunk": agreed, "score": 0.5}, {"chunk": lexical_only, "score": 0.9}],
+        metadata_results=[],
+        graph_results=[],
+        vector_weight=0.45,
+        lexical_weight=0.35,
+        metadata_weight=0.20,
+        graph_weight=0.10,
+        rrf_k=60,
+    )
+
+    assert candidates[agreed.id]["rrf_score"] > candidates[lexical_only.id]["rrf_score"]
+    assert candidates[agreed.id]["branch_ranks"] == {"vector": 1, "lexical": 1}

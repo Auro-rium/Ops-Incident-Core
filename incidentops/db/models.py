@@ -310,6 +310,39 @@ class Chunk(Base):
     )
 
 
+class EvidenceRelation(Base):
+    """Deterministic graph edge derived from one indexed evidence chunk."""
+
+    __tablename__ = "evidence_relations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    evidence_chunk_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chunks.id", ondelete="CASCADE"), nullable=False
+    )
+    relation_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    from_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    to_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "evidence_chunk_id",
+            "relation_type",
+            "from_key",
+            "to_key",
+            name="uq_evidence_relations_edge",
+        ),
+        Index("ix_evidence_relations_project_from", "project_id", "from_key"),
+        Index("ix_evidence_relations_project_to", "project_id", "to_key"),
+        Index("ix_evidence_relations_project_type", "project_id", "relation_type"),
+    )
+
+
 class IndexJob(Base):
     """Durable redacted-payload reference for asynchronous index publication."""
 

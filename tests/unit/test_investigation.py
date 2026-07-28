@@ -8,6 +8,7 @@ from incidentops.investigation.hypothesis_generator import generate_hypotheses
 from incidentops.investigation.service import _score_confidence
 from incidentops.investigation.root_cause_selector import select_root_cause
 from incidentops.investigation.timeline_builder import build_timeline
+from apps.api.routes.answer import _skip_rerank_for_intent
 
 
 def test_classifier_supports_generic_task_types():
@@ -66,3 +67,9 @@ def test_confidence_scoring_is_low_when_key_sources_missing():
     )
     assert confidence == "low"
     assert reasons
+
+
+def test_lookup_and_unsupported_runtime_queries_skip_remote_reranking():
+    assert _skip_rerank_for_intent("code_location", supported=False) is True
+    assert _skip_rerank_for_intent("runtime_incident", supported=False) is True
+    assert _skip_rerank_for_intent("runtime_incident", supported=True) is False

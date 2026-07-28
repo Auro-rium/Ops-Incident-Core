@@ -38,10 +38,16 @@ class Settings(BaseSettings):
     rag_reranker_endpoint: str = ""
     rag_gpu_endpoint_required: bool = False
     rag_rerank_mode: str = "conditional"
+    rag_rerank_max_candidates: int = 20
+    rag_rerank_max_chars_per_candidate: int = 1600
+    rag_rerank_max_query_chars: int = 2048
     rag_streaming_enabled: bool = False
     rag_shadow_percent: int = 0
     rag_candidate_multiplier: int = 3
     rag_parallel_retrieval: bool = True
+    rag_branch_timeout_seconds: float = 2.0
+    rag_rrf_k: int = 60
+    rag_graph_weight: float = 0.10
     rag_async_indexing: bool = False
     rag_index_max_retries: int = 3
     rag_index_dispatch_batch_size: int = 50
@@ -67,8 +73,8 @@ class Settings(BaseSettings):
     azure_openai_embedding_deployment: str = ""
     require_azure_openai: bool = True
 
-    vector_weight: float = 0.45
-    lexical_weight: float = 0.35
+    vector_weight: float = 0.40
+    lexical_weight: float = 0.30
     metadata_weight: float = 0.20
     default_top_k: int = 10
     reranker_model: str = ""

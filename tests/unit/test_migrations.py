@@ -65,8 +65,8 @@ async def test_production_startup_does_not_call_create_all(monkeypatch):
     )
 
 
-def test_alembic_head_resolves_to_qdrant_migration():
-    assert get_head_revision() == "0004_qdrant_vector_store"
+def test_alembic_head_resolves_to_evidence_relations_migration():
+    assert get_head_revision() == "0005_evidence_relations"
 
 
 def test_required_tables_match_current_models():
