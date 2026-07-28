@@ -13,6 +13,25 @@ not claim that a cloud component is live unless a successful deployment smoke
 has recorded it. At the time of this document, the cloud GPU retrieval path is
 code and deployment scaffolding; no current live Azure proof is recorded.
 
+### Version context
+
+This repository is the active **v2 architecture rewrite**. The earlier v1
+implementation referenced in resume or portfolio material used a
+PostgreSQL/pgvector-era vector path and earlier deployment boundaries. This
+codebase retires PostgreSQL vector storage in favor of Qdrant, keeps Collector
+inside the repository, and adds durable indexing and hybrid retrieval work.
+It is a current engineering effort, not a completed production release.
+
+### How to read this document
+
+* **Implemented** means the code and tests exist in this repository.
+* **Configured** means settings, manifests, or deployment scripts exist.
+* **Validated** requires a recorded runtime test against the target environment.
+
+Unless this document explicitly says a behavior was validated, treat it as
+implemented or configured only. This distinction is intentional: deployment
+scaffolding and a passing local harness do not prove cloud reliability.
+
 ## Repositories and Responsibilities
 
 | Repository | Owns | Does not own |
@@ -303,20 +322,26 @@ status. It never returns tokens, connection strings, passwords, or API keys.
 
 The intended Azure stack is Azure Container Apps for Core API, worker,
 Collector, frontend, MCP, migration/bootstrap jobs; PostgreSQL Flexible Server;
-Qdrant; Redis; Key Vault; ACR; Log Analytics; Azure OpenAI; and optional
-Azure ML GPU endpoints. AKS, NAT Gateway, multi-region deployment, and Azure
-AI Search are deliberately excluded from the current architecture.
+Azure Cache for Redis; Key Vault; ACR; Log Analytics; Azure OpenAI; and
+optional Azure ML GPU endpoints. Qdrant is a required, externally supplied
+private HTTPS endpoint (`QDRANT_URL` and optional API key); the current Bicep
+template configures consumers for it but does **not** provision a Qdrant
+service. AKS, NAT Gateway, multi-region deployment, and Azure AI Search are
+deliberately excluded from the current architecture.
 
 Deployment order:
 
 1. Build the Core image, which contains API, worker, and Collector commands.
    The optional frontend and GPU runtime images are separate builds.
-2. Deploy infrastructure and Container Apps using Key Vault references.
-3. Run `alembic upgrade head` and `scripts/check_migrations.py` in the
+2. Provision or select a private Qdrant endpoint, then provide its URL and
+   credential reference to the deployment. Do not make it public merely to
+   satisfy Container Apps connectivity.
+3. Deploy infrastructure and Container Apps using Key Vault references.
+4. Run `alembic upgrade head` and `scripts/check_migrations.py` in the
    migration job. Production never calls SQLAlchemy `create_all`.
-4. Bootstrap an admin using Key Vault-backed credentials.
-5. Configure scoped Collector and MCP credentials.
-6. Run health, readiness, Collector sync, search, investigate, workflow, and
+5. Bootstrap an admin using Key Vault-backed credentials.
+6. Configure scoped Collector and MCP credentials.
+7. Run health, readiness, Collector sync, search, investigate, workflow, and
    MCP smoke checks.
 
 GitHub Actions runs lint, migrations, API startup, and unit/integration tests
@@ -365,3 +390,34 @@ The system is not production-grade yet. Blocking gaps are:
 Until those are complete, the correct product claim is: IncidentOps is a
 security-conscious, Collector-first engineering evidence backend with an
 implemented but not live-validated cloud GPU retrieval path.
+
+## Implementation Ledger
+
+| Area | Present in code | Validated in current repository | Important boundary |
+|---|---|---|---|
+| Collector, redaction, and normalized batch protocol | Yes | Unit/integration coverage | Collector cannot access Core storage directly. |
+| PostgreSQL metadata, chunks, full-text search, and audit | Yes | Unit/integration coverage | PostgreSQL is authoritative for text, authorization, and citations. |
+| Qdrant vector adapter and Qdrant migration | Yes | Local/test coverage | The current Bicep template does not create Qdrant. |
+| Hybrid retrieval and direct evidence graph | Yes | Unit/integration coverage | The graph contains direct deterministic facts only. |
+| Redis Streams queue and durable index jobs | Yes | Unit/integration coverage | Postgres remains the business-state authority. |
+| Azure OpenAI and Azure ML client contracts | Yes | Configuration/startup validation | No current live Azure proof is recorded. |
+| Azure Container Apps infrastructure and scripts | Yes | Static/script validation only | Manual deployment is required and cloud resources incur cost. |
+| MCP facade | Yes | Unit/integration coverage | MCP delegates to Core HTTP APIs and cannot ingest. |
+
+## Operational Invariants
+
+The following rules are architectural constraints, not optional conventions:
+
+1. A vector hit is not returned until it maps to an authorized PostgreSQL chunk.
+2. Collector redaction and path policy precede Core ingestion.
+3. A changed document replaces prior chunks for the same external ID; unchanged
+   hashes are skipped.
+4. Redis transports work, but Postgres records the durable index-job state.
+5. Purge removes project/source evidence from retrieval stores and retains only
+   an audit tombstone without raw evidence.
+6. Reindex refreshes existing Core-held artifacts. It is not a claim that Core
+   can re-read an external source; full reparse requires Collector reingestion.
+7. Production configuration rejects local model loading, memory-only rate
+   limits, inline workers, wildcard CORS, local ingest, and `create_all`.
+8. When logs, deploy data, or incident history are absent, investigation must
+   return a missing-evidence warning rather than unsupported root-cause certainty.

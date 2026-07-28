@@ -6,6 +6,8 @@ IncidentOps ingests code, configuration, API contracts, runbooks, logs, deploy r
 
 It is built for the moment after an engineer asks: *What changed? Where is the relevant code? What evidence do we actually have?* The answer should be grounded in files and metadata, not a confident summary with no trail back to reality.
 
+> **Version context:** This repository is the active **v2 architecture rewrite**. If you encountered IncidentOps v1 in a resume or portfolio, that refers to the earlier PostgreSQL/pgvector-era implementation and deployment work. This codebase replaces vector storage with Qdrant, brings the Collector into this repository, and is still under active hardening. It must not be read as a completed production release.
+
 > **Current status:** This repository has an implemented Collector-first RAG backend and Azure deployment scaffolding. It is **not yet production-grade**: the GPU retrieval path and complete Azure deployment have not been live-validated in the current codebase. See [What we do not claim](#what-we-do-not-claim).
 
 ## Why IncidentOps
