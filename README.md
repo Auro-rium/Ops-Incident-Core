@@ -8,7 +8,7 @@ It is built for the moment after an engineer asks: *What changed? Where is the r
 
 > **Version context:** This repository is the active **v2 architecture rewrite**. If you encountered IncidentOps v1 in a resume or portfolio, that refers to the earlier PostgreSQL/pgvector-era implementation and deployment work. This codebase replaces vector storage with Qdrant, brings the Collector into this repository, and is still under active hardening. It must not be read as a completed production release.
 
-> **Current status:** This repository has an implemented Collector-first RAG backend and Azure deployment scaffolding. It is **not yet production-grade**: the GPU retrieval path and complete Azure deployment have not been live-validated in the current codebase. See [What we do not claim](#what-we-do-not-claim).
+> **Current status (2026-07-28):** Commit `ca0eae2` passed the Core and frontend GitHub Actions validation workflow. The repository has an implemented Collector-first RAG backend and Azure deployment scaffolding, but the Azure resource groups are currently absent and no live Azure deployment is claimed. It is **not yet production-grade**. See [What we do not claim](#what-we-do-not-claim).
 
 ## Why IncidentOps
 
@@ -130,8 +130,9 @@ The Compose stack is for development only. It runs PostgreSQL, Qdrant, Redis, th
 git clone <your-fork-or-remote> inspection-ops
 cd inspection-ops
 cp .env.example .env
-docker compose up -d --build postgres qdrant redis api core-worker web
-docker compose exec api alembic upgrade head
+docker compose up -d --build postgres qdrant redis
+docker compose run --rm --no-deps api alembic upgrade head
+docker compose up -d --build api core-worker web
 ```
 
 Create a development-only administrator using a password you choose:
@@ -164,12 +165,22 @@ The smoke creates an isolated project and sends a tiny normalized batch; it does
 
 ### Run checks
 
+The integration tests run from the host and open direct database sessions, so
+override the Compose-container hostname before running them:
+
 ```bash
+export DATABASE_URL="postgresql+asyncpg://incidentops:incidentops@127.0.0.1:${POSTGRES_PORT:-5433}/incidentops"
 uv run --extra dev ruff check .
 uv run --extra dev python -m pytest tests/unit tests/integration -q
 uv run python -m compileall incidentops apps scripts
-python scripts/check_migrations.py
+docker compose exec api python scripts/check_migrations.py
 ```
+
+The checked-in `.env.example` is Compose-oriented: its database hostname is
+`postgres`, the Compose service name. For a host-run command, set
+`DATABASE_URL` explicitly to `127.0.0.1:${POSTGRES_PORT:-5433}` or run the
+command inside the API container as shown above. Never use this local file as a
+production environment file.
 
 ## Core API Tour
 
@@ -214,19 +225,29 @@ Development and tests can use deterministic local-hash embeddings. Production co
 - Azure ML GPU endpoints for BGE-M3-compatible embeddings and reranking.
 - Azure Container Apps, PostgreSQL, Qdrant, Redis, Key Vault, ACR, and Log Analytics for the intended deployment shape.
 
-No production model should be loaded inside Collector or Core. Private GPU endpoints need private networking and immutable model revisions; that live path is not yet proven. Details are in [technical.md](technical.md#model-boundary).
+No production model should be loaded inside Collector or Core. The checked-in
+Azure scaffold is not a private-network production deployment: it currently
+enables public-network access for PostgreSQL, Redis, and Key Vault, and expects
+an externally managed Qdrant endpoint. It must be hardened with VNet/private
+endpoints and reviewed before deployment. Private GPU endpoints also need
+private networking and immutable model revisions; that live path is not yet
+proven. Details are in [technical.md](technical.md#model-boundary).
 
 Pushes to `core` run Core lint/migration/API/unit/integration checks plus the
-Next.js typecheck and production build. Azure image build, deployment,
-migrations, bootstrap, smoke, and the bounded release benchmark remain
-**manual-only** through GitHub Actions `workflow_dispatch`, so a normal push
-cannot create cloud cost. Select `run_release_benchmark` only when the required
-Azure secrets, Qdrant endpoint, and bounded benchmark budget are available.
+Next.js typecheck and production build. The most recently verified run is
+[30384027371](https://github.com/Auro-rium/Ops-Incident-Core/actions/runs/30384027371),
+which passed on 2026-07-28. Azure image build, deployment, migrations,
+bootstrap, smoke, and the bounded release benchmark remain **manual-only**
+through GitHub Actions `workflow_dispatch`, so a normal push cannot create
+cloud cost. Both known Azure resource groups (`incidentops-demo-rg` and
+`incidentops-rg`) were absent on 2026-07-28. Select
+`run_release_benchmark` only after deliberately reprovisioning Azure, supplying
+the required secrets and private Qdrant endpoint, and approving the cost.
 
 ## Documentation Map
 
 - [technical.md](technical.md): authoritative architecture, data contracts, security boundaries, retrieval design, deployment state, and known limits.
-- [plan.md](plan.md): six-phase delivery plan, separating implemented work from Azure validation and the later AWS-only release gates.
+- [plan.md](plan.md): six-phase delivery plan and current validation state, including the unresolved Azure proof and later AWS-only release gates.
 - [`.env.example`](.env.example): safe local-development settings shape.
 - [`.env.production.example`](.env.production.example): production contract without secrets.
 - [`eval/query_classes/`](eval/query_classes): deterministic retrieval fixtures.
@@ -240,3 +261,6 @@ Three rules keep this system useful:
 3. **Claims stay measurable.** Ranking, model, and deployment changes need tests and a stated validation boundary; never turn a local harness result into a cloud performance claim.
 
 Keep generated caches, environment files, benchmark worktrees, and credentials out of Git. This repository does not currently declare a license; confirm usage and distribution terms with the owner before reusing it.
+
+The two Markdown files under `tests/fixtures/basic_incident/` are synthetic
+test evidence, not operational runbooks or incident history for a real system.

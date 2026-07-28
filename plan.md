@@ -36,6 +36,15 @@ The primary repository is `Ops-Incident-Core`. It currently contains:
 - Azure infrastructure and deployment scripts requiring renewed live validation.
 - A minimal frontend under `apps/web`.
 
+Validation snapshot, 2026-07-28:
+
+- Commit `ca0eae2` passed GitHub Actions run `30384027371` for Core tests and
+  the frontend typecheck/production build.
+- No live Azure proof exists in the current repository state. The checked Azure
+  resource groups `incidentops-demo-rg` and `incidentops-rg` are absent.
+- A manual Azure workflow dispatch would recreate billable resources. It must
+  not be treated as an automatic continuation of the push validation.
+
 Important boundaries:
 
 - The active vector path uses Qdrant. PostgreSQL stores business state, chunk text, metadata, and lexical indexes only.
@@ -108,7 +117,12 @@ Replace the previous PostgreSQL vector path with Qdrant while preserving Postgre
 
 ## Status
 
-Implemented and locally verified. Core writes and searches vectors through Qdrant, PostgreSQL retains authoritative chunk text and lexical search, fresh installs use stock PostgreSQL without vector extensions, and the cutover migration conditionally removes legacy vector artifacts. Azure deployment and live benchmark proof remain release gates in Phase 5.
+Implemented and verified in local/CI coverage. Core writes and searches vectors
+through Qdrant, PostgreSQL retains authoritative chunk text and lexical search,
+fresh installs use stock PostgreSQL without vector extensions, and the cutover
+migration conditionally removes legacy vector artifacts. Azure deployment and
+live benchmark proof remain release gates in Phase 5; no current Azure resource
+group is deployed.
 
 ## Deliverables
 
@@ -156,7 +170,12 @@ Migration rules:
 - The cutover migration conditionally removes legacy vector artifacts for existing databases.
 - Validate clean installs and upgrades before every deployment.
 
-Azure target is a private self-hosted Qdrant service in Azure, with authenticated internal-only access, persistent storage, backups, health checks, and an explicit restore procedure. It must not have unauthenticated public ingress. This deployment choice still requires live Azure validation in Phase 5.
+The intended Azure target is a private self-hosted Qdrant service with
+authenticated internal-only access, persistent storage, backups, health checks,
+and an explicit restore procedure. It must not have unauthenticated public
+ingress. The current Bicep does not provision Qdrant; it requires an external
+endpoint. Private Azure networking is not implemented in that scaffold, so this
+target remains a Phase 5 design requirement rather than deployment proof.
 
 ## Verification
 
@@ -187,7 +206,15 @@ Produce high-signal, inspectable retrieval units for broad engineering evidence 
 
 ## Status
 
-Implemented and locally verified for the deterministic ingestion slice. Collector now resolves repository Git facts when present, adds bounded explainable metadata, and carries per-batch Core parser/indexing counters into sync diagnostics. Core emits source-aware chunks for the supported formats below, and retrieval/evidence packing recognizes those chunk types. A real local Collector-to-Core sync created six documents and nine chunks from the fixture; its repeat sync created zero chunks and marked all six documents unchanged. Remaining Phase 2 release gates are real-repository benchmarks, malformed-file coverage expansion, and Azure proof in Phase 5.
+Implemented and verified for the deterministic ingestion slice. Collector
+resolves repository Git facts when present, adds bounded explainable metadata,
+and carries per-batch Core parser/indexing counters into sync diagnostics. Core
+emits source-aware chunks for the supported formats below, and
+retrieval/evidence packing recognizes those chunk types. Fixture tests verify
+unchanged-document skipping and changed-document replacement; this plan does
+not publish fixture counts as a benchmark. Remaining Phase 2 release gates are
+real-repository benchmarks, malformed-file coverage expansion, and Azure proof
+in Phase 5.
 
 ## Collector Deliverables
 
@@ -266,7 +293,13 @@ Build general retrieval that adapts to question type, combines independent evide
 
 Implemented and locally verified for the retrieval foundation. Core now runs bounded vector, lexical, exact metadata/path, and architecture-only deterministic graph branches. It fuses their independently ranked candidates with weighted reciprocal-rank fusion, records per-branch latency and failure diagnostics, and keeps candidate output project-scoped. The graph is built only from indexed facts: paths, services, packages, symbols, endpoints, and deploy hashes. It does not infer relationships or permit model-created edges.
 
-Remote reranking now redacts and bounds query/candidate payloads, limits candidate count, and is skipped for decisive direct lookups or unsupported runtime investigations. The CRAG-style evidence gate therefore returns missing-evidence guidance before an unnecessary remote reranker call. A clean PostgreSQL/Qdrant API harness passed all unit and integration tests after the migration. Remaining release gates are measured query-class eval gains, Azure GPU reranker validation, cache behavior, and live Azure latency/token benchmarks.
+Remote reranking redacts and bounds query/candidate payloads, limits candidate
+count, and is skipped for decisive direct lookups or unsupported runtime
+investigations. The CRAG-style evidence gate therefore returns
+missing-evidence guidance before an unnecessary remote reranker call. The
+current Core suite passed in GitHub Actions run `30384027371`; no Azure GPU
+reranker call, cache behavior measurement, or live latency/token benchmark is
+claimed. Those remain release gates.
 
 ## Query Routing
 
@@ -354,9 +387,9 @@ Authorized diagnostics expose intent/confidence, budgets, branch counts/latencie
 Implemented in Core with migration-backed operational runs/findings/events,
 worker dispatch, bounded retry/timeout handling, project-scoped endpoints,
 redacted event payloads, metrics, tracing hooks, and local unit/integration/
-smoke verification. Cloud queue durability, OpenTelemetry export, and
-threshold behavior remain Phase 5 Azure validation gates; they are not claimed
-as live proof by this document.
+smoke verification. The 2026-07-28 CI run passed the current suite. Cloud queue
+durability, OpenTelemetry export, and threshold behavior remain Phase 5 Azure
+validation gates; they are not claimed as live proof by this document.
 
 ## Goal
 
@@ -426,15 +459,17 @@ Expose the real system clearly, deploy it reproducibly, and prove the architectu
 The Core-backed operator console, same-origin browser-to-Core proxy,
 membership-scoped project listing, source-integrity counters, Azure frontend
 Container App port wiring, bounded benchmark-job arguments, and manual CI
-release-benchmark gate are implemented and locally statically validated. The
-frontend image is now included by the manual Azure workflow instead of being
-deliberately skipped.
+release-benchmark gate are implemented. Commit `ca0eae2` passed Core and
+frontend CI in run `30384027371`; the isolated local API/proxy smoke also
+passed. The frontend image is included by the manual Azure workflow instead of
+being deliberately skipped.
 
-This is not live Azure proof. No current document may claim that the frontend,
-private Qdrant connectivity, Collector benchmark, GPU reranker, browser smoke,
-or release thresholds ran successfully in Azure until an actual manual workflow
-run produces retained measurements. Azure network exposure also requires a live
-security review before it can be called production-grade.
+This is not live Azure proof. Both checked Azure resource groups are absent, so
+there is no current Azure frontend, Core API, Qdrant connection, Collector
+benchmark, GPU reranker, browser smoke, or release-threshold measurement. A
+manual deployment will recreate billable resources. The current Bicep also
+needs private-network hardening and a live security review before it can be
+called production-grade.
 
 ## Basic Frontend
 
@@ -463,14 +498,18 @@ Core API, worker, Collector, frontend, and MCP Container Apps
 Migration and bootstrap jobs
 PostgreSQL Flexible Server
 Redis
-managed Qdrant in an Azure region, preferred
+Externally managed private Qdrant endpoint (not provisioned by Bicep)
 Azure OpenAI embeddings and synthesis
 Azure GPU reranker endpoint
 Key Vault
 Log Analytics and Azure Monitor
 ```
 
-Only frontend and authenticated Core API ingress are public. MCP is protected. Collector, worker, PostgreSQL, Redis, and Qdrant remain internal or access-restricted.
+The intended design exposes only frontend and authenticated Core API ingress;
+MCP is protected and Collector/worker/Qdrant are internal. This is not what the
+current Bicep fully enforces: PostgreSQL, Redis, and Key Vault have
+public-network access enabled in the scaffold. Private endpoints and
+restrictive networking are mandatory before a production deployment.
 
 CI/CD must run lint/tests/evals, build images, validate Bicep, push to ACR, run migrations/checks, deploy, verify Qdrant dimension, bootstrap through secrets, and run cloud, MCP, browser, and bounded post-deploy eval smokes. GitHub OIDC subscription and role configuration must be proven before claiming CI/CD works.
 

@@ -10,8 +10,12 @@ investigation, workflow, evaluation, readiness, and MCP interfaces.
 This document is the single source of technical documentation for the Core
 repository. It describes code and intended cloud deployment boundaries. It does
 not claim that a cloud component is live unless a successful deployment smoke
-has recorded it. At the time of this document, the cloud GPU retrieval path is
-code and deployment scaffolding; no current live Azure proof is recorded.
+has recorded it. As of 2026-07-28, commit `ca0eae2` passed the repository's
+Core and frontend GitHub Actions validation workflow. The cloud GPU retrieval
+path remains code and deployment scaffolding; no current live Azure proof is
+recorded. The known Azure resource groups `incidentops-demo-rg` and
+`incidentops-rg` were absent at that check, so there is no deployed Azure
+endpoint to infer from this source tree.
 
 ### Version context
 
@@ -300,6 +304,7 @@ GET    /health
 GET    /ready
 GET    /v1/capabilities
 GET    /v1/runtime/status
+GET    /v1/projects
 GET    /v1/projects/{project_id}/readiness
 POST   /v1/projects/{project_id}/sources
 POST   /v1/projects/{project_id}/collectors/register
@@ -309,6 +314,7 @@ POST   /v1/sources/{source_id}/syncs/{sync_id}/finish
 DELETE /v1/projects/{project_id}/sources/{source_id}
 DELETE /v1/projects/{project_id}
 POST   /v1/projects/{project_id}/sources/{source_id}/reindex
+GET    /v1/projects/{project_id}/sources/{source_id}/integrity
 POST   /v1/search
 POST   /v1/answer
 POST   /v1/investigate
@@ -368,6 +374,15 @@ template configures consumers for it but does **not** provision a Qdrant
 service. AKS, NAT Gateway, multi-region deployment, and Azure AI Search are
 deliberately excluded from the current architecture.
 
+The checked-in Bicep is a **deployment scaffold, not a private production
+network design**. It currently enables public-network access for PostgreSQL,
+Redis, and Key Vault, while Core API and frontend use external Container Apps
+ingress. PostgreSQL permits Azure services through a firewall rule; Redis and
+Key Vault still rely on credentials/RBAC rather than private networking. This
+does not satisfy the intended internal-only data-plane requirement. Do not
+deploy it as production until VNet integration, private endpoints, restrictive
+firewall rules, private DNS, and a security review are implemented and tested.
+
 Deployment order:
 
 1. Build the Core image, which contains API, worker, and Collector commands.
@@ -384,12 +399,14 @@ Deployment order:
    MCP smoke checks.
 
 GitHub Actions runs lint, migrations, API startup, unit/integration tests, and
-a Next.js production type/build check on pushes to `core`. Azure
-build/deploy/migration/smoke is manual-only through `workflow_dispatch`; this
-prevents an ordinary code push from creating cloud resources or costs. The
-manual deployment job builds the Core and frontend images, validates both Bicep
-templates, runs migrations/bootstrap/smoke, and can run the bounded release
-benchmark only when `run_release_benchmark=true`. A successful manual run is
+a Next.js production type/build check on pushes to `core`. Run `30384027371`
+passed those CI jobs on 2026-07-28. Azure build/deploy/migration/smoke is
+manual-only through `workflow_dispatch`; this prevents an ordinary code push
+from creating cloud resources or costs. The manual deployment job builds the
+Core and frontend images, validates both Bicep templates, runs
+migrations/bootstrap/smoke, and can run the bounded release benchmark only when
+`run_release_benchmark=true`. It will create billable resources when the
+resource group is absent. A successful manual run with retained measurements is
 required before claiming live Azure validation.
 
 ### Browser Boundary
@@ -427,17 +444,17 @@ Publishing a benchmark requires real values for:
 Two public repository benchmarks are useful for code/docs ingestion. They do
 not prove runtime RCA. A genuine incident evidence pack with logs, deploy
 history, runbooks, and postmortems is required before claiming root-cause
-capability. The previously recorded Temporal-scale run had zero Core documents
-and zero chunks after upload failures; it is a failure baseline, not product
-proof.
+capability. This repository contains no retained, reproducible
+multi-repository Azure benchmark report, so no Temporal-scale metric is current
+product proof.
 
 ## Current Limits and Next Work
 
 The system is not production-grade yet. Blocking gaps are:
 
-1. Configure Azure OIDC, explicit deployment variables, and deploy the stack
-   successfully through the manual workflow.
-2. Add VNet/private endpoint networking before enabling private Azure ML GPU
+1. Deliberately reprovision Azure, configure Azure OIDC and explicit deployment
+   variables, then deploy the stack successfully through the manual workflow.
+2. Add VNet/private endpoint networking before enabling Azure ML GPU
    endpoints.
 3. Run clean multi-repository ingestion and query-class evaluations with
    published measurements.
@@ -462,9 +479,10 @@ implemented but not live-validated cloud GPU retrieval path.
 | Hybrid retrieval and direct evidence graph | Yes | Unit/integration coverage | The graph contains direct deterministic facts only. |
 | Redis Streams queue and durable index jobs | Yes | Unit/integration coverage | Postgres remains the business-state authority. |
 | Azure OpenAI and Azure ML client contracts | Yes | Configuration/startup validation | No current live Azure proof is recorded. |
-| Azure Container Apps infrastructure and scripts | Yes | Static/script validation only | Manual deployment is required and cloud resources incur cost. |
+| Azure Container Apps infrastructure and scripts | Yes | Bicep/script validation; no deployed resource group | Current Bicep networking is not production-private. |
 | Phase 4 operational agents and event redaction | Yes | Unit/integration coverage | Cloud durability and thresholds still need live Azure validation. |
 | MCP facade | Yes | Unit/integration coverage | MCP delegates to Core HTTP APIs and cannot ingest. |
+| Operator console and same-origin proxy | Yes | Frontend build plus isolated local proxy smoke | No live Azure frontend is currently deployed. |
 
 ## Operational Invariants
 
