@@ -3,9 +3,11 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-incidentops-demo-swc-rg}"
-COLLECTOR_APP_NAME="${COLLECTOR_APP_NAME:-incidentops-collector}"
-MCP_APP_NAME="${MCP_APP_NAME:-incidentops-mcp}"
+AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:?AZURE_RESOURCE_GROUP is required}"
+NAME_PREFIX="${NAME_PREFIX:?NAME_PREFIX is required}"
+CORE_API_APP_NAME="${CORE_API_APP_NAME:-${NAME_PREFIX}-core-api}"
+COLLECTOR_APP_NAME="${COLLECTOR_APP_NAME:-${NAME_PREFIX}-collector}"
+MCP_APP_NAME="${MCP_APP_NAME:-${NAME_PREFIX}-mcp}"
 API_URL="${API_URL:-}"
 FRONTEND_URL="${FRONTEND_URL:-}"
 SMOKE_EMAIL="${SMOKE_EMAIL:-${BOOTSTRAP_ADMIN_EMAIL:-admin@incidentops.local}}"
@@ -20,7 +22,7 @@ trap 'rm -f "$WORK_FILE"' EXIT
 if [[ -z "$API_URL" ]]; then
   API_URL="$(az containerapp show \
     --resource-group "$AZURE_RESOURCE_GROUP" \
-    --name incidentops-core-api \
+    --name "$CORE_API_APP_NAME" \
     --query 'properties.configuration.ingress.fqdn' \
     --output tsv \
     --only-show-errors)"

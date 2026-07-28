@@ -2,11 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-incidentops-demo-swc-rg}"
-CORE_APP_NAME="${CORE_APP_NAME:-incidentops-core-api}"
-FRONTEND_APP_NAME="${FRONTEND_APP_NAME:-incidentops-frontend}"
-BENCHMARK_JOB_NAME="${BENCHMARK_JOB_NAME:-incidentops-benchmark-job}"
-MCP_APP_NAME="${MCP_APP_NAME:-incidentops-mcp}"
+AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:?AZURE_RESOURCE_GROUP is required}"
+NAME_PREFIX="${NAME_PREFIX:?NAME_PREFIX is required}"
+CORE_APP_NAME="${CORE_APP_NAME:-${NAME_PREFIX}-core-api}"
+FRONTEND_APP_NAME="${FRONTEND_APP_NAME:-${NAME_PREFIX}-frontend}"
+BENCHMARK_JOB_NAME="${BENCHMARK_JOB_NAME:-${NAME_PREFIX}-benchmark-job}"
+MCP_APP_NAME="${MCP_APP_NAME:-${NAME_PREFIX}-mcp}"
 SMOKE_EMAIL="${SMOKE_EMAIL:-${BOOTSTRAP_ADMIN_EMAIL:-admin@incidentops.local}}"
 SMOKE_PASSWORD="${SMOKE_PASSWORD:-${BOOTSTRAP_ADMIN_PASSWORD:-}}"
 PROJECT_ID="${PROJECT_ID:-${INCIDENTOPS_PROJECT_ID:-}}"
@@ -241,7 +242,7 @@ print('Azure User E2E Core Metrics')
 print(json.dumps(metrics, indent=2, sort_keys=True))
 PY
 
-PROJECT_ID="$PROJECT_ID" SEARCH_QUERY="$SEARCH_QUERY" INVESTIGATE_QUERY="$INVESTIGATE_QUERY" MCP_APP_NAME="$MCP_APP_NAME" "$ROOT_DIR/scripts/azure_mcp_smoke.sh" | tee /tmp/incidentops-mcp-smoke.out
+PROJECT_ID="$PROJECT_ID" SEARCH_QUERY="$SEARCH_QUERY" INVESTIGATE_QUERY="$INVESTIGATE_QUERY" NAME_PREFIX="$NAME_PREFIX" MCP_APP_NAME="$MCP_APP_NAME" "$ROOT_DIR/scripts/azure_mcp_smoke.sh" | tee /tmp/incidentops-mcp-smoke.out
 
 python3 - "$STATE_FILE" "$FRONTEND_URL" "$API_URL" <<'PY'
 import json, sys

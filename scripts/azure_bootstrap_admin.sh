@@ -3,8 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-incidentops-demo-swc-rg}"
-BOOTSTRAP_JOB_NAME="${BOOTSTRAP_JOB_NAME:-incidentops-bootstrap-admin}"
+AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:?AZURE_RESOURCE_GROUP is required}"
+NAME_PREFIX="${NAME_PREFIX:?NAME_PREFIX is required}"
+BOOTSTRAP_JOB_NAME="${BOOTSTRAP_JOB_NAME:-${NAME_PREFIX}-bootstrap-admin}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-600}"
 
 "$ROOT_DIR/scripts/azure_login_check.sh"

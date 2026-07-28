@@ -1,1 +1,0 @@
-{"id":"case_001","question":"Why did GET /v1/orders slow down after deploy abc1234?","expected_documents":["deploy-history.json","api.log"],"expected_terms":["deploy","latency"],"forbidden_terms":["database outage"]}

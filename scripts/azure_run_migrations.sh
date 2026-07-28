@@ -3,10 +3,11 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-incidentops-demo-swc-rg}"
-MIGRATION_JOB_NAME="${MIGRATION_JOB_NAME:-incidentops-core-migrate}"
-CORE_API_APP_NAME="${CORE_API_APP_NAME:-incidentops-core-api}"
-CORE_WORKER_APP_NAME="${CORE_WORKER_APP_NAME:-incidentops-core-worker}"
+AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:?AZURE_RESOURCE_GROUP is required}"
+NAME_PREFIX="${NAME_PREFIX:?NAME_PREFIX is required}"
+MIGRATION_JOB_NAME="${MIGRATION_JOB_NAME:-${NAME_PREFIX}-core-migrate}"
+CORE_API_APP_NAME="${CORE_API_APP_NAME:-${NAME_PREFIX}-core-api}"
+CORE_WORKER_APP_NAME="${CORE_WORKER_APP_NAME:-${NAME_PREFIX}-core-worker}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-900}"
 
 "$ROOT_DIR/scripts/azure_login_check.sh"

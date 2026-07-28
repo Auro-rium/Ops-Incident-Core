@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:?AZURE_RESOURCE_GROUP is required}"
-BENCHMARK_JOB_NAME="${BENCHMARK_JOB_NAME:-incidentops-benchmark-job}"
+NAME_PREFIX="${NAME_PREFIX:?NAME_PREFIX is required}"
+BENCHMARK_JOB_NAME="${BENCHMARK_JOB_NAME:-${NAME_PREFIX}-benchmark-job}"
 
 execution_name="$(az containerapp job start --resource-group "$AZURE_RESOURCE_GROUP" --name "$BENCHMARK_JOB_NAME" --query name --output tsv --only-show-errors)"
 printf 'Started benchmark execution %s\n' "$execution_name"

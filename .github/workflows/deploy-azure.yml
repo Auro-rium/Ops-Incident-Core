@@ -1,4 +1,4 @@
-name: Deploy Azure Demo
+name: Validate and Manually Deploy Azure
 
 on:
   push:
@@ -24,13 +24,13 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP || 'incidentops-demo-swc-rg' }}
-  AZURE_LOCATION: ${{ vars.AZURE_LOCATION || 'swedencentral' }}
-  ACR_NAME: ${{ vars.ACR_NAME || 'incidentopsacr6763' }}
+  AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+  ACR_NAME: ${{ vars.ACR_NAME }}
   IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
-  NAME_PREFIX: ${{ vars.AZURE_NAME_PREFIX || 'incidentops' }}
-  ENVIRONMENT_NAME: ${{ vars.AZURE_ENVIRONMENT_NAME || 'demo' }}
-  CORS_ORIGINS: ${{ vars.CORS_ORIGINS || 'https://incidentops-frontend.kindbush-21bd9321.swedencentral.azurecontainerapps.io' }}
+  NAME_PREFIX: ${{ vars.AZURE_NAME_PREFIX }}
+  ENVIRONMENT_NAME: ${{ vars.AZURE_ENVIRONMENT_NAME }}
+  CORS_ORIGINS: ${{ vars.CORS_ORIGINS }}
 
 jobs:
   core-tests:
@@ -116,6 +116,7 @@ jobs:
     name: Build, deploy, migrate, and smoke Azure
     runs-on: ubuntu-latest
     needs: core-tests
+    if: github.event_name == 'workflow_dispatch'
     environment: azure-demo
     steps:
       - name: Checkout Core
@@ -145,8 +146,18 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Validate Azure infrastructure template
+        working-directory: Ops-Incident-Core
+        run: az bicep build --file infra/azure/main.bicep --stdout >/dev/null
+
       - name: Validate required variables
         run: |
+          test -n "$AZURE_RESOURCE_GROUP" || { echo "AZURE_RESOURCE_GROUP variable is required"; exit 1; }
+          test -n "$AZURE_LOCATION" || { echo "AZURE_LOCATION variable is required"; exit 1; }
+          test -n "$ACR_NAME" || { echo "ACR_NAME variable is required"; exit 1; }
+          test -n "$NAME_PREFIX" || { echo "AZURE_NAME_PREFIX variable is required"; exit 1; }
+          test -n "$ENVIRONMENT_NAME" || { echo "AZURE_ENVIRONMENT_NAME variable is required"; exit 1; }
+          test -n "$CORS_ORIGINS" || { echo "CORS_ORIGINS variable is required"; exit 1; }
           test -n "${{ secrets.POSTGRES_PASSWORD }}" || { echo "POSTGRES_PASSWORD secret is required"; exit 1; }
           test -n "${{ secrets.JWT_SECRET }}" || { echo "JWT_SECRET secret is required"; exit 1; }
           test -n "${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}" || { echo "BOOTSTRAP_ADMIN_EMAIL secret is required"; exit 1; }

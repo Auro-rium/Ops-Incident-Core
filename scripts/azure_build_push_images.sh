@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-incidentops-demo-swc-rg}"
-AZURE_LOCATION="${AZURE_LOCATION:-swedencentral}"
+AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:?AZURE_RESOURCE_GROUP is required}"
+AZURE_LOCATION="${AZURE_LOCATION:?AZURE_LOCATION is required}"
 ACR_NAME="${ACR_NAME:?ACR_NAME is required}"
 IMAGE_TAG="${IMAGE_TAG:-$(git -C "$ROOT_DIR" rev-parse --short HEAD)}"
 CORE_REPO_PATH="${CORE_REPO_PATH:-$ROOT_DIR}"
@@ -30,9 +30,8 @@ detect_repo() {
 FRONTEND_REPO_PATH=""
 if [[ "$BUILD_FRONTEND" == "true" ]]; then
   FRONTEND_REPO_PATH="$(detect_repo "${FRONTEND_REPO_PATH:-}" \
-    "$ROOT_DIR/../Ops-Incident-frontend" \
-    "$ROOT_DIR/../incidentops-frontend")" || {
-    echo "Frontend repo not found. Set FRONTEND_REPO_PATH." >&2
+    "$ROOT_DIR/apps/web")" || {
+    echo "Frontend build context not found. Set FRONTEND_REPO_PATH." >&2
     exit 1
   }
 fi

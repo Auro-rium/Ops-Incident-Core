@@ -10,9 +10,8 @@ investigation, workflow, evaluation, readiness, and MCP interfaces.
 This document is the single source of technical documentation for the Core
 repository. It describes code and intended cloud deployment boundaries. It does
 not claim that a cloud component is live unless a successful deployment smoke
-has recorded it. At the time of this document, the cloud GPU retrieval path is code and
-deployment scaffolding; its Azure deployment remains blocked on valid Azure
-OIDC subscription configuration and private network connectivity.
+has recorded it. At the time of this document, the cloud GPU retrieval path is
+code and deployment scaffolding; no current live Azure proof is recorded.
 
 ## Repositories and Responsibilities
 
@@ -20,7 +19,7 @@ OIDC subscription configuration and private network connectivity.
 |---|---|---|
 | `Ops-Incident-Core: incidentops.collector` | source access, path policy, redaction, deterministic metadata extraction, `NormalizedDocument` production, sync checkpoints | retrieval, embeddings, model calls, incident diagnosis, database access |
 | `Ops-Incident-Core: Core services` | auth/RBAC, projects, sources, syncs, parsing/chunking, indexing, retrieval, investigation, workflows, evals, audit, MCP facade | arbitrary filesystem crawling outside configured Collector roots |
-| `Ops-Incident-frontend` | operator-facing UI over Core APIs | evidence normalization or authorization bypass |
+| `Ops-Incident-Core: apps/web` | minimal operator-facing UI over Core APIs | evidence normalization or authorization bypass |
 
 The Collector-to-Core boundary is intentional even though both runtimes share
 one repository and image: Collector has access to source material; Core has
@@ -89,8 +88,9 @@ sequenceDiagram
   participant U as User or MCP Client
   participant API as Core API
   participant Q as Intent Router
-  participant V as Vector Search
-  participant L as Full Text Search
+  participant V as Qdrant Vector Search
+  participant L as PostgreSQL Full Text Search
+  participant X as Metadata and Graph Search
   participant RR as GPU Reranker
   participant M as Azure OpenAI
 
@@ -98,9 +98,11 @@ sequenceDiagram
   API->>Q: classify query
   Q->>V: vector budget
   Q->>L: lexical budget
+  Q->>X: exact metadata/path; graph for architecture only
   V-->>API: vector candidates
   L-->>API: lexical candidates
-  API->>API: metadata fusion and source-aware boosts
+  X-->>API: deterministic candidates
+  API->>API: weighted RRF and source-aware boosts
   opt ambiguous candidate set
     API->>RR: bounded rerank request
     RR-->>API: scores
@@ -192,11 +194,19 @@ The router classifies requests as `code_location`, `architecture`,
 | deploy regression | deploy history/diffs, logs, code |
 | previous incident | incident reports, runbooks, logs |
 
-Vector and lexical searches execute in parallel when independent DB sessions
-are available. Score fusion combines normalized vector and lexical scores with
-source type, chunk type, metadata, exact path/symbol, service, endpoint, and
-deploy boosts. Generic README or boilerplate evidence is penalized for code or
-runtime questions unless it is an exact match.
+Vector, lexical, and exact metadata/path searches execute in parallel when
+independent database sessions are available. Architecture queries also run a
+bounded deterministic graph branch. Weighted reciprocal-rank fusion uses
+vector `0.40`, lexical `0.30`, metadata/path `0.20`, and graph `0.10` when the
+graph branch applies. Source type, chunk type, metadata, exact path/symbol,
+service, endpoint, and deploy matches add bounded boosts. Generic README or
+boilerplate evidence is penalized for code or runtime questions unless it is
+an exact match.
+
+The graph stores only direct facts derived during indexing: `contains`,
+`defines`, `implements`, and `changed_by` edges across chunk IDs, paths,
+services, packages, symbols, endpoints, and deploy hashes. It does not infer
+call graphs, dependencies, or incident causality.
 
 The reranker is conditional: it runs only for ambiguous candidate sets. Exact
 or decisive code/config/API evidence uses a direct evidence path. Evidence is
@@ -299,8 +309,8 @@ AI Search are deliberately excluded from the current architecture.
 
 Deployment order:
 
-1. Build the Core image, which contains API, worker, and Collector commands,
-   plus frontend and optional GPU runtime images in ACR.
+1. Build the Core image, which contains API, worker, and Collector commands.
+   The optional frontend and GPU runtime images are separate builds.
 2. Deploy infrastructure and Container Apps using Key Vault references.
 3. Run `alembic upgrade head` and `scripts/check_migrations.py` in the
    migration job. Production never calls SQLAlchemy `create_all`.
@@ -309,11 +319,12 @@ Deployment order:
 6. Run health, readiness, Collector sync, search, investigate, workflow, and
    MCP smoke checks.
 
-GitHub Actions uses Azure OIDC. The latest attempted deploy workflow passed
-remote lint, migration, API startup, and unit/integration tests, but the Azure
-deployment job could not authenticate because its OIDC principal had no Azure
-subscription. That is a cloud identity configuration failure, not proof of a
-successful live deployment.
+GitHub Actions runs lint, migrations, API startup, and unit/integration tests
+on pushes to `core`. Azure build/deploy/migration/smoke is manual-only through
+`workflow_dispatch`; this prevents an ordinary code push from creating cloud
+resources or costs. The manual deployment job validates Bicep after Azure OIDC
+login and before resource creation. A successful manual run is required before
+claiming live Azure validation.
 
 ## Evaluation and Proof Standard
 
@@ -338,7 +349,8 @@ proof.
 
 The system is not production-grade yet. Blocking gaps are:
 
-1. Restore Azure OIDC subscription access and deploy the stack successfully.
+1. Configure Azure OIDC, explicit deployment variables, and deploy the stack
+   successfully through the manual workflow.
 2. Add VNet/private endpoint networking before enabling private Azure ML GPU
    endpoints.
 3. Run clean multi-repository ingestion and query-class evaluations with

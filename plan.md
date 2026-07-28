@@ -327,7 +327,12 @@ Exact code/config/API matches use a direct fast path. Runtime RCA without logs, 
 
 ## GraphRAG
 
-Construct deterministic repository, service, package, module, function, endpoint, config, deploy, incident, log-error, and runbook nodes. Supported edges are `contains`, `calls`, `implements`, `configures`, `deploys`, `mentions`, `fails_with`, `documented_by`, and `changed_by`. Enable graph expansion only for architecture, ownership, service-boundary, and dependency questions. LLMs do not invent graph edges.
+Current graph state is deliberately limited to direct indexed facts: `contains`,
+`defines`, `implements`, and `changed_by` edges between chunks, paths, services,
+packages, symbols, endpoints, and deploy hashes. It runs only for architecture
+queries. Future expansion to call, configuration, incident, and dependency
+relations requires a deterministic parser and dedicated evaluation coverage;
+LLMs must never invent graph edges.
 
 Authorized diagnostics expose intent/confidence, budgets, branch counts/latencies/failures, RRF counts, source/chunk distributions, boosts/penalties, rerank use/latency, evidence size, total latency, and cache hits. They never expose secrets or large content.
 

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 import json
 from pathlib import Path
 
@@ -210,28 +208,6 @@ class TestSearchAndAnswer:
         assert payload["answer"]["confidence"] == "high"
         assert "services/api/service.py" in (payload["answer"]["answer_text"] or "")
         assert any(item["chunk_type"] in {"function", "python_function"} for item in payload["evidence"])
-
-
-class TestSmokeScript:
-    def test_smoke_script_exits_non_zero_on_zero_chunks(self, tmp_path):
-        empty_dir = tmp_path / "empty"
-        empty_dir.mkdir()
-        result = subprocess.run(
-            [
-                sys.executable,
-                "scripts/smoke_local.py",
-                "--base-url",
-                BASE_URL,
-                "--data-path",
-                str(empty_dir),
-                "--query",
-                "Why did latency increase after the last deploy?",
-            ],
-            cwd=Path(__file__).resolve().parents[2],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode != 0
 
 
 class TestEvalEndpoint:

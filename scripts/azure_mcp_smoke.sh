@@ -2,8 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-incidentops-demo-swc-rg}"
-MCP_APP_NAME="${MCP_APP_NAME:-incidentops-mcp}"
+AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:?AZURE_RESOURCE_GROUP is required}"
+NAME_PREFIX="${NAME_PREFIX:?NAME_PREFIX is required}"
+MCP_APP_NAME="${MCP_APP_NAME:-${NAME_PREFIX}-mcp}"
 PROJECT_ID="${PROJECT_ID:-${INCIDENTOPS_PROJECT_ID:-}}"
 SEARCH_QUERY="${SEARCH_QUERY:-Where is the history service implemented?}"
 INVESTIGATE_QUERY="${INVESTIGATE_QUERY:-Which parts of the Temporal repo are relevant to investigating workflow task latency?}"

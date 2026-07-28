@@ -6,9 +6,12 @@ API_BASE_URL ?= http://127.0.0.1:8000
 SMOKE_EMAIL ?= admin@incidentops.local
 SMOKE_PASSWORD ?= incidentops
 DOCKER_IMAGE ?= incidentops-core:local
-AZURE_RESOURCE_GROUP ?= incidentops-demo-rg
-AZURE_LOCATION ?= eastus
+AZURE_RESOURCE_GROUP ?=
+AZURE_LOCATION ?=
 ACR_NAME ?=
+NAME_PREFIX ?=
+ENVIRONMENT_NAME ?=
+CORS_ORIGINS ?=
 IMAGE_TAG ?= $(shell git rev-parse --short HEAD)
 
 migrate:
@@ -48,16 +51,16 @@ azure-build-push:
 	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) AZURE_LOCATION=$(AZURE_LOCATION) ACR_NAME=$(ACR_NAME) IMAGE_TAG=$(IMAGE_TAG) ./scripts/azure_build_push_images.sh
 
 azure-deploy:
-	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) AZURE_LOCATION=$(AZURE_LOCATION) ACR_NAME=$(ACR_NAME) IMAGE_TAG=$(IMAGE_TAG) ./scripts/azure_deploy.sh
+	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) AZURE_LOCATION=$(AZURE_LOCATION) ACR_NAME=$(ACR_NAME) NAME_PREFIX=$(NAME_PREFIX) ENVIRONMENT_NAME=$(ENVIRONMENT_NAME) CORS_ORIGINS=$(CORS_ORIGINS) IMAGE_TAG=$(IMAGE_TAG) ./scripts/azure_deploy.sh
 
 azure-migrate:
-	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) ./scripts/azure_run_migrations.sh
+	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) NAME_PREFIX=$(NAME_PREFIX) ./scripts/azure_run_migrations.sh
 
 azure-bootstrap-admin:
-	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) ./scripts/azure_bootstrap_admin.sh
+	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) NAME_PREFIX=$(NAME_PREFIX) ./scripts/azure_bootstrap_admin.sh
 
 azure-smoke:
-	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) ./scripts/azure_smoke.sh
+	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) NAME_PREFIX=$(NAME_PREFIX) ./scripts/azure_smoke.sh
 
 azure-teardown:
 	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) ./scripts/azure_teardown.sh
