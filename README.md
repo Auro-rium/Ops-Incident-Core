@@ -252,6 +252,10 @@ trust policy accepts only the `Auro-rium/Ops-Incident-Core` repository's
 `aws-production` environment. The helper records only non-secret GitHub
 variables; it never uploads AWS access keys. Configure exact `CORS_ORIGINS` and
 an optional budget email as repository variables before dispatching the apply.
+This restricted AWS account currently deploys RDS with one day of automated
+backup retention. Paid production accounts should set
+`RDS_BACKUP_RETENTION_DAYS=7` or higher and prove restore behavior before any
+production-grade claim.
 
 ## Documentation Map
 

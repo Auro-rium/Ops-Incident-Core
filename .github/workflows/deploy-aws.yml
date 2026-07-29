@@ -42,6 +42,7 @@ env:
   TF_VAR_bedrock_embedding_model_id: ${{ vars.BEDROCK_EMBEDDING_MODEL_ID || 'amazon.titan-embed-text-v2:0' }}
   TF_VAR_reranker_model_revision: ${{ vars.RERANKER_MODEL_REVISION }}
   TF_VAR_budget_alert_email: ${{ vars.BUDGET_ALERT_EMAIL }}
+  TF_VAR_database_backup_retention_days: ${{ vars.RDS_BACKUP_RETENTION_DAYS || '1' }}
   TF_VAR_collector_project_id: ${{ vars.INCIDENTOPS_PROJECT_ID }}
   TF_VAR_collector_repo_url: ${{ vars.COLLECTOR_REPO_URL }}
   TF_VAR_collector_access_token: ${{ secrets.INCIDENTOPS_COLLECTOR_TOKEN }}

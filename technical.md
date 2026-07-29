@@ -287,6 +287,10 @@ always-on `ml.g5.xlarge` endpoint is a material cost. When enabled, SageMaker
 uses private subnets and a dedicated security group. Bedrock and SageMaker
 credentials are never stored in application settings.
 
+The current restricted AWS account limits RDS automated backup retention to one
+day. Terraform supports 1-35 days; a paid production account should use at
+least seven days and complete a database restore drill.
+
 ## API and Security
 
 Core uses JWT authentication and project-scoped RBAC. Viewers can read allowed

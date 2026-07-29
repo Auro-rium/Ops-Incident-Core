@@ -49,7 +49,7 @@ resource "aws_db_instance" "main" {
   vpc_security_group_ids                = [aws_security_group.database.id]
   publicly_accessible                   = false
   multi_az                              = var.database_multi_az
-  backup_retention_period               = 7
+  backup_retention_period               = var.database_backup_retention_days
   backup_window                         = "03:00-04:00"
   maintenance_window                    = "sun:04:00-sun:05:00"
   auto_minor_version_upgrade            = true

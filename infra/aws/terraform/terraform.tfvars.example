@@ -31,5 +31,6 @@ collector_repo_url   = ""
 
 database_deletion_protection = true
 database_skip_final_snapshot = false
+database_backup_retention_days = 7
 budget_alert_email            = "platform@example.com"
 monthly_budget_usd            = 300

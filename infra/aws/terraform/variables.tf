@@ -102,6 +102,17 @@ variable "database_max_storage_gb" {
   default = 200
 }
 
+variable "database_backup_retention_days" {
+  description = "RDS automated backup retention. Restricted/free-plan accounts may cap this at one day."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.database_backup_retention_days >= 1 && var.database_backup_retention_days <= 35
+    error_message = "database_backup_retention_days must be between 1 and 35."
+  }
+}
+
 variable "database_multi_az" {
   type    = bool
   default = false

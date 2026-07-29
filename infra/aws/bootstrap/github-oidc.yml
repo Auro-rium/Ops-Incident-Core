@@ -90,6 +90,8 @@ Resources:
                   - iam:PutRolePolicy
                   - iam:RemoveRoleFromInstanceProfile
                   - iam:AddRoleToInstanceProfile
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
                   - iam:TagInstanceProfile
                   - iam:TagRole
                   - iam:UntagInstanceProfile
