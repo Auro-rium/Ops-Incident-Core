@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 !.env.production.example
+!.env.aws.production.example
 
 .venv/
 venv/

@@ -9,16 +9,19 @@ from __future__ import annotations
 
 import hashlib
 import asyncio
+import json
 import logging
 import math
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 
 from incidentops.config.settings import get_settings
 from incidentops.retrieval.cache import get_embedding, set_embedding
 from incidentops.retrieval.model_gateway import remote_embed
+from incidentops.observability.metrics import incr, observe_latency
 
 logger = logging.getLogger("incidentops.retrieval.embeddings")
 
@@ -118,6 +121,55 @@ def _azure_embed(texts: list[str]) -> list[list[float]]:
     return embeddings
 
 
+def _bedrock_embed(texts: list[str]) -> list[list[float]]:
+    settings = get_settings()
+    if not settings.bedrock_embeddings_configured:
+        raise RuntimeError("Amazon Bedrock embedding model is not configured")
+    import boto3
+    from botocore.config import Config
+
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name=settings.aws_region,
+        config=Config(
+            connect_timeout=settings.llm_timeout_seconds,
+            read_timeout=settings.llm_timeout_seconds,
+            retries={
+                "max_attempts": settings.embedding_request_max_retries + 1,
+                "mode": "adaptive",
+            },
+        ),
+    )
+
+    def embed_one(text: str) -> list[float]:
+        response = client.invoke_model(
+            modelId=settings.bedrock_embedding_model_id,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps(
+                {
+                    "inputText": text,
+                    "dimensions": settings.embedding_dim,
+                    "normalize": True,
+                }
+            ),
+        )
+        payload = json.loads(response["body"].read())
+        vector = payload.get("embedding")
+        if not isinstance(vector, list) or len(vector) != settings.embedding_dim:
+            raise RuntimeError("Bedrock embedding response dimension mismatch")
+        incr("embedding_input_tokens_total", int(payload.get("inputTextTokenCount", 0) or 0))
+        return [float(value) for value in vector]
+
+    started = time.perf_counter()
+    concurrency = max(1, min(int(settings.bedrock_embedding_max_concurrency), len(texts)))
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        vectors = list(pool.map(embed_one, texts))
+    incr("bedrock_embedding_calls_total", len(texts))
+    observe_latency("bedrock_embedding", (time.perf_counter() - started) * 1000)
+    return vectors
+
+
 def embed_texts(texts: list[str], model_name: str | None = None) -> list[list[float]]:
     if not texts:
         return []
@@ -127,6 +179,8 @@ def embed_texts(texts: list[str], model_name: str | None = None) -> list[list[fl
         raise RuntimeError("azure-ml embeddings require the asynchronous remote gateway")
     if chosen_model.startswith("local-hash"):
         return [_hash_embed(text, settings.embedding_dim) for text in texts]
+    if chosen_model.startswith("aws-bedrock"):
+        return _bedrock_embed(texts)
     if chosen_model.startswith("azure-openai"):
         return _azure_embed(texts)
     try:

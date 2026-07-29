@@ -1,9 +1,6 @@
 name: Validate and Manually Deploy Azure
 
 on:
-  push:
-    branches:
-      - core
   workflow_dispatch:
     inputs:
       image_tag:

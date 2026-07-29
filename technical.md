@@ -10,12 +10,11 @@ investigation, workflow, evaluation, readiness, and MCP interfaces.
 This document is the single source of technical documentation for the Core
 repository. It describes code and intended cloud deployment boundaries. It does
 not claim that a cloud component is live unless a successful deployment smoke
-has recorded it. As of 2026-07-28, commit `ca0eae2` passed the repository's
-Core and frontend GitHub Actions validation workflow. The cloud GPU retrieval
-path remains code and deployment scaffolding; no current live Azure proof is
-recorded. The known Azure resource groups `incidentops-demo-rg` and
-`incidentops-rg` were absent at that check, so there is no deployed Azure
-endpoint to infer from this source tree.
+has recorded it. As of 2026-07-29, the AWS provider contracts and Terraform
+deployment path are implemented and under repository validation. No successful
+live AWS deployment, model preflight, backup/restore drill, or benchmark is
+recorded yet. The remaining Azure deployment files are temporary cutover
+artifacts, not the target runtime.
 
 ### Version context
 
@@ -68,8 +67,8 @@ flowchart LR
     MCP[Core MCP]
   end
   subgraph Model Plane
-    AOAI[Azure OpenAI chat]
-    AML[Azure ML GPU embedder/reranker]
+    BR[Amazon Bedrock chat and embeddings]
+    SM[Private SageMaker GPU reranker]
   end
   UI[Frontend] --> API
   R --> C
@@ -79,9 +78,9 @@ flowchart LR
   API --> RS
   RS --> W
   W --> PG
-  W --> AML
-  API --> AML
-  API --> AOAI
+  W --> BR
+  API --> BR
+  API --> SM
   MCP -->|Core API only| API
 ```
 
@@ -114,8 +113,8 @@ sequenceDiagram
   participant V as Qdrant Vector Search
   participant L as PostgreSQL Full Text Search
   participant X as Metadata and Graph Search
-  participant RR as GPU Reranker
-  participant M as Azure OpenAI
+  participant RR as SageMaker GPU Reranker
+  participant M as Amazon Bedrock
 
   U->>API: query and project ID
   API->>Q: classify query
@@ -252,37 +251,41 @@ and forbidden-term hits.
 ## Model Boundary
 
 Core and Collector must not load production embedding or reranking models.
-The intended model plane is Azure ML managed GPU endpoints:
+The Phase 6 model plane uses AWS managed inference through ECS task-role IAM:
 
 | Endpoint | Model role | Contract |
 |---|---|---|
-| embedding endpoint | BGE-M3 compatible encoder | bounded text list -> 1024-dimension vectors |
-| reranker endpoint | BGE reranker compatible cross encoder | query plus bounded candidates -> one score per candidate |
-| Azure OpenAI | answer synthesis | compact evidence-only answer prompt -> cited response |
+| Amazon Bedrock Titan Text Embeddings V2 | embedding | one bounded text input -> normalized 1024-dimension vector |
+| Private SageMaker endpoint | BGE-compatible cross-encoder reranking | bounded query/candidates -> one score per candidate |
+| Amazon Bedrock Converse | answer synthesis | compact evidence-only prompt -> constrained cited response |
 
-The endpoint runtime requires immutable Hugging Face revisions. Local model
-loading is disabled in production and rejected by startup validation. A
-deterministic local-hash path remains for development/CI compatibility only.
+The SageMaker image embeds a model artifact pinned to an immutable Hugging Face
+revision during the image build. Local model loading is disabled in production
+and rejected by startup validation. A deterministic local-hash path remains for
+development/CI compatibility only.
 
 GPU retrieval requirements:
 
 ```text
 RETRIEVAL_BACKEND=qdrant
-QDRANT_URL=https://your-qdrant-endpoint
+QDRANT_URL=http://qdrant.<private-namespace>:6333
 QDRANT_COLLECTION=incidentops_chunks
-VECTOR_INDEX_VERSION=current
-EMBEDDING_MODEL=azure-ml-bge-m3
-RERANKER_MODEL=azure-ml-bge-reranker-v2-m3
+VECTOR_INDEX_VERSION=aws-v1
+EMBEDDING_MODEL=aws-bedrock-titan-v2
+BEDROCK_EMBEDDING_MODEL_ID=amazon.titan-embed-text-v2:0
+BEDROCK_CHAT_MODEL_ID=<approved-model-or-inference-profile>
+RERANKER_MODEL=BAAI/bge-reranker-v2-m3
+SAGEMAKER_RERANKER_ENDPOINT_NAME=<private-endpoint-name>
 RAG_GPU_ENDPOINT_REQUIRED=true
 RAG_ASYNC_INDEXING=true
 RAG_MODEL_REVISION=<immutable revision>
 EMBEDDING_DIM=1024
 ```
 
-The Azure ML manifests set private endpoint access. Container Apps therefore
-need VNet integration, private DNS, and private connectivity to Azure ML. The
-current budget-demo IaC does not yet provision that path. GPU RAG must remain
-disabled until it does.
+GPU reranking is optional and disabled by Terraform by default because an
+always-on `ml.g5.xlarge` endpoint is a material cost. When enabled, SageMaker
+uses private subnets and a dedicated security group. Bedrock and SageMaker
+credentials are never stored in application settings.
 
 ## API and Security
 
@@ -365,49 +368,49 @@ measured optimization rather than an undocumented correctness risk.
 
 ## Runtime and Deployment
 
-The intended Azure stack is Azure Container Apps for Core API, worker,
-Collector, frontend, MCP, migration/bootstrap jobs; PostgreSQL Flexible Server;
-Azure Cache for Redis; Key Vault; ACR; Log Analytics; Azure OpenAI; and
-optional Azure ML GPU endpoints. Qdrant is a required, externally supplied
-private HTTPS endpoint (`QDRANT_URL` and optional API key); the current Bicep
-template configures consumers for it but does **not** provision a Qdrant
-service. AKS, NAT Gateway, multi-region deployment, and Azure AI Search are
-deliberately excluded from the current architecture.
+The target runtime is AWS `us-east-1`. Terraform under `infra/aws/terraform`
+creates a VPC with public ALB subnets and private application/data subnets;
+ECS Fargate services for API, worker, frontend, Collector, and MCP; one-off
+migration/bootstrap tasks; RDS PostgreSQL; TLS/encrypted ElastiCache Redis;
+Secrets Manager; ECR; CloudWatch; and AWS Backup. Qdrant runs on a private EC2
+instance with IMDSv2, no SSH/public address, an encrypted retained EBS data
+volume, a pinned image, API-key authentication, Cloud Map DNS, and daily
+backups. The public ALB forwards only to the frontend. Core is reached through
+the frontend's fixed same-origin proxy and private Cloud Map service discovery.
 
-The checked-in Bicep is a **deployment scaffold, not a private production
-network design**. It currently enables public-network access for PostgreSQL,
-Redis, and Key Vault, while Core API and frontend use external Container Apps
-ingress. PostgreSQL permits Azure services through a firewall rule; Redis and
-Key Vault still rely on credentials/RBAC rather than private networking. This
-does not satisfy the intended internal-only data-plane requirement. Do not
-deploy it as production until VNet integration, private endpoints, restrictive
-firewall rules, private DNS, and a security review are implemented and tested.
+SageMaker GPU reranking is an explicit billable option and is off by default.
+Collector and MCP services also default to zero replicas until project-scoped
+Core tokens are present. This avoids weakening JWT policy or launching a
+service that cannot authenticate. NAT egress is enabled by default because
+Collector Git access, Qdrant image pulls, AWS APIs, and external package paths
+require egress; a later cost/security review can replace it with VPC endpoints
+where those endpoints cover the traffic.
 
 Deployment order:
 
-1. Build the Core image, which contains API, worker, and Collector commands.
-   The optional frontend and GPU runtime images are separate builds.
-2. Provision or select a private Qdrant endpoint, then provide its URL and
-   credential reference to the deployment. Do not make it public merely to
-   satisfy Container Apps connectivity.
-3. Deploy infrastructure and Container Apps using Key Vault references.
-4. Run `alembic upgrade head` and `scripts/check_migrations.py` in the
-   migration job. Production never calls SQLAlchemy `create_all`.
-5. Bootstrap an admin using Key Vault-backed credentials.
-6. Configure scoped Collector and MCP credentials.
-7. Run health, readiness, Collector sync, search, investigate, workflow, and
-   MCP smoke checks.
+1. Validate Core, frontend, and Terraform on every `core` push.
+2. Bootstrap the retained encrypted S3 state bucket and the repository-and-
+   environment-scoped GitHub OIDC role from `infra/aws/bootstrap`, then manually
+   approve the `aws-production` environment. Long-lived AWS access keys are not
+   stored in GitHub.
+3. Create ECR repositories, then build and push immutable Core/frontend and
+   optional pinned reranker images.
+4. Apply Terraform with ECS services held at zero during first provisioning.
+5. Run `alembic upgrade head` and `scripts/check_migrations.py` as a Fargate
+   one-off task. Production never calls SQLAlchemy `create_all`.
+6. Bootstrap an administrator from Secrets Manager and run Bedrock embedding,
+   chat, and optional SageMaker reranker preflight.
+7. Promote the new ECS task definitions, wait for API/worker/frontend
+   stability, and run the API product smoke. MCP smoke runs inside the private
+   VPC when a scoped project/token is supplied.
+8. Start and record a Qdrant AWS Backup job, then perform a separately approved
+   restore drill before release.
 
-GitHub Actions runs lint, migrations, API startup, unit/integration tests, and
-a Next.js production type/build check on pushes to `core`. Run `30384027371`
-passed those CI jobs on 2026-07-28. Azure build/deploy/migration/smoke is
-manual-only through `workflow_dispatch`; this prevents an ordinary code push
-from creating cloud resources or costs. The manual deployment job builds the
-Core and frontend images, validates both Bicep templates, runs
-migrations/bootstrap/smoke, and can run the bounded release benchmark only when
-`run_release_benchmark=true`. It will create billable resources when the
-resource group is absent. A successful manual run with retained measurements is
-required before claiming live Azure validation.
+The workflow is intentionally manual for apply, so an ordinary push cannot
+create AWS cost. Its existence and static validation do not prove a live
+deployment. A successful OIDC run, migration/model/smoke gates, Qdrant restore,
+clean reingestion, browser/MCP proof, and benchmark report are still required.
+The Azure workflows remain manual-only until those AWS retirement gates pass.
 
 ### Browser Boundary
 
@@ -415,7 +418,7 @@ The Next.js console in `apps/web` is a same-origin client of Core. Its
 `/api/[...path]` route forwards selected browser headers to the fixed runtime
 `CORE_API_BASE_URL`; it does not proxy arbitrary URLs. Qdrant, PostgreSQL,
 Redis, Collector, and model credentials are never browser configuration. The
-container serves port 3000, so Azure Container Apps ingress targets port 3000.
+container serves port 3000, so the ALB target group reaches port 3000 only.
 The console displays Core-backed project/readiness/source/search/investigation/
 workflow/evaluation/operations state and intentionally has no local-path ingest
 control.
@@ -445,29 +448,29 @@ Two public repository benchmarks are useful for code/docs ingestion. They do
 not prove runtime RCA. A genuine incident evidence pack with logs, deploy
 history, runbooks, and postmortems is required before claiming root-cause
 capability. This repository contains no retained, reproducible
-multi-repository Azure benchmark report, so no Temporal-scale metric is current
+multi-repository AWS benchmark report, so no Temporal-scale metric is current
 product proof.
 
 ## Current Limits and Next Work
 
 The system is not production-grade yet. Blocking gaps are:
 
-1. Deliberately reprovision Azure, configure Azure OIDC and explicit deployment
-   variables, then deploy the stack successfully through the manual workflow.
-2. Add VNet/private endpoint networking before enabling Azure ML GPU
-   endpoints.
+1. Configure the AWS OIDC role, encrypted Terraform state bucket, protected
+   GitHub environment, Bedrock model access, certificate/DNS, and budget alerts.
+2. Deploy through the manual AWS workflow and prove migration, readiness,
+   Bedrock, optional SageMaker, and ECS stabilization gates.
 3. Run clean multi-repository ingestion and query-class evaluations with
    published measurements.
 4. Validate async index recovery, cache invalidation, purge, and reingestion
-   under failure/restart conditions in Azure.
+   under failure/restart conditions in AWS.
 5. Add evidence packs with real logs/deploys/incidents before claiming runtime
    RCA quality.
-6. Validate Qdrant vector publication and retrieval consistency before comparing
-   it to additional managed retrieval services.
+6. Complete and record a Qdrant backup restore drill and verify vector
+   publication consistency after restore.
 
 Until those are complete, the correct product claim is: IncidentOps is a
 security-conscious, Collector-first engineering evidence backend with an
-implemented but not live-validated cloud GPU retrieval path.
+implemented but not live-validated AWS retrieval path.
 
 ## Implementation Ledger
 
@@ -478,11 +481,12 @@ implemented but not live-validated cloud GPU retrieval path.
 | Qdrant vector adapter and Qdrant migration | Yes | Local/test coverage | The current Bicep template does not create Qdrant. |
 | Hybrid retrieval and direct evidence graph | Yes | Unit/integration coverage | The graph contains direct deterministic facts only. |
 | Redis Streams queue and durable index jobs | Yes | Unit/integration coverage | Postgres remains the business-state authority. |
-| Azure OpenAI and Azure ML client contracts | Yes | Configuration/startup validation | No current live Azure proof is recorded. |
-| Azure Container Apps infrastructure and scripts | Yes | Bicep/script validation; no deployed resource group | Current Bicep networking is not production-private. |
-| Phase 4 operational agents and event redaction | Yes | Unit/integration coverage | Cloud durability and thresholds still need live Azure validation. |
+| Bedrock embedding/chat and SageMaker reranker contracts | Yes | Focused unit contracts | No current live AWS model preflight is recorded. |
+| AWS ECS/RDS/Redis/Qdrant infrastructure and scripts | Yes | Terraform provider validation | No current live AWS deployment or restore drill is recorded. |
+| Azure deployment artifacts | Temporarily retained | Historical scaffold only | Remove only after every AWS cutover gate passes. |
+| Phase 4 operational agents and event redaction | Yes | Unit/integration coverage | Cloud durability and thresholds still need live AWS validation. |
 | MCP facade | Yes | Unit/integration coverage | MCP delegates to Core HTTP APIs and cannot ingest. |
-| Operator console and same-origin proxy | Yes | Frontend build plus isolated local proxy smoke | No live Azure frontend is currently deployed. |
+| Operator console and same-origin proxy | Yes | Frontend build plus isolated local proxy smoke | No live AWS frontend is currently deployed. |
 
 ## Operational Invariants
 

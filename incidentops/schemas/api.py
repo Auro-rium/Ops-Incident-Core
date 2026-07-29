@@ -180,6 +180,7 @@ class CapabilitiesResponse(BaseModel):
 
 class RuntimeStatusResponse(BaseModel):
     app_env: str
+    cloud_provider: str
     llm_provider: str
     embedding_backend: str
     retrieval_backend: str
@@ -190,6 +191,8 @@ class RuntimeStatusResponse(BaseModel):
     mcp_enabled: bool
     azure_openai_configured: bool
     azure_ai_search_configured: bool
+    bedrock_configured: bool = False
+    sagemaker_reranker_configured: bool = False
     local_fallback_active: bool
     chat_deployment: str | None = None
     embedding_deployment: str | None = None

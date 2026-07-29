@@ -1,0 +1,227 @@
+name: Validate and Manually Deploy AWS
+
+on:
+  push:
+    branches: [core]
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Apply AWS infrastructure and deploy services."
+        required: true
+        type: boolean
+        default: false
+      enable_gpu_reranker:
+        description: "Build and create the billable SageMaker GPU reranker endpoint."
+        required: true
+        type: boolean
+        default: false
+      run_mcp_smoke:
+        description: "Run MCP smoke. Requires MCP desired count, token, and project variables."
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: incidentops-aws-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  TF_STATE_KEY: ${{ vars.TF_STATE_KEY || 'incidentops/production.tfstate' }}
+  TF_VAR_aws_region: ${{ vars.AWS_REGION || 'us-east-1' }}
+  TF_VAR_name_prefix: ${{ vars.AWS_NAME_PREFIX || 'incidentops' }}
+  TF_VAR_environment: production
+  TF_VAR_cors_origins: ${{ vars.CORS_ORIGINS }}
+  TF_VAR_certificate_arn: ${{ vars.ACM_CERTIFICATE_ARN }}
+  TF_VAR_bedrock_chat_model_id: ${{ vars.BEDROCK_CHAT_MODEL_ID }}
+  TF_VAR_bedrock_embedding_model_id: ${{ vars.BEDROCK_EMBEDDING_MODEL_ID || 'amazon.titan-embed-text-v2:0' }}
+  TF_VAR_reranker_model_revision: ${{ vars.RERANKER_MODEL_REVISION }}
+  TF_VAR_budget_alert_email: ${{ vars.BUDGET_ALERT_EMAIL }}
+  TF_VAR_collector_project_id: ${{ vars.INCIDENTOPS_PROJECT_ID }}
+  TF_VAR_collector_repo_url: ${{ vars.COLLECTOR_REPO_URL }}
+  TF_VAR_collector_access_token: ${{ secrets.INCIDENTOPS_COLLECTOR_TOKEN }}
+  TF_VAR_mcp_access_token: ${{ secrets.INCIDENTOPS_MCP_TOKEN }}
+  TF_VAR_bootstrap_admin_email: ${{ vars.BOOTSTRAP_ADMIN_EMAIL || 'admin@incidentops.local' }}
+  TF_VAR_bootstrap_admin_password: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  core-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: incidentops
+          POSTGRES_PASSWORD: incidentops
+          POSTGRES_DB: incidentops
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U incidentops"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+      qdrant:
+        image: qdrant/qdrant:v1.13.2
+        ports: ["6333:6333"]
+    env:
+      APP_ENV: local
+      DATABASE_URL: postgresql+asyncpg://incidentops:incidentops@127.0.0.1:5432/incidentops
+      REDIS_URL: redis://127.0.0.1:6379/0
+      RETRIEVAL_BACKEND: qdrant
+      QDRANT_URL: http://127.0.0.1:6333
+      QDRANT_COLLECTION: incidentops_aws_ci
+      JWT_SECRET: incidentops-local-jwt-secret-change-me
+      ALLOW_LOCAL_SEED_ADMIN: "true"
+      ALLOW_DEMO_PROJECT_BYPASS: "true"
+      USER_REQUEST_LIMIT: "1000"
+      PROJECT_INGESTION_LIMIT: "1000"
+      WORKER_MODE: inline
+      JOB_QUEUE_BACKEND: inline
+      RATE_LIMIT_BACKEND: memory
+      METRICS_BACKEND: memory
+      LOCAL_INGEST_ENABLED: "true"
+      LOCAL_INGEST_ALLOWED_ROOTS: ${{ github.workspace }},/tmp
+      EVAL_CASES_ALLOWED_ROOTS: ${{ github.workspace }},/tmp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run --extra dev ruff check .
+      - run: uv run --extra dev alembic upgrade head
+      - run: uv run --extra dev python scripts/check_migrations.py
+      - name: Bootstrap CI administrator
+        run: uv run --extra dev python -m incidentops.security.bootstrap_admin --email admin@incidentops.local --password incidentops
+      - name: Start API for integration tests
+        run: |
+          uv run --extra dev uvicorn apps.api.main:app --host 127.0.0.1 --port 8000 > api.log 2>&1 &
+          echo "$!" > api.pid
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8000/ready >/dev/null && exit 0
+            sleep 1
+          done
+          cat api.log >&2
+          exit 1
+      - run: uv run --extra dev python -m pytest tests/unit tests/integration -q
+      - run: uv run python -m compileall incidentops apps scripts
+      - name: Stop API
+        if: always()
+        run: test ! -f api.pid || kill "$(cat api.pid)" >/dev/null 2>&1 || true
+
+  frontend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - working-directory: apps/web
+        run: npm ci
+      - working-directory: apps/web
+        run: npm run typecheck
+      - working-directory: apps/web
+        run: npm run build
+
+  terraform-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_version: "1.9.8" }
+      - working-directory: infra/aws/terraform
+        run: terraform fmt -check -recursive
+      - working-directory: infra/aws/terraform
+        run: terraform init -backend=false -input=false
+      - working-directory: infra/aws/terraform
+        run: terraform validate
+
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && inputs.apply
+    needs: [core-tests, frontend-tests, terraform-validate]
+    runs-on: ubuntu-latest
+    environment: aws-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - uses: astral-sh/setup-uv@v5
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_version: "1.9.8" }
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          role-duration-seconds: 7200
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Validate protected deployment configuration
+        run: |
+          test -n "$TF_STATE_BUCKET" || { echo "TF_STATE_BUCKET is required" >&2; exit 1; }
+          test -n "$TF_VAR_cors_origins" || { echo "CORS_ORIGINS is required" >&2; exit 1; }
+          test -n "$TF_VAR_bedrock_chat_model_id" || { echo "BEDROCK_CHAT_MODEL_ID is required" >&2; exit 1; }
+          test -n "$TF_VAR_bootstrap_admin_email" || { echo "BOOTSTRAP_ADMIN_EMAIL is required" >&2; exit 1; }
+          if [[ "${{ inputs.enable_gpu_reranker }}" == "true" ]]; then
+            test -n "$TF_VAR_reranker_model_revision" || { echo "RERANKER_MODEL_REVISION is required" >&2; exit 1; }
+          fi
+
+      - name: Initialize Terraform and create ECR repositories
+        working-directory: infra/aws/terraform
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=$TF_STATE_BUCKET" \
+            -backend-config="key=$TF_STATE_KEY" \
+            -backend-config="region=$AWS_REGION" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+          terraform apply -input=false -auto-approve \
+            -target=aws_ecr_repository.core \
+            -target=aws_ecr_repository.frontend \
+            -target=aws_ecr_repository.reranker
+
+      - name: Build and push immutable images
+        env:
+          BUILD_RERANKER: ${{ inputs.enable_gpu_reranker }}
+          RERANKER_MODEL_REVISION: ${{ vars.RERANKER_MODEL_REVISION }}
+        run: scripts/aws_build_push_images.sh
+
+      - name: Apply AWS infrastructure
+        env:
+          TF_VAR_core_image_tag: ${{ github.sha }}
+          TF_VAR_frontend_image_tag: ${{ github.sha }}
+          TF_VAR_reranker_image_tag: ${{ github.sha }}
+          TF_VAR_enable_sagemaker_reranker: ${{ inputs.enable_gpu_reranker }}
+          TF_VAR_mcp_desired_count: ${{ inputs.run_mcp_smoke && 1 || 0 }}
+        run: scripts/aws_deploy.sh -auto-approve
+
+      - name: Run migration and readiness job
+        run: scripts/aws_run_migrations.sh
+      - name: Bootstrap admin
+        run: scripts/aws_bootstrap_admin.sh
+      - name: Prove Bedrock and optional SageMaker models
+        run: scripts/aws_model_preflight.sh
+      - name: Promote ECS task definitions
+        run: scripts/aws_deploy_services.sh
+      - name: Product smoke
+        run: scripts/aws_smoke.sh
+      - name: MCP smoke
+        if: inputs.run_mcp_smoke
+        env:
+          PROJECT_ID: ${{ vars.INCIDENTOPS_PROJECT_ID }}
+        run: scripts/aws_mcp_smoke.sh
+
+      - name: Deployment summary
+        working-directory: infra/aws/terraform
+        run: |
+          printf 'Public URL: %s\n' "$(terraform output -raw public_url)"
+          printf 'Cluster: %s\n' "$(terraform output -raw ecs_cluster_name)"
+          aws ecs list-services --cluster "$(terraform output -raw ecs_cluster_name)" --output table

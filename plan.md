@@ -16,7 +16,7 @@ Evidence source
   -> conditional GPU reranking
   -> compact evidence pack
   -> CRAG confidence gate
-  -> direct answer, Azure synthesis, or insufficient-evidence response
+  -> direct answer, Bedrock synthesis, or insufficient-evidence response
   -> evaluator, observer, and logging agents
   -> frontend, MCP, metrics, traces, and audit events
 ```
@@ -32,18 +32,20 @@ The primary repository is `Ops-Incident-Core`. It currently contains:
 - PostgreSQL business state and full-text search.
 - A legacy embedding migration revision retained for upgrade compatibility.
 - Redis worker queue and cache infrastructure.
-- Azure OpenAI and remote Azure GPU model gateway configuration.
-- Azure infrastructure and deployment scripts requiring renewed live validation.
+- Bedrock embedding/chat and SageMaker reranker provider contracts.
+- AWS Terraform, deployment scripts, and a manual OIDC workflow under validation.
+- Azure deployment artifacts retained temporarily until the AWS cutover gates pass.
 - A minimal frontend under `apps/web`.
 
-Validation snapshot, 2026-07-28:
+Validation snapshot, 2026-07-29:
 
 - Commit `ca0eae2` passed GitHub Actions run `30384027371` for Core tests and
   the frontend typecheck/production build.
-- No live Azure proof exists in the current repository state. The checked Azure
-  resource groups `incidentops-demo-rg` and `incidentops-rg` are absent.
-- A manual Azure workflow dispatch would recreate billable resources. It must
-  not be treated as an automatic continuation of the push validation.
+- No live AWS proof exists yet. Provider contracts have focused unit coverage
+  and Terraform validates, but no migration/model/smoke/benchmark gate has run
+  in AWS.
+- AWS apply is manual-only and creates billable resources. Azure deployment is
+  also manual-only while retained for cutover safety.
 
 Important boundaries:
 
@@ -55,7 +57,7 @@ Important boundaries:
 - Core owns canonical parsing, chunking, embeddings, vector publication, retrieval, ranking, citations, answers, and operational agents.
 - MCP remains an authenticated interface over Core APIs, never an ingestion or direct database path.
 - Production cannot load local models. Deterministic local-hash embeddings remain only for offline tests.
-- Azure deployment, model calls, latency, and token metrics must be measured again before any production claim.
+- AWS deployment, model calls, latency, tokens, backup/restore, and benchmark metrics must be measured before any production claim.
 
 ## Target Architecture
 
@@ -66,7 +68,7 @@ flowchart LR
     DOC --> PARSE[Deterministic parsers]
     PARSE --> CHUNK[Source-aware chunks]
     CHUNK --> PG[(PostgreSQL)]
-    CHUNK --> EMB[Azure embeddings]
+    CHUNK --> EMB[Bedrock embeddings]
     EMB --> QD[(Qdrant)]
 
     USER[User query] --> API[Core API]
@@ -82,7 +84,7 @@ flowchart LR
     RR --> PACK[Evidence packer]
     PACK --> CRAG[CRAG confidence gate]
     CRAG --> DIRECT[Direct cited answer]
-    CRAG --> SYNTH[Azure synthesis]
+    CRAG --> SYNTH[Bedrock synthesis]
     CRAG --> REFUSE[Insufficient evidence]
 
     RRF --> EVAL[Evaluator agent]
@@ -105,7 +107,7 @@ flowchart LR
 | Core worker | Parsing, chunking, embedding, Qdrant publication, workflows, operational agents | Public unauthenticated access |
 | PostgreSQL | Business state, chunk text/metadata, lexical search, durable events | Vector similarity search |
 | Qdrant | Versioned vectors and bounded filter payloads | Users, secrets, raw source ownership, workflow state |
-| Azure models | Embeddings, conditional reranking, bounded synthesis and optional judging | Normalization, authorization, unbounded log processing |
+| AWS model plane | Bedrock embeddings/synthesis and conditional SageMaker reranking | Normalization, authorization, unbounded log processing |
 | MCP | Authenticated Core tool interface | Ingestion, normalization, direct PostgreSQL/Qdrant access |
 | Frontend | User workflows and safe visibility | Direct storage, queue, Collector, or model calls |
 
@@ -551,6 +553,25 @@ Required reports include repository/commit, file and skip counts, documents, chu
 Make AWS the only supported cloud deployment target, prove the complete product
 path there, then remove Azure runtime and delivery code after AWS validation.
 This is a clean reingestion cutover, not a database or vector copy.
+
+## Implementation Checkpoint (2026-07-29)
+
+Implemented in the repository:
+
+- AWS-safe startup validation and runtime status for Bedrock embeddings/chat
+  and optional SageMaker reranking.
+- IAM-based Bedrock and SageMaker clients with bounded requests and model/token/
+  latency telemetry.
+- Terraform for the VPC, ALB, ECS tasks/services, ECR, RDS, TLS Redis, Secrets
+  Manager, private Qdrant EC2/EBS, AWS Backup, CloudWatch, budget alerts, and an
+  optional private SageMaker endpoint.
+- One-off migration, bootstrap, model preflight, service promotion, smoke,
+  MCP-smoke, Qdrant backup, and guarded teardown scripts.
+- A push-validation/manual-deploy GitHub Actions workflow using OIDC.
+
+Still unproven and therefore incomplete: a live OIDC deployment, Bedrock model
+access, SageMaker quality gain, Qdrant restore drill, clean Collector
+reingestion, MCP/browser proof, performance/eval gates, and Azure retirement.
 
 ## AWS Target
 

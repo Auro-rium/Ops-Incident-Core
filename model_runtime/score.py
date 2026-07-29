@@ -1,7 +1,7 @@
-"""Azure ML managed-online-endpoint scoring entrypoint.
+"""Pinned GPU model scoring used by the managed cloud reranker endpoint.
 
-The image is only deployed to Azure ML GPU compute. Core calls the endpoint's
-scoring URI directly; it does not load these model classes.
+Core calls this service through a provider-specific managed endpoint. Core does
+not download or load these model classes.
 """
 
 from __future__ import annotations

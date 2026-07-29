@@ -52,28 +52,48 @@ def production_settings_errors(settings: Settings) -> list[str]:
         errors.append("CORS wildcard is disabled but CORS_ALLOW_ORIGINS=*")
     if settings.cors_origins_list == ["*"] and settings.allow_wildcard_cors:
         errors.append("CORS wildcard is not allowed in staging/production")
-    if settings.require_azure_openai and not settings.azure_openai_configured:
-        errors.append(
-            "Azure OpenAI/Foundry chat deployment is required in staging/production "
-            "when REQUIRE_AZURE_OPENAI=true"
-        )
-    if (
-        settings.require_azure_openai
-        and not settings.azure_openai_embeddings_configured
-        and not settings.gpu_rag_configured
-    ):
-        errors.append(
-            "Azure OpenAI/Foundry embedding deployment is required in staging/production "
-            "when REQUIRE_AZURE_OPENAI=true unless Azure ML GPU embeddings are configured"
-        )
-    if settings.require_azure_openai and not settings.embedding_model.startswith("azure-openai"):
-        if not (settings.rag_gpu_endpoint_required and settings.embedding_model.startswith("azure-ml")):
-            errors.append("EMBEDDING_MODEL must be azure-openai or azure-ml in staging/production")
-    if settings.rag_gpu_endpoint_required and not settings.gpu_rag_configured:
-        errors.append(
-            "RAG_GPU_ENDPOINT_REQUIRED=true requires Azure ML embedding/reranker endpoints, "
-            "configured remote authentication, and EMBEDDING_MODEL=azure-ml"
-        )
+    provider = settings.effective_cloud_provider
+    if provider not in {"aws", "azure"}:
+        errors.append("CLOUD_PROVIDER must resolve to aws or azure in staging/production")
+    if provider == "azure":
+        if settings.require_azure_openai and not settings.azure_openai_configured:
+            errors.append(
+                "Azure OpenAI/Foundry chat deployment is required in staging/production "
+                "when REQUIRE_AZURE_OPENAI=true"
+            )
+        if (
+            settings.require_azure_openai
+            and not settings.azure_openai_embeddings_configured
+            and not settings.gpu_rag_configured
+        ):
+            errors.append(
+                "Azure OpenAI/Foundry embedding deployment is required in staging/production "
+                "when REQUIRE_AZURE_OPENAI=true unless Azure ML GPU embeddings are configured"
+            )
+        if settings.require_azure_openai and not settings.embedding_model.startswith("azure-openai"):
+            if not (settings.rag_gpu_endpoint_required and settings.embedding_model.startswith("azure-ml")):
+                errors.append("EMBEDDING_MODEL must be azure-openai or azure-ml in staging/production")
+        if settings.rag_gpu_endpoint_required and not settings.gpu_rag_configured:
+            errors.append(
+                "RAG_GPU_ENDPOINT_REQUIRED=true requires Azure ML embedding/reranker endpoints, "
+                "configured remote authentication, and EMBEDDING_MODEL=azure-ml"
+            )
+    if provider == "aws":
+        if not settings.require_aws_models:
+            errors.append("REQUIRE_AWS_MODELS=true is required for AWS staging/production")
+        if not settings.bedrock_chat_configured:
+            errors.append("BEDROCK_CHAT_MODEL_ID is required for AWS staging/production")
+        if not settings.bedrock_embeddings_configured:
+            errors.append("BEDROCK_EMBEDDING_MODEL_ID is required for AWS staging/production")
+        if not settings.embedding_model.startswith("aws-bedrock"):
+            errors.append("EMBEDDING_MODEL must be aws-bedrock in AWS staging/production")
+        if settings.embedding_dim != 1024:
+            errors.append("EMBEDDING_DIM=1024 is required for Titan Text Embeddings V2")
+        if settings.rag_gpu_endpoint_required and not settings.sagemaker_reranker_configured:
+            errors.append(
+                "RAG_GPU_ENDPOINT_REQUIRED=true requires SAGEMAKER_RERANKER_ENDPOINT_NAME "
+                "and RERANKER_MODEL in AWS staging/production"
+            )
     if settings.rag_gpu_endpoint_required and not settings.rag_async_indexing:
         errors.append("RAG_GPU_ENDPOINT_REQUIRED=true requires RAG_ASYNC_INDEXING=true")
     if settings.rag_gpu_endpoint_required and not settings.rag_model_revision.strip():
@@ -82,7 +102,12 @@ def production_settings_errors(settings: Settings) -> list[str]:
         errors.append("RETRIEVAL_BACKEND=qdrant is required in staging/production")
     if not settings.qdrant_url.strip():
         errors.append("QDRANT_URL is required in staging/production")
-    if settings.reranker_model and not settings.rag_reranker_endpoint and settings.rag_rerank_mode != "disabled":
+    if (
+        provider != "aws"
+        and settings.reranker_model
+        and not settings.rag_reranker_endpoint
+        and settings.rag_rerank_mode != "disabled"
+    ):
         errors.append("production reranking requires RAG_RERANKER_ENDPOINT or RAG_RERANK_MODE=disabled")
     if not 0 <= settings.rag_shadow_percent <= 100:
         errors.append("RAG_SHADOW_PERCENT must be between 0 and 100")

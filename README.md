@@ -8,7 +8,7 @@ It is built for the moment after an engineer asks: *What changed? Where is the r
 
 > **Version context:** This repository is the active **v2 architecture rewrite**. If you encountered IncidentOps v1 in a resume or portfolio, that refers to the earlier PostgreSQL/pgvector-era implementation and deployment work. This codebase replaces vector storage with Qdrant, brings the Collector into this repository, and is still under active hardening. It must not be read as a completed production release.
 
-> **Current status (2026-07-28):** Commit `ca0eae2` passed the Core and frontend GitHub Actions validation workflow. The repository has an implemented Collector-first RAG backend and Azure deployment scaffolding, but the Azure resource groups are currently absent and no live Azure deployment is claimed. It is **not yet production-grade**. See [What we do not claim](#what-we-do-not-claim).
+> **Current status (2026-07-29):** Phase 6 AWS implementation is under validation. The repository now contains AWS provider contracts for Bedrock and SageMaker, Terraform for the private data plane and ECS runtimes, and a manual OIDC deployment workflow. No live AWS deployment or performance result is claimed yet. The prior Azure files remain only until the AWS release gates pass. It is **not yet production-grade**. See [What we do not claim](#what-we-do-not-claim).
 
 ## Why IncidentOps
 
@@ -53,7 +53,7 @@ flowchart LR
   API --> Router[Intent router and retrieval budgets]
   Router --> Fusion[Vector + lexical + metadata + graph: weighted RRF]
   Fusion --> Evidence[Compact cited evidence pack]
-  Evidence --> Answer[Direct evidence answer or optional Azure OpenAI synthesis]
+  Evidence --> Answer[Direct evidence answer or optional Bedrock synthesis]
   MCP[Core MCP facade] -->|scoped Core API calls only| API
 ```
 
@@ -98,7 +98,7 @@ Reranking is conditional. Exact symbol, path, configuration, and API-contract ma
 `apps/web` is a compact Next.js operations console, not a separate source of
 truth. It stores a login token only in browser session storage and proxies every
 request through its same-origin `/api/*` route to `CORE_API_BASE_URL`. The
-browser does not receive Qdrant, PostgreSQL, Redis, Collector, Azure OpenAI, or
+browser does not receive Qdrant, PostgreSQL, Redis, Collector, Bedrock, or
 GPU endpoint credentials.
 
 After sign-in, the console can create or select a membership-scoped project and
@@ -110,8 +110,8 @@ production ingestion remains an authenticated Collector workflow.
 ## What We Do Not Claim
 
 - A repository alone cannot explain a runtime outage. Honest root-cause work needs logs, deploy/change context, and often previous incident material.
-- This service has not earned a production-grade claim until Azure deployment, async index recovery, purge/reingestion, cache invalidation, and multi-repository evaluations are measured under failure conditions.
-- The private Azure ML GPU embedding/reranker path is deployment code and configuration, **not current live proof**.
+- This service has not earned a production-grade claim until the AWS deployment, async index recovery, purge/reingestion, cache invalidation, backup/restore, and multi-repository evaluations are measured under failure conditions.
+- The Bedrock and private SageMaker model paths are code and deployment configuration, **not current live proof**.
 - MCP is not an ingestion path, an agentic database back door, or an RBAC bypass.
 - The current web UI is an operator surface, not a finished product UI.
 
@@ -219,37 +219,47 @@ See [technical.md](technical.md#api-and-security) for the full boundary model.
 
 ## Model, Cloud, and CI Boundary
 
-Development and tests can use deterministic local-hash embeddings. Production configuration is designed for Qdrant and private Azure model endpoints:
+Development and tests use deterministic local-hash embeddings. The Phase 6
+production target is AWS:
 
-- Azure OpenAI for compact evidence-only answer synthesis.
-- Azure ML GPU endpoints for BGE-M3-compatible embeddings and reranking.
-- Azure Container Apps, PostgreSQL, Qdrant, Redis, Key Vault, ACR, and Log Analytics for the intended deployment shape.
+- Amazon Bedrock Titan Text Embeddings V2 at 1024 dimensions.
+- Amazon Bedrock Claude-compatible synthesis through the Converse API.
+- A private SageMaker GPU endpoint for conditional BGE reranking.
+- ECS Fargate for API, worker, Collector, frontend, and MCP; RDS PostgreSQL,
+  TLS ElastiCache Redis, and private self-hosted Qdrant on encrypted EBS.
 
-No production model should be loaded inside Collector or Core. The checked-in
-Azure scaffold is not a private-network production deployment: it currently
-enables public-network access for PostgreSQL, Redis, and Key Vault, and expects
-an externally managed Qdrant endpoint. It must be hardened with VNet/private
-endpoints and reviewed before deployment. Private GPU endpoints also need
-private networking and immutable model revisions; that live path is not yet
-proven. Details are in [technical.md](technical.md#model-boundary).
+Core and Collector do not load production models. ECS task roles call Bedrock
+and SageMaker through IAM; no model API key is injected. Qdrant, PostgreSQL,
+Redis, Collector, worker, MCP, and SageMaker are private. The public ALB reaches
+only the frontend; the frontend's same-origin `/api` route calls Core through
+private service discovery.
 
-Pushes to `core` run Core lint/migration/API/unit/integration checks plus the
-Next.js typecheck and production build. The most recently verified run is
-[30384027371](https://github.com/Auro-rium/Ops-Incident-Core/actions/runs/30384027371),
-which passed on 2026-07-28. Azure image build, deployment, migrations,
-bootstrap, smoke, and the bounded release benchmark remain **manual-only**
-through GitHub Actions `workflow_dispatch`, so a normal push cannot create
-cloud cost. Both known Azure resource groups (`incidentops-demo-rg` and
-`incidentops-rg`) were absent on 2026-07-28. Select
-`run_release_benchmark` only after deliberately reprovisioning Azure, supplying
-the required secrets and private Qdrant endpoint, and approving the cost.
+Pushes to `core` run the `Validate and Manually Deploy AWS` validation jobs:
+Core checks, frontend build, and Terraform validation. AWS apply is
+`workflow_dispatch` only, protected by the `aws-production` environment, and
+uses GitHub OIDC. It builds immutable ECR images, applies Terraform, runs
+migrations/readiness, bootstraps the administrator, proves Bedrock and optional
+SageMaker model contracts, promotes ECS services, and runs smoke. This workflow
+exists but has not yet produced a retained successful live deployment record.
+Azure deployment workflows are manual-only and are retained temporarily as a
+rollback reference; they are removed only after every AWS retirement gate in
+[plan.md](plan.md#azure-retirement-gate) passes.
+
+The one-time CI bootstrap is intentionally separate from the main Terraform
+state. An AWS administrator runs `make aws-bootstrap-cicd` once. It creates an
+encrypted, versioned, public-blocked S3 state bucket and a GitHub OIDC role whose
+trust policy accepts only the `Auro-rium/Ops-Incident-Core` repository's
+`aws-production` environment. The helper records only non-secret GitHub
+variables; it never uploads AWS access keys. Configure exact `CORS_ORIGINS` and
+an optional budget email as repository variables before dispatching the apply.
 
 ## Documentation Map
 
 - [technical.md](technical.md): authoritative architecture, data contracts, security boundaries, retrieval design, deployment state, and known limits.
 - [plan.md](plan.md): six-phase delivery plan and current validation state, including the unresolved Azure proof and later AWS-only release gates.
 - [`.env.example`](.env.example): safe local-development settings shape.
-- [`.env.production.example`](.env.production.example): production contract without secrets.
+- [`.env.aws.production.example`](.env.aws.production.example): AWS production contract without secrets.
+- [`.env.production.example`](.env.production.example): retained Azure contract until the AWS cutover gate passes.
 - [`eval/query_classes/`](eval/query_classes): deterministic retrieval fixtures.
 
 ## Contributing
