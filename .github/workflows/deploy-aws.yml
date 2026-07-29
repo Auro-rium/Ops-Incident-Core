@@ -138,7 +138,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
-        with: { terraform_version: "1.9.8" }
+        with: { terraform_version: "1.15.8" }
       - working-directory: infra/aws/terraform
         run: terraform fmt -check -recursive
       - working-directory: infra/aws/terraform
@@ -157,7 +157,7 @@ jobs:
         with: { python-version: "3.11" }
       - uses: astral-sh/setup-uv@v5
       - uses: hashicorp/setup-terraform@v3
-        with: { terraform_version: "1.9.8" }
+        with: { terraform_version: "1.15.8" }
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
