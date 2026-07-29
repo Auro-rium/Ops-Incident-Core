@@ -73,7 +73,12 @@ export default function HomePage() {
       headers,
       cache: "no-store",
     });
-    const payload: unknown = await response.json().catch(() => ({}));
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new Error(`Core returned a non-JSON response (${response.status})`);
+    }
     if (!response.ok) throw new Error(errorDetail(payload));
     return payload as T;
   }, [authHeaders]);
@@ -205,32 +210,208 @@ export default function HomePage() {
   const citations = Array.isArray(investigation?.citations) ? investigation.citations as Json[] : [];
   const missingData = Array.isArray(investigation?.missing_data) ? investigation.missing_data as string[] : [];
 
-  return <main className="shell">
-    <header className="topbar"><div><div className="brand">IncidentOps Console</div><div className="subbrand">Engineering evidence, retrieval diagnostics, and bounded investigation.</div></div><div className="identity">{token ? <><div>Authenticated browser session</div><button className="secondary" onClick={signOut}>Sign out</button></> : "Authentication required"}</div></header>
-    <div className="layout">
-      {error && <div className="notice error">{error}</div>}
-      <div className="notice">{notice}</div>
-      {!token && <section className="panel"><div className="panel-head"><h2>Sign in</h2><span className="muted">The JWT remains in this browser session only.</span></div><form className="grid grid-3" onSubmit={signIn}><label>Email<input value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" /></label><label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" /></label><div className="row"><button disabled={busy === "login"}>{busy === "login" ? "Signing in..." : "Sign in"}</button></div></form></section>}
-      {token && <>
-        <section className="panel"><div className="panel-head"><h2>Project context</h2><button className="secondary" onClick={() => void loadProjectData()} disabled={busy === "refresh"}>{busy === "refresh" ? "Refreshing..." : "Refresh Core state"}</button></div><div className="grid grid-3"><label>Accessible project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Select a project</option>{projects.map((project) => <option key={project.project_id} value={project.project_id}>{project.name} ({project.role})</option>)}</select></label><label>New project name<input value={projectName} onChange={(event) => setProjectName(event.target.value)} /></label><div className="row"><button onClick={() => void createProject()} disabled={busy === "project"}>{busy === "project" ? "Creating..." : "Create project"}</button></div></div><p className="muted">Evidence is ingested by an authenticated Collector. The browser never scans a server path or calls Qdrant, PostgreSQL, Redis, or model endpoints.</p></section>
+  const selectedProject = projects.find((project) => project.project_id === projectId);
+  const coverage = readiness ? Object.entries(readiness.coverage) : [];
 
-        <section className="panel"><div className="panel-head"><h2>Runtime status</h2>{runtime && <span className={`badge ${runtime.local_fallback_active ? "bad" : "good"}`}>{runtime.local_fallback_active ? "fallback active" : "cloud path configured"}</span>}</div>{runtime ? <div className="grid grid-4">{[["Environment", runtime.app_env], ["Vector store", runtime.retrieval_backend], ["Embedding", runtime.embedding_backend], ["Worker", runtime.worker_mode], ["LLM", runtime.llm_provider], ["Reranking", runtime.rag_rerank_mode], ["MCP", runtime.mcp_enabled ? "enabled" : "disabled"], ["Index version", runtime.vector_index_version]].map(([label, value]) => <div className="stat" key={String(label)}><strong>{valueOrUnknown(value)}</strong><span>{String(label)}</span></div>)}</div> : <p className="muted">Runtime status loads after choosing a project.</p>}</section>
+  return (
+    <main className="app-shell">
+      <header className="topbar">
+        <div className="brand-lockup">
+          <span className="brand-mark" aria-hidden="true">IO</span>
+          <div>
+            <span className="brand">IncidentOps</span>
+            <span className="subbrand">Evidence operations console</span>
+          </div>
+        </div>
+        <div className="header-context">
+          <div>
+            <span className="utility-label">Project</span>
+            <strong>{selectedProject?.name || (token ? "No project selected" : "Signed out")}</strong>
+          </div>
+          <span className={`session-state ${token ? "connected" : ""}`}>
+            <span aria-hidden="true" />
+            {token ? "Session active" : "Authentication required"}
+          </span>
+          {token && <button className="text-button" type="button" onClick={signOut}>Sign out</button>}
+        </div>
+      </header>
 
-        <section className="grid grid-3">
-          <div className="panel"><div className="panel-head"><h2>Readiness</h2>{readiness && <span className={`badge ${badgeClass(readiness.grade)}`}>{readiness.grade}</span>}</div>{readiness ? <div className="stack"><div className="stat"><strong>{readiness.score}/100</strong><span>{readiness.summary}</span></div><div className="metric-list">{Object.entries(readiness.counts).map(([key, value]) => <div key={key}><strong>{valueOrUnknown(value)}</strong>{key.replaceAll("_", " ")}</div>)}</div><h3>Missing evidence</h3><ul className="list">{readiness.missing_evidence.length ? readiness.missing_evidence.map((item) => <li key={item}>{item}</li>) : <li>None reported</li>}</ul></div> : <p className="muted">Select a project to load readiness.</p>}</div>
-          <div className="panel"><div className="panel-head"><h2>Suggested next actions</h2></div>{readiness ? <><ul className="list">{readiness.suggested_actions.map((item) => <li key={item}>{item}</li>)}</ul><h3 style={{ marginTop:16 }}>Suggested questions</h3><div className="stack">{readiness.suggested_questions.map((item) => <button className="secondary" key={item} onClick={() => setQuery(item)}>{item}</button>)}</div></> : <p className="muted">No readiness report loaded.</p>}</div>
-          <div className="panel"><div className="panel-head"><h2>Collector sources</h2><span className="muted">{sources.length} source(s)</span></div><div className="stack">{sources.map((source) => <div key={source.id} className="evidence"><strong>{source.name}</strong> <span className={`badge ${badgeClass(source.last_sync_status || source.status)}`}>{source.last_sync_status || source.status}</span><div className="muted">{source.source_type} · last completed {source.last_sync_finished_at || "never"}</div><div className="row" style={{ marginTop:8 }}><button className="secondary" onClick={() => void reindexSource(source)} disabled={busy === `reindex-${source.id}`}>Refresh index</button><button className="danger" onClick={() => void purgeSource(source)} disabled={busy === `purge-${source.id}`}>Purge source</button></div></div>)}{!sources.length && <p className="muted">No source has been registered. Start a Collector sync for this project.</p>}</div></div>
-        </section>
+      <div className="console-layout">
+        <aside className="evidence-rail" aria-label="Evidence navigation">
+          <div className="rail-heading">
+            <span>Evidence signal</span>
+            <strong>{readiness ? readiness.score : "--"}</strong>
+            <small>{readiness ? `${readiness.grade} / 100` : token ? "Awaiting project" : "Sign in required"}</small>
+          </div>
+          <div className="coverage-track" aria-label="Evidence coverage">
+            {coverage.length > 0 ? coverage.map(([name, available]) => (
+              <div className="coverage-row" key={name}>
+                <span className={`signal-mark ${available ? "available" : "missing"}`} aria-hidden="true" />
+                <span>{name.replace(/^has_/, "").replaceAll("_", " ")}</span>
+                <strong>{available ? "found" : "missing"}</strong>
+              </div>
+            )) : <div className="rail-empty">Coverage appears after Core loads a project.</div>}
+          </div>
+          {token && (
+            <nav className="rail-nav" aria-label="Console sections">
+              <a href="#context">Project context</a>
+              <a href="#readiness">Readiness</a>
+              <a href="#sources">Sources <span>{sources.length}</span></a>
+              <a href="#query">Evidence query</a>
+              <a href="#decision">Decision record</a>
+              <a href="#operations">Operations</a>
+            </nav>
+          )}
+          <div className="rail-footer">
+            <span className="rail-rule" aria-hidden="true" />
+            <span>Project-scoped</span>
+            <span>Citation-first</span>
+          </div>
+        </aside>
 
-        <section className="panel"><div className="panel-head"><h2>Evidence retrieval</h2><span className="muted">Core returns project-scoped cited evidence.</span></div><div className="stack"><textarea value={query} onChange={(event) => setQuery(event.target.value)} aria-label="Evidence query" /><div className="row"><button onClick={() => void submitSearch()} disabled={!projectId || busy === "search"}>{busy === "search" ? "Searching..." : "Search evidence"}</button><button className="secondary" onClick={() => void submitInvestigation()} disabled={!projectId || busy === "investigate"}>{busy === "investigate" ? "Investigating..." : "Investigate"}</button><button className="secondary" onClick={() => void createWorkflow()} disabled={!projectId || busy === "workflow"}>{busy === "workflow" ? "Creating..." : "Create workflow"}</button></div></div>{search && <div className="grid grid-3" style={{ marginTop:16 }}><div className="stat"><strong>{search.total}</strong><span>evidence results</span></div><div className="stat"><strong>{search.latency_ms} ms</strong><span>Core search latency</span></div><div className="stat"><strong>{search.query_intent || "generic"}</strong><span>query intent</span></div></div>}{search?.results.map((hit) => <article className="evidence" key={hit.chunk_id}><div className="row"><strong>#{hit.rank} {hit.document_path}</strong><span className="badge">{hit.source_type}</span><span className="badge">score {hit.score}</span></div><div className="path">{hit.citation?.lines || "line range unavailable"}</div><p className="preview">{hit.text_preview}</p></article>)}</section>
+        <div className="workspace">
+          <div className="message-stack" aria-live="polite">
+            {error && <div className="notice error"><strong>Action failed.</strong> {error}</div>}
+            <div className="notice">{notice}</div>
+          </div>
 
-        <section className="grid grid-2"><div className="panel"><div className="panel-head"><h2>Investigation</h2>{investigation && <span className={`badge ${badgeClass(String(investigation.confidence || "unknown"))}`}>{String(investigation.confidence || "unknown")}</span>}</div>{investigation ? <div className="stack"><strong>{valueOrUnknown((investigation.likely_root_cause as Json | undefined)?.summary)}</strong><div className="muted">{valueOrUnknown(investigation.query_intent)} · {valueOrUnknown(investigation.latency_ms)} ms · {citations.length} citation(s)</div>{missingData.length > 0 && <div className="notice warn"><strong>Missing evidence</strong><ul className="list">{missingData.map((item) => <li key={item}>{item}</li>)}</ul></div>}<h3>Citations</h3><ul className="list">{citations.map((citation, index) => <li key={index}>{valueOrUnknown(citation.path || citation.label)} {citation.lines ? `(${String(citation.lines)})` : ""}</li>)}</ul></div> : <p className="muted">Run an investigation to see confidence, citations, and explicit missing-data warnings.</p>}</div>
-        <div className="panel"><div className="panel-head"><h2>Workflow</h2><button className="secondary" onClick={() => void loadWorkflowEvents()} disabled={!workflow || busy === "events"}>{busy === "events" ? "Loading..." : "Load events"}</button></div>{workflow ? <div className="stack"><div className="row"><span className={`badge ${badgeClass(String(workflow.status || ""))}`}>{valueOrUnknown(workflow.status)}</span><span className="muted">{valueOrUnknown(workflow.run_id)}</span></div><ul className="list">{runEvents.map((event) => <li key={`${event.sequence_no}-${event.event_type}`}>{event.sequence_no}. {event.event_type}{event.node_name ? ` (${event.node_name})` : ""}</li>)}</ul></div> : <p className="muted">Workflow runs are queued through Core workers and retain approval state.</p>}</div></section>
+          {!token && (
+            <section className="auth-surface" aria-labelledby="sign-in-title">
+              <div className="auth-intro">
+                <span className="eyebrow">Restricted operator surface</span>
+                <h1 id="sign-in-title">Read the evidence before the incident story hardens.</h1>
+                <p>Sign in to inspect source coverage, search cited engineering records, and review bounded investigation output.</p>
+              </div>
+              <form className="auth-form" onSubmit={signIn}>
+                <label>Email<input value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" /></label>
+                <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" /></label>
+                <button disabled={busy === "login"}>{busy === "login" ? "Signing in..." : "Sign in"}</button>
+              </form>
+            </section>
+          )}
 
-        <section className="grid grid-3"><div className="panel"><div className="panel-head"><h2>Evaluations</h2><button className="secondary" onClick={() => void trigger("eval")} disabled={!projectId || busy === "eval"}>{busy === "eval" ? "Starting..." : "Run eval"}</button></div><div className="stack">{evals.map((evaluation) => <div className="evidence" key={evaluation.eval_run_id}><span className={`badge ${badgeClass(evaluation.status)}`}>{evaluation.status}</span><div className="muted">{evaluation.created_at}</div><pre>{JSON.stringify(evaluation.summary, null, 2)}</pre></div>)}{!evals.length && <p className="muted">No evaluation runs recorded for this project.</p>}</div></div>
-        <div className="panel"><div className="panel-head"><h2>RAG operations</h2><div className="row"><button className="secondary" onClick={() => void trigger("observer")} disabled={!projectId || busy === "observer"}>Run observer</button><button className="secondary" onClick={() => void trigger("logging")} disabled={!projectId || busy === "logging"}>Aggregate events</button></div></div><div className="stack">{operations.map((operation) => <div className="evidence" key={operation.operational_run_id}><span className={`badge ${badgeClass(operation.status)}`}>{operation.status}</span> <strong>{operation.run_type}</strong><div className="muted">attempts {operation.attempts} · {operation.created_at}</div></div>)}{!operations.length && <p className="muted">No operational runs recorded.</p>}</div></div>
-        <div className="panel"><div className="panel-head"><h2>Observer findings</h2><span className="muted">{findings.length} finding(s)</span></div><div className="stack">{findings.map((finding) => <div className="evidence" key={finding.finding_id}><span className={`badge ${badgeClass(finding.severity)}`}>{finding.severity}</span> <strong>{finding.finding_type}</strong><div className="muted">{finding.recommended_action}</div></div>)}{!findings.length && <p className="muted">No findings recorded. This means none are loaded, not that the system is healthy.</p>}</div></div></section>
-      </>}
-    </div>
-  </main>;
+          {token && (
+            <>
+              <section className="context-strip" id="context">
+                <div className="context-copy">
+                  <span className="eyebrow">Active scope</span>
+                  <h1>{selectedProject?.name || "Choose a project"}</h1>
+                  <p>{selectedProject ? `${selectedProject.role} access` : "Select an existing project or create one."}</p>
+                </div>
+                <label>Accessible project
+                  <select value={projectId} onChange={(event) => setProjectId(event.target.value)}>
+                    <option value="">Select a project</option>
+                    {projects.map((project) => <option key={project.project_id} value={project.project_id}>{project.name} ({project.role})</option>)}
+                  </select>
+                </label>
+                <label>New project name<input value={projectName} onChange={(event) => setProjectName(event.target.value)} /></label>
+                <div className="context-actions">
+                  <button type="button" onClick={() => void createProject()} disabled={busy === "project"}>{busy === "project" ? "Creating..." : "Create project"}</button>
+                  <button className="secondary" type="button" onClick={() => void loadProjectData()} disabled={busy === "refresh"}>{busy === "refresh" ? "Refreshing..." : "Refresh state"}</button>
+                </div>
+              </section>
+
+              <section className="runtime-band" aria-label="Runtime status">
+                <div className="runtime-title">
+                  <span className="eyebrow">Runtime</span>
+                  {runtime && <span className={`badge ${runtime.local_fallback_active ? "bad" : "good"}`}>{runtime.local_fallback_active ? "fallback active" : "cloud path configured"}</span>}
+                </div>
+                <div className="runtime-grid">
+                  {[
+                    ["Environment", runtime?.app_env],
+                    ["Vector store", runtime?.retrieval_backend],
+                    ["Embedding", runtime?.embedding_backend],
+                    ["Worker", runtime?.worker_mode],
+                    ["LLM", runtime?.llm_provider],
+                    ["Reranking", runtime?.rag_rerank_mode],
+                    ["MCP", runtime ? (runtime.mcp_enabled ? "enabled" : "disabled") : null],
+                    ["Index version", runtime?.vector_index_version],
+                  ].map(([label, value]) => <div className="runtime-value" key={String(label)}><span>{String(label)}</span><strong>{valueOrUnknown(value)}</strong></div>)}
+                </div>
+              </section>
+
+              <div className="overview-grid" id="readiness">
+                <section className="work-section readiness-section">
+                  <div className="section-heading">
+                    <div><span className="eyebrow">Evidence posture</span><h2>Readiness</h2></div>
+                    {readiness && <span className={`badge ${badgeClass(readiness.grade)}`}>{readiness.grade}</span>}
+                  </div>
+                  {readiness ? (
+                    <>
+                      <div className="readiness-score"><strong>{readiness.score}</strong><span>/ 100</span><p>{readiness.summary}</p></div>
+                      <div className="metric-list">{Object.entries(readiness.counts).map(([key, value]) => <div key={key}><span>{key.replaceAll("_", " ")}</span><strong>{valueOrUnknown(value)}</strong></div>)}</div>
+                      <div className="subsection"><h3>Missing evidence</h3><ul className="issue-list">{readiness.missing_evidence.length ? readiness.missing_evidence.map((item) => <li key={item}>{item}</li>) : <li className="resolved">No missing category reported.</li>}</ul></div>
+                    </>
+                  ) : <p className="empty-state">Select a project to calculate readiness from indexed evidence.</p>}
+                </section>
+
+                <section className="work-section next-actions">
+                  <div className="section-heading"><div><span className="eyebrow">Operator queue</span><h2>Next evidence moves</h2></div></div>
+                  {readiness ? (
+                    <>
+                      <ol className="action-list">{readiness.suggested_actions.map((item) => <li key={item}>{item}</li>)}</ol>
+                      <div className="subsection"><h3>Questions supported by this evidence</h3><div className="question-list">{readiness.suggested_questions.map((item) => <button type="button" key={item} onClick={() => setQuery(item)}>{item}</button>)}</div></div>
+                    </>
+                  ) : <p className="empty-state">Actions appear when Core has measured project coverage.</p>}
+                </section>
+              </div>
+
+              <section className="work-section source-section" id="sources">
+                <div className="section-heading"><div><span className="eyebrow">Collector boundary</span><h2>Indexed sources</h2><p>{sources.length} registered source{sources.length === 1 ? "" : "s"}</p></div></div>
+                <div className="source-list">
+                  {sources.map((source) => (
+                    <article className="source-item" key={source.id}>
+                      <div className="source-identity"><span className="source-glyph" aria-hidden="true">{source.name.slice(0, 2).toUpperCase()}</span><div><strong>{source.name}</strong><span>{source.source_type}</span></div></div>
+                      <div className="source-sync"><span className={`badge ${badgeClass(source.last_sync_status || source.status)}`}>{source.last_sync_status || source.status}</span><span>Last completed {source.last_sync_finished_at || "never"}</span></div>
+                      <div className="row-actions"><button className="secondary" type="button" onClick={() => void reindexSource(source)} disabled={busy === `reindex-${source.id}`}>Refresh index</button><button className="danger" type="button" onClick={() => void purgeSource(source)} disabled={busy === `purge-${source.id}`}>Purge source</button></div>
+                    </article>
+                  ))}
+                  {!sources.length && <p className="empty-state">No source is registered. Start an authenticated Collector sync for this project.</p>}
+                </div>
+              </section>
+
+              <section className="query-desk" id="query">
+                <div className="section-heading"><div><span className="eyebrow">Retrieval desk</span><h2>Ask the evidence</h2><p>Core returns project-scoped results with paths, line ranges, and retrieval intent.</p></div></div>
+                <textarea value={query} onChange={(event) => setQuery(event.target.value)} aria-label="Evidence query" />
+                <div className="query-actions"><button type="button" onClick={() => void submitSearch()} disabled={!projectId || busy === "search"}>{busy === "search" ? "Searching..." : "Search evidence"}</button><button className="secondary" type="button" onClick={() => void submitInvestigation()} disabled={!projectId || busy === "investigate"}>{busy === "investigate" ? "Investigating..." : "Investigate"}</button><button className="secondary" type="button" onClick={() => void createWorkflow()} disabled={!projectId || busy === "workflow"}>{busy === "workflow" ? "Creating..." : "Create workflow"}</button></div>
+                {search && <div className="retrieval-summary"><div><span>Evidence</span><strong>{search.total}</strong></div><div><span>Core latency</span><strong>{search.latency_ms} ms</strong></div><div><span>Intent</span><strong>{search.query_intent || "generic"}</strong></div></div>}
+                <div className="evidence-results">{search?.results.map((hit) => (
+                  <article className="evidence-item" key={hit.chunk_id}>
+                    <div className="evidence-rank">{String(hit.rank).padStart(2, "0")}</div>
+                    <div className="evidence-body"><div className="evidence-heading"><strong>{hit.document_path}</strong><div><span className="badge">{hit.source_type}</span><span className="badge">score {hit.score}</span></div></div><span className="path">{hit.citation?.lines || "Line range unavailable"}</span><p>{hit.text_preview}</p></div>
+                  </article>
+                ))}</div>
+              </section>
+
+              <div className="decision-grid" id="decision">
+                <section className="work-section investigation-section">
+                  <div className="section-heading"><div><span className="eyebrow">Decision support</span><h2>Investigation</h2></div>{investigation && <span className={`badge ${badgeClass(String(investigation.confidence || "unknown"))}`}>{String(investigation.confidence || "unknown")}</span>}</div>
+                  {investigation ? <div className="investigation-body">
+                    <blockquote>{valueOrUnknown((investigation.likely_root_cause as Json | undefined)?.summary)}</blockquote>
+                    <div className="decision-meta"><span>{valueOrUnknown(investigation.query_intent)}</span><span>{valueOrUnknown(investigation.latency_ms)} ms</span><span>{citations.length} citations</span></div>
+                    {missingData.length > 0 && <div className="warning-block"><strong>Missing evidence</strong><ul>{missingData.map((item) => <li key={item}>{item}</li>)}</ul></div>}
+                    <h3>Citations</h3><ul className="citation-list">{citations.map((citation, index) => <li key={index}><span>{String(index + 1).padStart(2, "0")}</span>{valueOrUnknown(citation.path || citation.label)} {citation.lines ? `(${String(citation.lines)})` : ""}</li>)}</ul>
+                  </div> : <p className="empty-state">Run an investigation to review confidence, citations, and explicit evidence gaps.</p>}
+                </section>
+
+                <section className="work-section workflow-section">
+                  <div className="section-heading"><div><span className="eyebrow">Controlled execution</span><h2>Workflow record</h2></div><button className="secondary compact" type="button" onClick={() => void loadWorkflowEvents()} disabled={!workflow || busy === "events"}>{busy === "events" ? "Loading..." : "Load events"}</button></div>
+                  {workflow ? <div className="workflow-body"><div className="workflow-status"><span className={`badge ${badgeClass(String(workflow.status || ""))}`}>{valueOrUnknown(workflow.status)}</span><span className="path">{valueOrUnknown(workflow.run_id)}</span></div><ol className="event-list">{runEvents.map((event) => <li key={`${event.sequence_no}-${event.event_type}`}><span>{String(event.sequence_no).padStart(2, "0")}</span><strong>{event.event_type.replaceAll("_", " ")}</strong>{event.node_name && <small>{event.node_name}</small>}</li>)}</ol></div> : <p className="empty-state">Create a workflow from the current question to retain execution and approval state.</p>}
+                </section>
+              </div>
+
+              <section className="operations-band" id="operations">
+                <div className="section-heading"><div><span className="eyebrow">System checks</span><h2>Evaluation and operations</h2></div></div>
+                <div className="operations-grid">
+                  <div className="operation-column"><div className="column-heading"><h3>Evaluations</h3><button className="secondary compact" type="button" onClick={() => void trigger("eval")} disabled={!projectId || busy === "eval"}>{busy === "eval" ? "Starting..." : "Run eval"}</button></div>{evals.map((evaluation) => <article className="operation-item" key={evaluation.eval_run_id}><div><span className={`badge ${badgeClass(evaluation.status)}`}>{evaluation.status}</span><span>{evaluation.created_at}</span></div><pre>{JSON.stringify(evaluation.summary, null, 2)}</pre></article>)}{!evals.length && <p className="empty-state">No evaluation run is recorded for this project.</p>}</div>
+                  <div className="operation-column"><div className="column-heading"><h3>RAG operations</h3><div><button className="secondary compact" type="button" onClick={() => void trigger("observer")} disabled={!projectId || busy === "observer"}>Run observer</button><button className="secondary compact" type="button" onClick={() => void trigger("logging")} disabled={!projectId || busy === "logging"}>Aggregate events</button></div></div>{operations.map((operation) => <article className="operation-item" key={operation.operational_run_id}><div><span className={`badge ${badgeClass(operation.status)}`}>{operation.status}</span><strong>{operation.run_type.replaceAll("_", " ")}</strong></div><span>Attempts {operation.attempts} / {operation.created_at}</span></article>)}{!operations.length && <p className="empty-state">No operational run is recorded.</p>}</div>
+                  <div className="operation-column"><div className="column-heading"><h3>Observer findings</h3><span>{findings.length} findings</span></div>{findings.map((finding) => <article className="operation-item" key={finding.finding_id}><div><span className={`badge ${badgeClass(finding.severity)}`}>{finding.severity}</span><strong>{finding.finding_type.replaceAll("_", " ")}</strong></div><p>{finding.recommended_action}</p></article>)}{!findings.length && <p className="empty-state">No finding is recorded. This does not establish system health.</p>}</div>
+                </div>
+              </section>
+            </>
+          )}
+        </div>
+      </div>
+    </main>
+  );
 }
