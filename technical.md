@@ -291,6 +291,22 @@ The current restricted AWS account limits RDS automated backup retention to one
 day. Terraform supports 1-35 days; a paid production account should use at
 least seven days and complete a database restore drill.
 
+The first account-compatible proof is deliberately undersized:
+`db.t4g.micro` with 20 GiB and no Performance Insights, one API task, one worker
+task, one frontend task, and private Qdrant on `t3.small` with a 20 GiB data
+volume. Paid deployments must override those values after load and restore
+testing. `scripts/aws_pause.sh` scales ECS to zero and stops RDS/Qdrant;
+`scripts/aws_resume.sh` restarts and validates them. ElastiCache, NAT Gateway,
+ALB, persistent storage, backups, ECR, logs, Secrets Manager, and state storage
+remain billable while paused, so only guarded Terraform teardown is a complete
+runtime-cost shutdown.
+
+Before Terraform apply, `scripts/aws_bedrock_access_check.sh` verifies account
+authorization and regional availability for both the embedding and chat model.
+This intentionally fails before provisioning when AWS requires model-access
+approval or a support case; a configured model identifier alone is not proof
+that the account may invoke it.
+
 ## API and Security
 
 Core uses JWT authentication and project-scoped RBAC. Viewers can read allowed

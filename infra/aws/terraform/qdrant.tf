@@ -83,7 +83,7 @@ resource "aws_instance" "qdrant" {
     Backup = "incidentops"
   }
 
-  user_data = base64encode(templatefile("${path.module}/qdrant-user-data.sh.tftpl", {
+  user_data_base64 = base64encode(templatefile("${path.module}/qdrant-user-data.sh.tftpl", {
     aws_region        = var.aws_region
     qdrant_image      = var.qdrant_image
     runtime_secret_id = aws_secretsmanager_secret.runtime.id
@@ -119,6 +119,10 @@ resource "aws_service_discovery_service" "qdrant" {
   }
 
   health_check_custom_config {}
+
+  lifecycle {
+    ignore_changes = [health_check_custom_config]
+  }
 }
 
 resource "aws_service_discovery_instance" "qdrant" {

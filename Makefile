@@ -1,4 +1,4 @@
-.PHONY: migrate migration-check db-current db-history db-downgrade worker mcp-server smoke-prod metrics-check docker-build aws-login-check aws-bootstrap-cicd aws-build-push aws-deploy aws-migrate aws-bootstrap-admin aws-model-preflight aws-promote aws-smoke aws-mcp-smoke aws-backup-qdrant azure-login-check azure-build-push azure-deploy azure-migrate azure-bootstrap-admin azure-smoke azure-teardown
+.PHONY: migrate migration-check db-current db-history db-downgrade worker mcp-server smoke-prod metrics-check docker-build aws-login-check aws-bootstrap-cicd aws-build-push aws-deploy aws-migrate aws-bootstrap-admin aws-model-preflight aws-promote aws-smoke aws-mcp-smoke aws-backup-qdrant aws-pause aws-resume aws-teardown azure-login-check azure-build-push azure-deploy azure-migrate azure-bootstrap-admin azure-smoke azure-teardown
 
 PYTHON ?= python
 ALEMBIC ?= alembic
@@ -79,6 +79,15 @@ aws-mcp-smoke:
 
 aws-backup-qdrant:
 	AWS_REGION=$(AWS_REGION) ./scripts/aws_backup_qdrant.sh
+
+aws-pause:
+	AWS_REGION=$(AWS_REGION) ./scripts/aws_pause.sh
+
+aws-resume:
+	AWS_REGION=$(AWS_REGION) ./scripts/aws_resume.sh
+
+aws-teardown:
+	AWS_REGION=$(AWS_REGION) ./scripts/aws_teardown.sh
 
 azure-login-check:
 	AZURE_RESOURCE_GROUP=$(AZURE_RESOURCE_GROUP) AZURE_LOCATION=$(AZURE_LOCATION) ./scripts/azure_login_check.sh

@@ -7,6 +7,7 @@ output "ecs_cluster_name" { value = aws_ecs_cluster.main.name }
 output "private_subnet_ids" { value = local.private_subnet_ids }
 output "ecs_security_group_id" { value = aws_security_group.ecs.id }
 output "runtime_secret_arn" { value = aws_secretsmanager_secret.runtime.arn }
+output "database_identifier" { value = aws_db_instance.main.identifier }
 output "qdrant_private_name" { value = "qdrant.${aws_service_discovery_private_dns_namespace.internal.name}" }
 output "qdrant_instance_id" { value = aws_instance.qdrant.id }
 output "backup_vault_name" { value = aws_backup_vault.qdrant.name }

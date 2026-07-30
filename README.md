@@ -257,6 +257,27 @@ backup retention. Paid production accounts should set
 `RDS_BACKUP_RETENTION_DAYS=7` or higher and prove restore behavior before any
 production-grade claim.
 
+The account-restricted proof uses `db.t4g.micro`, 20 GiB of RDS storage with
+storage autoscaling and Performance Insights disabled, one task each for API,
+worker, and frontend, and a private `t3.small` Qdrant host with a 20 GiB data
+volume. These settings prove deployment compatibility; they are not production
+capacity recommendations. `terraform.tfvars.example` retains the paid-capacity
+baseline.
+
+Use `make aws-pause` to scale all ECS services to zero and stop RDS and Qdrant
+EC2. Use `make aws-resume` to restart the data plane, rerun migrations, promote
+the configured services, and smoke the public endpoint. Pause does not stop
+charges for ElastiCache, NAT Gateway, ALB, EBS, backups, ECR, logs, Secrets
+Manager, or Terraform state. Full cost shutdown requires the guarded
+`ALLOW_AWS_DESTROY=yes make aws-teardown` path after backup and deletion-
+protection review.
+
+AWS deployment also runs `scripts/aws_bedrock_access_check.sh` before applying
+Terraform. If either configured Bedrock model is not account-authorized and
+region-available, deployment stops before creating additional billable
+resources. Account authorization is an external AWS prerequisite; application
+IAM permissions cannot override it.
+
 ## Documentation Map
 
 - [technical.md](technical.md): authoritative architecture, data contracts, security boundaries, retrieval design, deployment state, and known limits.

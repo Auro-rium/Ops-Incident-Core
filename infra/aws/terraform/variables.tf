@@ -88,18 +88,27 @@ variable "database_username" {
 }
 
 variable "database_instance_class" {
-  type    = string
-  default = "db.t4g.medium"
+  description = "RDS instance class. Restricted/free-plan accounts support only eligible micro classes; override for paid production capacity."
+  type        = string
+  default     = "db.t4g.micro"
 }
 
 variable "database_allocated_storage_gb" {
-  type    = number
-  default = 50
+  description = "Initial RDS gp3 storage in GiB."
+  type        = number
+  default     = 20
 }
 
 variable "database_max_storage_gb" {
-  type    = number
-  default = 200
+  description = "RDS autoscaling ceiling in GiB. Set to 0 to disable storage autoscaling."
+  type        = number
+  default     = 0
+}
+
+variable "database_performance_insights_enabled" {
+  description = "Enable RDS Performance Insights when the selected account plan and instance class support it."
+  type        = bool
+  default     = false
 }
 
 variable "database_backup_retention_days" {
@@ -139,13 +148,15 @@ variable "redis_num_cache_clusters" {
 }
 
 variable "qdrant_instance_type" {
-  type    = string
-  default = "t3.medium"
+  description = "Private Qdrant EC2 class. Restricted/free-plan accounts must use an eligible x86 class; override for production corpus capacity."
+  type        = string
+  default     = "t3.small"
 }
 
 variable "qdrant_volume_size_gb" {
-  type    = number
-  default = 100
+  description = "Persistent encrypted Qdrant data volume in GiB."
+  type        = number
+  default     = 20
 }
 
 variable "qdrant_image" {

@@ -56,8 +56,8 @@ resource "aws_db_instance" "main" {
   deletion_protection                   = var.database_deletion_protection
   skip_final_snapshot                   = var.database_skip_final_snapshot
   final_snapshot_identifier             = var.database_skip_final_snapshot ? null : "${local.name}-final-${random_id.final_snapshot.hex}"
-  performance_insights_enabled          = true
-  performance_insights_retention_period = 7
+  performance_insights_enabled          = var.database_performance_insights_enabled
+  performance_insights_retention_period = var.database_performance_insights_enabled ? 7 : null
   apply_immediately                     = false
   copy_tags_to_snapshot                 = true
 }

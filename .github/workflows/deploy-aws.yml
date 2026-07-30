@@ -43,6 +43,15 @@ env:
   TF_VAR_reranker_model_revision: ${{ vars.RERANKER_MODEL_REVISION }}
   TF_VAR_budget_alert_email: ${{ vars.BUDGET_ALERT_EMAIL }}
   TF_VAR_database_backup_retention_days: ${{ vars.RDS_BACKUP_RETENTION_DAYS || '1' }}
+  TF_VAR_database_instance_class: ${{ vars.RDS_INSTANCE_CLASS || 'db.t4g.micro' }}
+  TF_VAR_database_allocated_storage_gb: ${{ vars.RDS_ALLOCATED_STORAGE_GB || '20' }}
+  TF_VAR_database_max_storage_gb: ${{ vars.RDS_MAX_STORAGE_GB || '0' }}
+  TF_VAR_database_performance_insights_enabled: ${{ vars.RDS_PERFORMANCE_INSIGHTS_ENABLED || 'false' }}
+  TF_VAR_qdrant_instance_type: ${{ vars.QDRANT_INSTANCE_TYPE || 't3.small' }}
+  TF_VAR_qdrant_volume_size_gb: ${{ vars.QDRANT_VOLUME_SIZE_GB || '20' }}
+  TF_VAR_api_desired_count: ${{ vars.ECS_API_DESIRED_COUNT || '1' }}
+  TF_VAR_worker_desired_count: ${{ vars.ECS_WORKER_DESIRED_COUNT || '1' }}
+  TF_VAR_frontend_desired_count: ${{ vars.ECS_FRONTEND_DESIRED_COUNT || '1' }}
   TF_VAR_collector_project_id: ${{ vars.INCIDENTOPS_PROJECT_ID }}
   TF_VAR_collector_repo_url: ${{ vars.COLLECTOR_REPO_URL }}
   TF_VAR_collector_access_token: ${{ secrets.INCIDENTOPS_COLLECTOR_TOKEN }}
@@ -174,6 +183,9 @@ jobs:
           if [[ "${{ inputs.enable_gpu_reranker }}" == "true" ]]; then
             test -n "$TF_VAR_reranker_model_revision" || { echo "RERANKER_MODEL_REVISION is required" >&2; exit 1; }
           fi
+
+      - name: Validate Bedrock account access before provisioning
+        run: scripts/aws_bedrock_access_check.sh
 
       - name: Initialize Terraform and create ECR repositories
         working-directory: infra/aws/terraform
