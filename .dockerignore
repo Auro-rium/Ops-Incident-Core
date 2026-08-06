@@ -16,8 +16,6 @@ build
 .env
 .env.*
 !.env.production.example
-apps/web/node_modules
-apps/web/.next
 .cache
 tmp
 temp

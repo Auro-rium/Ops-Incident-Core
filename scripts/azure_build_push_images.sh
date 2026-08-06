@@ -31,7 +31,7 @@ FRONTEND_REPO_PATH_INPUT="${FRONTEND_REPO_PATH:-}"
 FRONTEND_REPO_PATH=""
 if [[ "$BUILD_FRONTEND" == "true" ]]; then
   FRONTEND_REPO_PATH="$(detect_repo "$FRONTEND_REPO_PATH_INPUT" \
-    "$ROOT_DIR/apps/web")" || {
+    "$ROOT_DIR/../Ops-Incident-frontend")" || {
     echo "Frontend build context not found. Set FRONTEND_REPO_PATH." >&2
     exit 1
   }
@@ -65,7 +65,7 @@ echo "Logging Docker into ACR '$ACR_NAME'..."
 az acr login --name "$ACR_NAME" --only-show-errors >/dev/null
 
 echo "Building and pushing images to ACR '$ACR_NAME' with tag '$IMAGE_TAG'..."
-docker build -t "$login_server/incidentops-core:$IMAGE_TAG" "$CORE_REPO_PATH"
+docker build -f "$CORE_REPO_PATH/docker/core.Dockerfile" -t "$login_server/incidentops-core:$IMAGE_TAG" "$CORE_REPO_PATH"
 docker push "$login_server/incidentops-core:$IMAGE_TAG"
 if [[ "$BUILD_FRONTEND" == "true" ]]; then
   docker build -t "$login_server/incidentops-frontend:$IMAGE_TAG" "$FRONTEND_REPO_PATH"

@@ -1,301 +1,229 @@
 # IncidentOps Core
 
-**Engineering evidence for incident investigation, without treating a language model as a source of truth.**
+IncidentOps is an engineering-evidence backend for incident investigation. It
+ingests repository and operational evidence through a deterministic Collector,
+indexes it with Core, and returns project-scoped search and investigation
+results with citations and missing-evidence warnings.
 
-IncidentOps ingests code, configuration, API contracts, runbooks, logs, deploy records, and incident notes through a deterministic Collector. It returns project-scoped evidence with citations, explicit uncertainty, and retrieval diagnostics.
+> Version context: This repository is the active V2 rewrite. It is not a
+> production deployment. Azure model resources exist, but no Azure Container
+> Apps, PostgreSQL, Redis, Qdrant, Collector, frontend, or MCP runtime is
+> currently deployed in the inspected subscription.
 
-It is built for the moment after an engineer asks: *What changed? Where is the relevant code? What evidence do we actually have?* The answer should be grounded in files and metadata, not a confident summary with no trail back to reality.
+## Product Boundary
 
-> **Version context:** This repository is the active **v2 architecture rewrite**. If you encountered IncidentOps v1 in a resume or portfolio, that refers to the earlier PostgreSQL/pgvector-era implementation and deployment work. This codebase replaces vector storage with Qdrant, brings the Collector into this repository, and is still under active hardening. It must not be read as a completed production release.
+The useful claim is narrow and testable:
 
-> **Current status (2026-07-29):** Phase 6 AWS implementation is under validation. The repository now contains AWS provider contracts for Bedrock and SageMaker, Terraform for the private data plane and ECS runtimes, and a manual OIDC deployment workflow. No live AWS deployment or performance result is claimed yet. The prior Azure files remain only until the AWS release gates pass. It is **not yet production-grade**. See [What we do not claim](#what-we-do-not-claim).
+- ingest code, documentation, configuration, API contracts, logs, deploy
+  records, runbooks, and incident notes through normalized documents;
+- retrieve evidence with citations and query-aware diagnostics;
+- explain what evidence exists and what is missing;
+- produce cautious answers instead of unsupported root-cause certainty.
 
-## Why IncidentOps
-
-Most incident tooling has operational data with little code context, or code search with no understanding of the evidence needed to explain a runtime failure. IncidentOps keeps those concerns explicit.
-
-It helps teams:
-
-- establish what evidence a project contains and what is missing;
-- find the code, configuration, API contract, or runbook relevant to a question;
-- distinguish a code-navigation question from a runtime incident question;
-- return cited evidence and say when logs, deploy history, or prior incidents are absent;
-- measure retrieval quality with deterministic evaluations;
-- use an MCP facade over Core without turning MCP into ingestion or an authorization bypass.
-
-The governing principle is: **deterministic ingestion first; model use only after evidence is selected and bounded.**
-
-## At a Glance
-
-| Area | Responsibility |
-|---|---|
-| In-repository Collector | Enforces path policy, redacts secrets, extracts deterministic metadata, and sends `NormalizedDocument` batches over authenticated HTTP. |
-| Core API | Owns auth/RBAC, projects, sources, sync state, chunking, indexing, search, investigation, workflows, evals, readiness, audit, and MCP-facing APIs. |
-| Retrieval | Combines Qdrant vector candidates, PostgreSQL lexical search, exact metadata/path matches, and a bounded architecture graph with weighted reciprocal-rank fusion. |
-| Answers | Uses direct cited evidence for decisive code/config/API lookups; optional synthesis is evidence-only and compact. |
-| Operations | Provides typed ingestion failures, sync diagnostics, readiness reports, workers, queues, evaluator/observer/logging runs, metrics, traces, purge, and reindex semantics. |
-| Operator console | Uses same-origin `/api` proxying to Core and surfaces readiness, retrieval, investigations, evaluations, and operational findings without browser access to storage or model credentials. |
+A repository alone cannot explain a runtime outage. Runtime investigation needs
+timestamped logs, deploy/change context, and often incident history.
 
 ## Architecture
 
-```mermaid
+~~~mermaid
 flowchart LR
-  User[Engineer or MCP client] --> UI[Minimal web UI]
-  UI --> API[FastAPI Core API]
-  Source[Repo, docs, logs, config, deploys] --> Collector[Collector]
-  Collector -->|redacted NormalizedDocument batches| API
-  API --> PG[(PostgreSQL: project data, chunks, FTS, audit)]
-  API --> QD[(Qdrant: vectors)]
-  API --> Redis[(Redis: queue, cache, rate limits)]
-  Redis --> Worker[Core worker]
-  Worker --> PG
-  Worker --> QD
-  API --> Router[Intent router and retrieval budgets]
-  Router --> Fusion[Vector + lexical + metadata + graph: weighted RRF]
-  Fusion --> Evidence[Compact cited evidence pack]
-  Evidence --> Answer[Direct evidence answer or optional Bedrock synthesis]
-  MCP[Core MCP facade] -->|scoped Core API calls only| API
-```
+  F[Ops-Incident-frontend] -->|authenticated HTTP| API[FastAPI Core API]
+  C[In-repository Collector] -->|redacted NormalizedDocument batches| API
+  API --> PG[(PostgreSQL metadata and audit)]
+  API --> Q[(Qdrant vectors)]
+  API --> R[(Redis queue and limits)]
+  R --> W[Core worker]
+  W --> PG
+  W --> Q
+  API --> RET[Intent routing and hybrid retrieval]
+  RET --> E[Compact cited evidence]
+  E --> A[Direct answer or optional Azure OpenAI synthesis]
+  M[Core MCP server] -->|Core API only| API
+~~~
 
-The Collector and Core deliberately have different authority boundaries. Collector can read an approved source root but cannot query the database or diagnose incidents. Core owns project isolation and retrieval. MCP only calls Core APIs with scoped credentials: it cannot ingest, normalize, access storage directly, or bypass RBAC.
+Core owns authentication, RBAC, project isolation, source/sync state,
+normalization validation, chunking, indexing, retrieval, investigation,
+workflow runs, evals, readiness, audit events, and MCP-facing tools.
 
-## Evidence Lifecycle
+Collector can read an approved source and submit normalized documents. It does
+not access the database, normalize through an LLM, or diagnose incidents.
+MCP is an interface over Core APIs; it is not an ingestion path and cannot
+bypass Core authorization.
 
-1. A user creates a project and source, then registers a Collector.
-2. The Collector discovers allowed files, redacts secrets, extracts deterministic metadata, and sends normalized documents.
-3. Core validates limits and metadata, records typed errors, and skips unchanged content by hash.
-4. Deterministic parsers create source-aware chunks: code functions/types, Protobuf services/RPCs, Markdown sections, log windows/error clusters, and structured configuration blocks.
-5. PostgreSQL stores authoritative text and access-controlled metadata. Qdrant stores vectors. Workers can perform durable asynchronous indexing.
-6. Core classifies the query before retrieval. Code questions favor code and API chunks; runtime questions favor logs, deploys, incidents, and runbooks.
-7. The response contains citations and safe diagnostics. A model is used only when synthesis adds value and the evidence pack is bounded.
+## Repository Layout
 
-## Retrieval, Intentionally
+~~~text
+apps/api/                 FastAPI composition and route registration
+incidentops/              backend domain code
+incidentops/collector/    in-repository Collector runtime
+incidentops/eval/         active eval runner and golden cases
+incidentops/mcp/          Core MCP server
+alembic/versions/v2/      single clean-project V2 schema baseline
+docker/core.Dockerfile    Core API/worker image
+infra/azure/              Azure Bicep scaffold
+scripts/                  migration, smoke, and Azure operations
+tests/                    unit and integration tests
+~~~
 
-IncidentOps is not an “embed everything and pray” system. It uses bounded retrieval branches, then fuses their candidate rankings:
+The frontend is intentionally separate:
 
-- **Vector retrieval:** semantic candidates from Qdrant.
-- **Lexical retrieval:** PostgreSQL full-text candidates for exact terms and code-like queries.
-- **Metadata/path retrieval:** exact symbols, packages, services, endpoints, and path segments.
-- **Architecture graph:** direct deterministic `contains`, `defines`, `implements`, and `changed_by` relations. It does not invent a call graph or incident causality graph.
+~~~text
+Ops-Incident-frontend
+~~~
 
-The intent router supports `code_location`, `architecture`, `config_lookup`, `api_contract`, `runtime_incident`, `deploy_regression`, `previous_incident`, `runbook_lookup`, and `generic`. A broad README should not win a code-location query merely because it is broad and well-written.
+The old embedded apps/web frontend was removed. Core no longer builds or ships
+an embedded frontend.
 
-Reranking is conditional. Exact symbol, path, configuration, and API-contract matches take the fast direct-evidence path instead of paying model latency for every request.
+## Data Flow
 
-## What You Can Build With It Today
+1. A project and source are created through Core.
+2. Collector registers and starts a sync.
+3. Collector discovers allowed files and redacts likely credentials.
+4. Collector sends authenticated NormalizedDocument batches.
+5. Core validates limits and metadata, records typed failures, and skips
+   unchanged content by hash.
+6. Core creates source-aware chunks and stores authoritative text/metadata in
+   PostgreSQL.
+7. Qdrant stores vector points linked to authorized Core chunks.
+8. Search combines vector, lexical, metadata, path, and graph evidence.
+9. Investigation returns citations, confidence, and missing-data warnings.
+10. Workers execute queued indexing, workflow, eval, observer, and logging jobs.
 
-- Collector-driven ingestion of repository, document, config, and incident evidence using the `NormalizedDocument` contract.
-- Project-scoped search, answer, and investigation APIs with citations.
-- Readiness reports that expose coverage gaps, weak question classes, and next evidence to ingest.
-- Workflow runs with durable events and approval gates for risky actions.
-- Query-class evaluation fixtures for retrieval measurement.
-- Project/source purge and reindex endpoints with admin authorization.
-- A small, safe MCP server that proxies Core capabilities.
-- Deterministic local-hash embeddings for development and CI without a paid key.
+## Retrieval
 
-## Operator Console
+Query intent classes include:
 
-`apps/web` is a compact Next.js operations console, not a separate source of
-truth. It stores a login token only in browser session storage and proxies every
-request through its same-origin `/api/*` route to `CORE_API_BASE_URL`. The
-browser does not receive Qdrant, PostgreSQL, Redis, Collector, Bedrock, or
-GPU endpoint credentials.
+~~~text
+code_location
+architecture
+config_lookup
+api_contract
+runtime_incident
+deploy_regression
+previous_incident
+runbook_lookup
+generic
+~~~
 
-After sign-in, the console can create or select a membership-scoped project and
-display Core-backed runtime status, readiness coverage/gaps, Collector sources,
-cited search results, cautious investigations, workflow events, evaluations,
-and observer findings. It intentionally has no local-folder ingestion control:
-production ingestion remains an authenticated Collector workflow.
+Retrieval diagnostics expose intent, budget, source/chunk distributions,
+branch latency, and applied ranking adjustments without exposing secrets or
+large document bodies.
 
-## What We Do Not Claim
+Direct code/config/API lookups can use a fast cited-evidence path. Optional
+model synthesis is bounded to selected evidence. Local-hash embeddings remain
+available for deterministic tests; Azure OpenAI is the intended cloud provider.
 
-- A repository alone cannot explain a runtime outage. Honest root-cause work needs logs, deploy/change context, and often previous incident material.
-- This service has not earned a production-grade claim until the AWS deployment, async index recovery, purge/reingestion, cache invalidation, backup/restore, and multi-repository evaluations are measured under failure conditions.
-- The Bedrock and private SageMaker model paths are code and deployment configuration, **not current live proof**.
-- MCP is not an ingestion path, an agentic database back door, or an RBAC bypass.
-- The current web UI is an operator surface, not a finished product UI.
+## API Surface
 
-## Quick Start: Local Development
+Common authenticated endpoints:
 
-The Compose stack is for development only. It runs PostgreSQL, Qdrant, Redis, the API, a worker, and a minimal web UI. Do not expose this development setup to the public internet or use its credentials in a real environment.
+| Purpose | Endpoint |
+|---|---|
+| Login | POST /v1/auth/login |
+| Capabilities | GET /v1/capabilities |
+| Runtime status | GET /v1/runtime/status |
+| Project readiness | GET /v1/projects/{project_id}/readiness |
+| Register source | POST /v1/projects/{project_id}/sources |
+| Register Collector | POST /v1/projects/{project_id}/collectors/register |
+| Start sync | POST /v1/sources/{source_id}/syncs/start |
+| Batch documents | POST /v1/sources/{source_id}/documents/batch |
+| Finish sync | POST /v1/sources/{source_id}/syncs/{sync_id}/finish |
+| Search | POST /v1/search |
+| Answer | POST /v1/answer |
+| Investigate | POST /v1/investigate |
+| Workflow runs | POST /v1/runs |
+| Evaluations | POST /v1/evals/run |
+| Source purge | DELETE /v1/projects/{project_id}/sources/{source_id} |
+| Project purge | DELETE /v1/projects/{project_id} |
 
-### Prerequisites
+/health is lightweight. /ready checks database, vector store, required
+tables/columns, and the Alembic revision.
 
-- Docker Engine with the Compose plugin
-- Python 3.11+ and [`uv`](https://docs.astral.sh/uv/) for local checks
+## Database
 
-### Start the stack
+This clean V2 repository uses one Alembic baseline:
 
-```bash
-git clone <your-fork-or-remote> inspection-ops
-cd inspection-ops
-cp .env.example .env
+~~~text
+alembic/versions/v2/v2_baseline.py
+~~~
+
+It creates the complete current schema in one fresh-install migration.
+incidentops/db/models.py remains the ORM model source; the Alembic file is the
+immutable database bootstrap contract. Production startup does not call
+SQLAlchemy create_all.
+
+~~~bash
+alembic upgrade head
+python scripts/check_migrations.py
+~~~
+
+## Local Verification
+
+The Compose stack is for development and deterministic testing only:
+
+~~~bash
 docker compose up -d --build postgres qdrant redis
 docker compose run --rm --no-deps api alembic upgrade head
-docker compose up -d --build api core-worker web
-```
+docker compose up -d --build api core-worker
+~~~
 
-Create a development-only administrator using a password you choose:
+The Core Compose file no longer starts a frontend. Build and run
+Ops-Incident-frontend separately when needed.
 
-```bash
-docker compose exec -e BOOTSTRAP_ADMIN_EMAIL=admin@example.test \
-  -e BOOTSTRAP_ADMIN_PASSWORD='choose-a-local-password' \
-  api python -m incidentops.security.bootstrap_admin
-```
-
-Confirm the API and dependencies are ready:
-
-```bash
-curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8000/ready
-curl http://127.0.0.1:8000/v1/capabilities
-```
-
-The web UI is at `http://127.0.0.1:3000`; the OpenAPI document is at `http://127.0.0.1:8000/openapi.json`.
-
-For an API-only smoke flow after starting the stack:
-
-```bash
-python scripts/smoke_prod.py --base-url http://127.0.0.1:8000 \
-  --email admin@example.test --password 'choose-a-local-password' \
-  --query 'What does this tiny service evidence say?'
-```
-
-The smoke creates an isolated project and sends a tiny normalized batch; it does not require local-folder ingestion.
-
-### Run checks
-
-The integration tests run from the host and open direct database sessions, so
-override the Compose-container hostname before running them:
-
-```bash
-export DATABASE_URL="postgresql+asyncpg://incidentops:incidentops@127.0.0.1:${POSTGRES_PORT:-5433}/incidentops"
+~~~bash
 uv run --extra dev ruff check .
 uv run --extra dev python -m pytest tests/unit tests/integration -q
 uv run python -m compileall incidentops apps scripts
-docker compose exec api python scripts/check_migrations.py
-```
+docker compose config --quiet
+~~~
 
-The checked-in `.env.example` is Compose-oriented: its database hostname is
-`postgres`, the Compose service name. For a host-run command, set
-`DATABASE_URL` explicitly to `127.0.0.1:${POSTGRES_PORT:-5433}` or run the
-command inside the API container as shown above. Never use this local file as a
-production environment file.
+## Azure State
 
-## Core API Tour
+Azure is the only retained cloud deployment direction in this repository.
+The Bicep scaffold describes Core API, worker, MCP, Collector, frontend,
+PostgreSQL Flexible Server, Redis, Key Vault, ACR, Container Apps jobs, and
+logging.
 
-Project data routes require a bearer token and project membership. The complete typed API is in OpenAPI; these paths are the usual integration flow:
+The inspected Azure subscription on 2026-08-07 contains:
 
-| Task | Endpoint |
-|---|---|
-| Login | `POST /v1/auth/login` |
-| Create a project | `POST /v1/projects` |
-| List accessible projects | `GET /v1/projects` |
-| Register a source | `POST /v1/projects/{project_id}/sources` |
-| Register a Collector | `POST /v1/projects/{project_id}/collectors/register` |
-| Start, upload, finish a sync | `POST /v1/sources/{source_id}/syncs/start`, `POST /documents/batch`, `POST /finish` |
-| Inspect readiness | `GET /v1/projects/{project_id}/readiness` |
-| Search evidence | `POST /v1/search` |
-| Produce a cited answer | `POST /v1/answer` |
-| Run a cautious investigation | `POST /v1/investigate` |
-| Inspect safe runtime status | `GET /v1/runtime/status` |
-| Purge evidence | `DELETE /v1/projects/{project_id}/sources/{source_id}`, `DELETE /v1/projects/{project_id}` |
-| Inspect source integrity | `GET /v1/projects/{project_id}/sources/{source_id}/integrity` |
-| Run operational checks | `POST /v1/projects/{project_id}/operations/observer/runs`, `POST /v1/projects/{project_id}/operations/logging/runs` |
-| Inspect operational results | `GET /v1/projects/{project_id}/operations/runs`, `GET /v1/projects/{project_id}/operations/findings` |
+| Resource group | Resource | Verified state |
+|---|---|---|
+| incident-ops | Cognitive Services account incident-ops | exists |
+| incident-ops | Azure OpenAI incidentops-chat | gpt-5-mini, succeeded |
+| incident-ops | Azure OpenAI incidentops-embed | text-embedding-3-small, succeeded |
+| incidentops-demo-rg | ACR incidentops846e0b9 | exists; no repositories listed |
 
-`/v1/runtime/status` reports safe configuration state only. It never returns keys, connection strings, passwords, tokens, or raw document content.
+Microsoft.App is NotRegistered. No Container Apps environment, app, or job was
+found. Therefore there is currently no public frontend URL, Core API URL,
+Collector runtime, worker, MCP endpoint, or live cloud E2E result to report.
 
-## Security and Data Handling
+The Azure OpenAI deployments prove resource provisioning only. They do not
+prove that an application call has executed.
 
-- JWT authentication, bcrypt password hashing, project-scoped RBAC, and audit events protect the Core surface.
-- Collector path policy and secret redaction run before content reaches Core.
-- Source configuration validation rejects likely embedded credentials.
-- Diagnostics are size-limited and omit raw secrets and large evidence bodies.
-- Local folder ingestion is disabled in production-like environments; metrics are private by default.
-- Purge removes evidence and retrieval state while retaining only a safe audit tombstone, never raw deleted content.
+The manual workflow is .github/workflows/deploy-azure.yml. It is a delivery
+scaffold and requires Azure OIDC variables/secrets plus the separate frontend
+repository. It has not been represented as a successful live deployment.
 
-See [technical.md](technical.md#api-and-security) for the full boundary model.
+## Security
 
-## Model, Cloud, and CI Boundary
+- JWT authentication and bcrypt password hashing.
+- Project-scoped RBAC for API operations.
+- Collector path policy and pre-ingest redaction.
+- No secrets in audit events or retrieval diagnostics.
+- Local ingest disabled in production-like settings.
+- Metrics private by default.
+- MCP delegates to Core and cannot access the database directly.
+- Internal PostgreSQL, Redis, Qdrant, Collector, worker, and MCP services must
+  not be publicly exposed.
 
-Development and tests use deterministic local-hash embeddings. The Phase 6
-production target is AWS:
+## Honest Limitations
 
-- Amazon Bedrock Titan Text Embeddings V2 at 1024 dimensions.
-- Amazon Bedrock Claude-compatible synthesis through the Converse API.
-- A private SageMaker GPU endpoint for conditional BGE reranking.
-- ECS Fargate for API, worker, Collector, frontend, and MCP; RDS PostgreSQL,
-  TLS ElastiCache Redis, and private self-hosted Qdrant on encrypted EBS.
+This is not yet production-grade. Missing proof includes:
 
-Core and Collector do not load production models. ECS task roles call Bedrock
-and SageMaker through IAM; no model API key is injected. Qdrant, PostgreSQL,
-Redis, Collector, worker, MCP, and SageMaker are private. The public ALB reaches
-only the frontend; the frontend's same-origin `/api` route calls Core through
-private service discovery.
-
-Pushes to `core` run the `Validate and Manually Deploy AWS` validation jobs:
-Core checks, frontend build, and Terraform validation. AWS apply is
-`workflow_dispatch` only, protected by the `aws-production` environment, and
-uses GitHub OIDC. It builds immutable ECR images, applies Terraform, runs
-migrations/readiness, bootstraps the administrator, proves Bedrock and optional
-SageMaker model contracts, promotes ECS services, and runs smoke. This workflow
-exists but has not yet produced a retained successful live deployment record.
-Azure deployment workflows are manual-only and are retained temporarily as a
-rollback reference; they are removed only after every AWS retirement gate in
-[plan.md](plan.md#azure-retirement-gate) passes.
-
-The one-time CI bootstrap is intentionally separate from the main Terraform
-state. An AWS administrator runs `make aws-bootstrap-cicd` once. It creates an
-encrypted, versioned, public-blocked S3 state bucket and a GitHub OIDC role whose
-trust policy accepts only the `Auro-rium/Ops-Incident-Core` repository's
-`aws-production` environment. The helper records only non-secret GitHub
-variables; it never uploads AWS access keys. Configure exact `CORS_ORIGINS` and
-an optional budget email as repository variables before dispatching the apply.
-This restricted AWS account currently deploys RDS with one day of automated
-backup retention. Paid production accounts should set
-`RDS_BACKUP_RETENTION_DAYS=7` or higher and prove restore behavior before any
-production-grade claim.
-
-The account-restricted proof uses `db.t4g.micro`, 20 GiB of RDS storage with
-storage autoscaling and Performance Insights disabled, one task each for API,
-worker, and frontend, and a private `t3.small` Qdrant host with a 20 GiB data
-volume. These settings prove deployment compatibility; they are not production
-capacity recommendations. `terraform.tfvars.example` retains the paid-capacity
-baseline.
-
-Use `make aws-pause` to scale all ECS services to zero and stop RDS and Qdrant
-EC2. Use `make aws-resume` to restart the data plane, rerun migrations, promote
-the configured services, and smoke the public endpoint. Pause does not stop
-charges for ElastiCache, NAT Gateway, ALB, EBS, backups, ECR, logs, Secrets
-Manager, or Terraform state. Full cost shutdown requires the guarded
-`ALLOW_AWS_DESTROY=yes make aws-teardown` path after backup and deletion-
-protection review.
-
-AWS deployment also runs `scripts/aws_bedrock_access_check.sh` before applying
-Terraform. If either configured Bedrock model is not account-authorized and
-region-available, deployment stops before creating additional billable
-resources. Account authorization is an external AWS prerequisite; application
-IAM permissions cannot override it.
-
-## Documentation Map
-
-- [technical.md](technical.md): authoritative architecture, data contracts, security boundaries, retrieval design, deployment state, and known limits.
-- [plan.md](plan.md): six-phase delivery plan and current validation state, including the unresolved Azure proof and later AWS-only release gates.
-- [`.env.example`](.env.example): safe local-development settings shape.
-- [`.env.aws.production.example`](.env.aws.production.example): AWS production contract without secrets.
-- [`.env.production.example`](.env.production.example): retained Azure contract until the AWS cutover gate passes.
-- [`eval/query_classes/`](eval/query_classes): deterministic retrieval fixtures.
-
-## Contributing
-
-Three rules keep this system useful:
-
-1. **Evidence stays attributable.** Results map back to authorized project evidence with useful citations.
-2. **Ingestion stays deterministic.** Parsing, normalization, and secret handling do not move into an LLM prompt.
-3. **Claims stay measurable.** Ranking, model, and deployment changes need tests and a stated validation boundary; never turn a local harness result into a cloud performance claim.
-
-Keep generated caches, environment files, benchmark worktrees, and credentials out of Git. This repository does not currently declare a license; confirm usage and distribution terms with the owner before reusing it.
-
-The two Markdown files under `tests/fixtures/basic_incident/` are synthetic
-test evidence, not operational runbooks or incident history for a real system.
+- a clean Azure deployment;
+- migration/bootstrap/smoke evidence on Azure;
+- real cloud Collector sync after the V2 reset;
+- worker and indexing failure/restart testing;
+- measured retrieval quality and latency on multiple repositories;
+- backup/restore and purge/reingestion drills;
+- model token/latency measurements from real Azure OpenAI calls.

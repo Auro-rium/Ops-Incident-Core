@@ -35,7 +35,9 @@ services:
     image: redis:7-alpine
 
   api:
-    build: .
+    build:
+      context: .
+      dockerfile: docker/core.Dockerfile
     ports:
       - "${API_PORT:-8000}:8000"
     environment:
@@ -96,7 +98,9 @@ services:
       - ${INGEST_ROOT:-.}:${INGEST_CONTAINER_ROOT:-/workspace}:ro
 
   core-worker:
-    build: .
+    build:
+      context: .
+      dockerfile: docker/core.Dockerfile
     command: python -m incidentops.worker
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://incidentops:incidentops@postgres:5432/incidentops}
@@ -134,17 +138,6 @@ services:
     volumes:
       - model_cache:/root/.cache
       - ${INGEST_ROOT:-.}:${INGEST_CONTAINER_ROOT:-/workspace}:ro
-
-  web:
-    build:
-      context: ./apps/web
-    environment:
-      NEXT_PUBLIC_API_BASE_URL: /api
-      CORE_API_BASE_URL: ${CORE_API_BASE_URL:-http://api:8000}
-    ports:
-      - "3000:3000"
-    depends_on:
-      - api
 
 volumes:
   pgdata:

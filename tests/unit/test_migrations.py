@@ -65,8 +65,8 @@ async def test_production_startup_does_not_call_create_all(monkeypatch):
     )
 
 
-def test_alembic_head_resolves_to_operational_agents_migration():
-    assert get_head_revision() == "0006_operational_agents"
+def test_alembic_head_resolves_to_v2_baseline():
+    assert get_head_revision() == "v2_baseline"
 
 
 def test_required_tables_match_current_models():
@@ -86,8 +86,8 @@ def test_readiness_payload_ready_when_all_checks_pass():
         database_ok=True,
         vector_store_ok=True,
         existing_tables=set(required_tables()),
-        current_revision="0004_qdrant_vector_store",
-        head_revision="0004_qdrant_vector_store",
+        current_revision="v2_baseline",
+        head_revision="v2_baseline",
     )
     assert payload["ready"] is True
     assert payload["required_tables"] == "ok"
@@ -103,7 +103,7 @@ def test_readiness_payload_reports_missing_tables_and_outdated_migration():
         vector_store_ok=True,
         existing_tables=existing,
         current_revision="old_revision",
-        head_revision="0004_qdrant_vector_store",
+        head_revision="v2_baseline",
     )
     assert payload["ready"] is False
     assert payload["required_tables"] == ["chunks"]
@@ -121,8 +121,8 @@ def test_readiness_payload_reports_missing_columns():
         vector_store_ok=True,
         existing_tables=existing_tables,
         existing_columns=existing_columns,
-        current_revision="0004_qdrant_vector_store",
-        head_revision="0004_qdrant_vector_store",
+        current_revision="v2_baseline",
+        head_revision="v2_baseline",
     )
     assert payload["ready"] is False
     assert payload["required_columns"] == {"sources": ["name"]}
@@ -134,7 +134,7 @@ def test_readiness_payload_reports_missing_vector_store_and_missing_revision():
         vector_store_ok=False,
         existing_tables=set(required_tables()),
         current_revision=None,
-        head_revision="0004_qdrant_vector_store",
+        head_revision="v2_baseline",
     )
     assert payload["ready"] is False
     assert payload["vector_store"] == "unavailable"

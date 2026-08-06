@@ -6,8 +6,6 @@ serve embeddings and reranking. Contract tests may inject a fake transport.
 
 from __future__ import annotations
 
-import asyncio
-import json
 import time
 from typing import Any
 
@@ -93,8 +91,6 @@ async def remote_embed(texts: list[str]) -> list[list[float]]:
 
 async def remote_rerank(query: str, candidates: list[dict[str, Any]]) -> list[float]:
     settings = get_settings()
-    if settings.effective_cloud_provider == "aws":
-        return await _sagemaker_rerank(query, candidates, settings)
     if not settings.rag_reranker_endpoint or (
         settings.rag_remote_auth_mode != "managed_identity" and not settings.rag_remote_api_key
     ):
@@ -129,72 +125,3 @@ async def remote_rerank(query: str, candidates: list[dict[str, Any]]) -> list[fl
     except httpx.HTTPError as exc:
         incr("rag_remote_rerank_failures_total")
         raise RemoteModelError(f"remote reranker request failed: {exc.__class__.__name__}") from exc
-
-
-async def _sagemaker_rerank(query: str, candidates: list[dict[str, Any]], settings) -> list[float]:
-    if not settings.sagemaker_reranker_configured:
-        raise RemoteModelError("SageMaker reranker endpoint is not configured")
-    payload = {
-        "model_id": settings.reranker_model,
-        "query": redact_secrets(query)[: settings.rag_rerank_max_query_chars],
-        "candidates": [
-            {
-                "id": str(candidate["id"]),
-                "text": redact_secrets(str(candidate["text"]))[: settings.rag_rerank_max_chars_per_candidate],
-            }
-            for candidate in candidates[: settings.rag_rerank_max_candidates]
-        ],
-    }
-    started = time.perf_counter()
-    try:
-        data = await asyncio.to_thread(
-            _invoke_sagemaker_endpoint,
-            region=settings.aws_region,
-            endpoint_name=settings.sagemaker_reranker_endpoint_name,
-            payload=payload,
-            timeout_seconds=settings.rag_remote_timeout_seconds,
-        )
-        scores = data.get("scores")
-        if not isinstance(scores, list) or len(scores) != len(payload["candidates"]):
-            raise RemoteModelError("SageMaker reranker response count mismatch")
-        incr("rag_remote_rerank_calls_total")
-        incr("sagemaker_rerank_calls_total")
-        observe_latency("rag_remote_rerank", (time.perf_counter() - started) * 1000)
-        return [float(score) for score in scores]
-    except RemoteModelError:
-        incr("rag_remote_rerank_failures_total")
-        raise
-    except Exception as exc:
-        incr("rag_remote_rerank_failures_total")
-        raise RemoteModelError(f"SageMaker reranker request failed: {exc.__class__.__name__}") from exc
-
-
-def _invoke_sagemaker_endpoint(
-    *,
-    region: str,
-    endpoint_name: str,
-    payload: dict[str, Any],
-    timeout_seconds: int,
-) -> dict[str, Any]:
-    import boto3
-    from botocore.config import Config
-
-    client = boto3.client(
-        "sagemaker-runtime",
-        region_name=region,
-        config=Config(
-            connect_timeout=timeout_seconds,
-            read_timeout=timeout_seconds,
-            retries={"max_attempts": 3, "mode": "adaptive"},
-        ),
-    )
-    response = client.invoke_endpoint(
-        EndpointName=endpoint_name,
-        ContentType="application/json",
-        Accept="application/json",
-        Body=json.dumps(payload).encode("utf-8"),
-    )
-    decoded = json.loads(response["Body"].read())
-    if not isinstance(decoded, dict):
-        raise RemoteModelError("SageMaker reranker response is not an object")
-    return decoded

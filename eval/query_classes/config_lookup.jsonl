@@ -1,1 +1,0 @@
-{"id":"config-1","query_class":"config_lookup","question":"Where is database configuration defined?","expected_source_types":["config","code"],"expected_documents":["config"],"expected_terms":["database"],"forbidden_source_types":["incident"]}

@@ -73,12 +73,6 @@ class Settings(BaseSettings):
     azure_openai_chat_deployment: str = ""
     azure_openai_embedding_deployment: str = ""
     require_azure_openai: bool = True
-    aws_region: str = "us-east-1"
-    bedrock_chat_model_id: str = ""
-    bedrock_embedding_model_id: str = ""
-    bedrock_embedding_max_concurrency: int = 4
-    sagemaker_reranker_endpoint_name: str = ""
-    require_aws_models: bool = False
 
     vector_weight: float = 0.40
     lexical_weight: float = 0.30
@@ -184,8 +178,7 @@ class Settings(BaseSettings):
     @property
     def llm_available(self) -> bool:
         return (
-            self.bedrock_chat_configured
-            or self.azure_openai_configured
+            self.azure_openai_configured
             or (not self.is_production_like and bool(self.llm_api_key))
         )
 
@@ -194,8 +187,6 @@ class Settings(BaseSettings):
         configured = self.cloud_provider.strip().lower()
         if configured != "auto":
             return configured
-        if self.bedrock_chat_model_id.strip() or self.embedding_model.startswith("aws-bedrock"):
-            return "aws"
         if self.azure_openai_configured or self.azure_openai_embeddings_configured:
             return "azure"
         if self.is_production_like and self.require_azure_openai:
@@ -223,33 +214,13 @@ class Settings(BaseSettings):
         )
 
     @property
-    def bedrock_chat_configured(self) -> bool:
-        return bool(self.aws_region.strip() and self.bedrock_chat_model_id.strip())
-
-    @property
-    def bedrock_embeddings_configured(self) -> bool:
-        return bool(self.aws_region.strip() and self.bedrock_embedding_model_id.strip())
-
-    @property
-    def sagemaker_reranker_configured(self) -> bool:
-        return bool(
-            self.aws_region.strip()
-            and self.sagemaker_reranker_endpoint_name.strip()
-            and self.reranker_model.strip()
-        )
-
-    @property
     def cloud_embeddings_configured(self) -> bool:
-        if self.effective_cloud_provider == "aws":
-            return self.bedrock_embeddings_configured
         if self.effective_cloud_provider == "azure":
             return self.azure_openai_embeddings_configured or self.gpu_rag_configured
         return self.embedding_model.startswith("local-hash") and not self.is_production_like
 
     @property
     def gpu_rag_configured(self) -> bool:
-        if self.effective_cloud_provider == "aws":
-            return self.sagemaker_reranker_configured
         auth_configured = (
             self.rag_remote_auth_mode == "managed_identity"
             or bool(self.rag_remote_api_key.strip())

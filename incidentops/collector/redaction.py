@@ -5,7 +5,7 @@ import re
 _PATTERNS = (
     ("openai_key", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")),
     ("github_token", re.compile(r"\b(?:ghp|github_pat)_[A-Za-z0-9_]{20,}\b")),
-    ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("cloud_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
     ("private_key", re.compile(r"-----BEGIN (?:RSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA )?PRIVATE KEY-----")),
 )
 

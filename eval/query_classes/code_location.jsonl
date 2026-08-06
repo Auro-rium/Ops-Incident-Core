@@ -1,2 +1,0 @@
-{"id":"code-location-1","query_class":"code_location","question":"Where is the history service implemented?","expected_source_types":["code","api_doc"],"expected_documents":["history"],"expected_terms":["history"],"forbidden_source_types":["logs"]}
-{"id":"code-location-2","query_class":"code_location","question":"Where is request validation defined?","expected_source_types":["code"],"expected_documents":["validation"],"expected_terms":["validation"],"forbidden_source_types":["incident"]}
