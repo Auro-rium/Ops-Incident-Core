@@ -27,7 +27,7 @@ timestamped logs, deploy/change context, and often incident history.
 
 ~~~mermaid
 flowchart LR
-  F[Ops-Incident-frontend] -->|authenticated HTTP| API[FastAPI Core API]
+  F[apps/web on Vercel] -->|authenticated browser HTTP| API[FastAPI Core API]
   C[In-repository Collector] -->|redacted NormalizedDocument batches| API
   API --> PG[(PostgreSQL metadata and audit)]
   API --> Q[(Qdrant vectors)]
@@ -54,6 +54,7 @@ bypass Core authorization.
 
 ~~~text
 apps/api/                 FastAPI composition and route registration
+apps/web/                 Vercel-hosted browser console for a Core API
 incidentops/              backend domain code
 incidentops/collector/    in-repository Collector runtime
 incidentops/eval/         active eval runner and golden cases
@@ -65,14 +66,18 @@ scripts/                  migration, smoke, and Azure operations
 tests/                    unit and integration tests
 ~~~
 
-The frontend is intentionally separate:
+`apps/web` is a small public browser console. It does not proxy requests or
+hold backend credentials: a user enters a Core API URL, signs in, and the
+browser calls Core directly. The token is held only in browser session storage.
+For a live connection, the Core deployment must allow the Vercel origin in
+`CORS_ORIGINS` and expose its API over HTTPS.
 
-~~~text
-Ops-Incident-frontend
-~~~
+Verified public console: https://web-auroriumnexus-6067s-projects.vercel.app
 
-The old embedded apps/web frontend was removed. Core no longer builds or ships
-an embedded frontend.
+The Vercel project is linked to `Auro-rium/Ops-Incident-Core`, with `apps/web`
+as its root directory and `core` as its production branch. A push to `core`
+rebuilds the console. This proves frontend delivery only; it does not prove a
+live Core API because no Core runtime is deployed at this time.
 
 ## Data Flow
 
@@ -167,8 +172,20 @@ docker compose run --rm --no-deps api alembic upgrade head
 docker compose up -d --build api core-worker
 ~~~
 
-The Core Compose file no longer starts a frontend. Build and run
-Ops-Incident-frontend separately when needed.
+The Core Compose file does not start the public frontend. Verify and deploy the
+Vercel client separately:
+
+~~~bash
+cd apps/web
+npm ci
+npm run typecheck
+npm run build
+vercel --prod
+~~~
+
+Set `NEXT_PUBLIC_CORE_API_URL` in Vercel only when a public Core API exists.
+Without it, a user can enter the API URL in the console. Never put API keys,
+database URLs, or service credentials in Vercel environment variables.
 
 ~~~bash
 uv run --extra dev ruff check .
@@ -180,9 +197,9 @@ docker compose config --quiet
 ## Azure State
 
 Azure is the only retained cloud deployment direction in this repository.
-The Bicep scaffold describes Core API, worker, MCP, Collector, frontend,
-PostgreSQL Flexible Server, Redis, Key Vault, ACR, Container Apps jobs, and
-logging.
+The Bicep scaffold describes Core API, worker, MCP, Collector, PostgreSQL
+Flexible Server, Redis, Key Vault, ACR, Container Apps jobs, and logging. Its
+legacy frontend Container App is disabled by default; Vercel hosts `apps/web`.
 
 The inspected Azure subscription on 2026-08-07 contains:
 
@@ -194,15 +211,19 @@ The inspected Azure subscription on 2026-08-07 contains:
 | incidentops-demo-rg | ACR incidentops846e0b9 | exists; no repositories listed |
 
 Microsoft.App is NotRegistered. No Container Apps environment, app, or job was
-found. Therefore there is currently no public frontend URL, Core API URL,
-Collector runtime, worker, MCP endpoint, or live cloud E2E result to report.
+found. Therefore there is currently no public Core API URL, Collector runtime,
+worker, MCP endpoint, or live cloud E2E result to report. A Vercel UI can be
+deployed independently, but it cannot display live evidence until a Core API is
+deployed and CORS is configured for its origin.
 
 The Azure OpenAI deployments prove resource provisioning only. They do not
 prove that an application call has executed.
 
-The manual workflow is .github/workflows/deploy-azure.yml. It is a delivery
-scaffold and requires Azure OIDC variables/secrets plus the separate frontend
-repository. It has not been represented as a successful live deployment.
+The manual workflow is `.github/workflows/deploy-azure.yml`. It tests the Core
+and `apps/web`, then deploys Core runtime resources to Azure without building a
+frontend Container App. Set the public Vercel URL as `VERCEL_FRONTEND_URL` and
+include it in `CORS_ORIGINS` before running Azure smoke. The workflow has not
+been represented as a successful live deployment.
 
 ## Security
 

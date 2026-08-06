@@ -11,7 +11,7 @@ deployment.
 ~~~mermaid
 flowchart TB
   subgraph Client
-    FE[Ops-Incident-frontend]
+    FE[apps/web on Vercel]
     MCP[MCP client]
   end
   subgraph Core[Ops-Incident-Core]
@@ -72,12 +72,21 @@ create_all in production-like environments.
 | readiness | deterministic coverage/readiness reports |
 | mcp | Core API facade for external AI clients |
 
-### Separate frontend
+### Browser console
 
-The frontend is Ops-Incident-frontend. The removed apps/web directory is not part
-of the Core build or Compose stack. The frontend communicates with Core over
-authenticated HTTP and never receives database, Qdrant, Redis, model, or
-service credentials.
+`apps/web` is a minimal Next.js browser console deployed independently to
+Vercel. It communicates with Core over authenticated HTTPS, stores the user
+access token only in browser session storage, and never receives database,
+Qdrant, Redis, model, or service credentials. It is not a backend proxy.
+
+The deployed Core API must include the Vercel origin in `CORS_ORIGINS`. The
+console can be built without a configured API URL; users may enter one at run
+time. `NEXT_PUBLIC_CORE_API_URL` may set a non-secret default only.
+
+Verified public console: https://web-auroriumnexus-6067s-projects.vercel.app
+The Vercel project is connected to `Auro-rium/Ops-Incident-Core`, uses
+`apps/web` as its root directory, and has `core` as its production branch.
+This deployment proves delivery of the browser UI, not a live backend path.
 
 ## Ingestion Contract
 
@@ -232,11 +241,12 @@ evidence or replace real repository and incident benchmarks.
 ## Azure IaC and Verified Cloud State
 
 infra/azure/main.bicep describes Azure Container Registry, a Container Apps
-environment, Core API, worker, MCP, Collector and frontend apps, migration and
-bootstrap jobs, PostgreSQL Flexible Server, Redis, Key Vault, Log Analytics,
-and a benchmark job.
+environment, Core API, worker, MCP, Collector, migration and bootstrap jobs,
+PostgreSQL Flexible Server, Redis, Key Vault, Log Analytics, and a benchmark
+job. A legacy frontend Container App definition remains optional but defaults
+to disabled; `apps/web` is deployed on Vercel.
 
-The live subscription inspected on 2026-08-07 contains:
+The Azure subscription inspected on 2026-08-07 contains:
 
 | Resource group | Resource | Result |
 |---|---|---|
@@ -246,18 +256,20 @@ The live subscription inspected on 2026-08-07 contains:
 | incidentops-demo-rg | ACR incidentops846e0b9 | present, no repositories listed |
 
 Microsoft.App is NotRegistered. No Container Apps environment, app, or job was
-found. No live PostgreSQL, Redis, Qdrant, Core API, worker, Collector,
-frontend, or MCP runtime was verified. There is no public application URL
-currently backed by this subscription.
+found. No live PostgreSQL, Redis, Qdrant, Core API, worker, Collector, or MCP
+runtime was verified. The Vercel console is publicly deployed, but there is no
+live application workflow until Core is deployed and its CORS policy allows its
+origin.
 
 The Azure OpenAI deployments prove resource provisioning only. They do not prove
 an application call, token usage, latency, retrieval quality, or E2E sync.
 
 ## CI/CD
 
-.github/workflows/deploy-azure.yml is a manual Azure workflow. It tests Core,
-checks out the separate frontend repository, validates Bicep, builds/pushes
-images, deploys resources, runs migrations/bootstrap, and runs smoke/E2E checks.
+.github/workflows/deploy-azure.yml is a manual Azure workflow. It tests Core
+and `apps/web`, validates Bicep, builds/pushes the Core image, deploys backend
+resources, runs migrations/bootstrap, and runs smoke/E2E checks. It does not
+build or deploy a frontend Container App.
 
 It requires Azure OIDC, registry, model, Qdrant, database, and admin
 configuration as GitHub secrets/variables. No secret values belong in this

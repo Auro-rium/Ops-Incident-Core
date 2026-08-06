@@ -45,3 +45,4 @@ infra/azure/*.parameters.local.json
 .azure/
 
 .DS_Store
+.vercel

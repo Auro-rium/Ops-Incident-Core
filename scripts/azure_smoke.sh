@@ -8,7 +8,6 @@ NAME_PREFIX="${NAME_PREFIX:?NAME_PREFIX is required}"
 CORE_API_APP_NAME="${CORE_API_APP_NAME:-${NAME_PREFIX}-core-api}"
 COLLECTOR_APP_NAME="${COLLECTOR_APP_NAME:-${NAME_PREFIX}-collector}"
 MCP_APP_NAME="${MCP_APP_NAME:-${NAME_PREFIX}-mcp}"
-FRONTEND_APP_NAME="${FRONTEND_APP_NAME:-${NAME_PREFIX}-frontend}"
 API_URL="${API_URL:-}"
 FRONTEND_URL="${FRONTEND_URL:-}"
 SMOKE_EMAIL="${SMOKE_EMAIL:-${BOOTSTRAP_ADMIN_EMAIL:-admin@incidentops.local}}"
@@ -28,16 +27,6 @@ if [[ -z "$API_URL" ]]; then
     --output tsv \
     --only-show-errors)"
   API_URL="https://$API_URL"
-fi
-
-if [[ -z "$FRONTEND_URL" ]]; then
-  FRONTEND_URL="$(az containerapp show \
-    --resource-group "$AZURE_RESOURCE_GROUP" \
-    --name "$FRONTEND_APP_NAME" \
-    --query 'properties.configuration.ingress.fqdn' \
-    --output tsv \
-    --only-show-errors 2>/dev/null || true)"
-  [[ -n "$FRONTEND_URL" ]] && FRONTEND_URL="https://$FRONTEND_URL"
 fi
 
 if [[ -z "$SMOKE_PASSWORD" ]]; then

@@ -8,7 +8,7 @@ AZURE_LOCATION="${AZURE_LOCATION:?AZURE_LOCATION is required}"
 ACR_NAME="${ACR_NAME:?ACR_NAME is required}"
 IMAGE_TAG="${IMAGE_TAG:-$(git -C "$ROOT_DIR" rev-parse --short HEAD)}"
 CORE_REPO_PATH="${CORE_REPO_PATH:-$ROOT_DIR}"
-BUILD_FRONTEND="${BUILD_FRONTEND:-true}"
+BUILD_FRONTEND="${BUILD_FRONTEND:-false}"
 
 detect_repo() {
   local env_value="$1"

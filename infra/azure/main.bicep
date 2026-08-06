@@ -21,8 +21,8 @@ param collectorImageTag string = 'latest'
 @description('Frontend image tag already pushed to ACR.')
 param frontendImageTag string = 'latest'
 
-@description('Whether to deploy the frontend Container App.')
-param deployFrontend bool = true
+@description('Whether to deploy the legacy frontend Container App. The supported public frontend is apps/web on Vercel.')
+param deployFrontend bool = false
 
 @secure()
 @description('PostgreSQL admin password.')

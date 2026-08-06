@@ -122,20 +122,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          repository: ${{ vars.FRONTEND_REPOSITORY || 'Auro-rium/Ops-Incident-frontend' }}
-          token: ${{ secrets.FRONTEND_REPO_TOKEN || github.token }}
-          path: Ops-Incident-frontend
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: Ops-Incident-frontend/package-lock.json
-      - working-directory: Ops-Incident-frontend
+          cache-dependency-path: apps/web/package-lock.json
+      - working-directory: apps/web
         run: npm ci
-      - working-directory: Ops-Incident-frontend
+      - working-directory: apps/web
         run: npm run typecheck
-      - working-directory: Ops-Incident-frontend
+      - working-directory: apps/web
         run: npm run build
 
   deploy:
@@ -149,13 +145,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: Ops-Incident-Core
-
-      - name: Checkout frontend
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ vars.FRONTEND_REPOSITORY || 'Auro-rium/Ops-Incident-frontend' }}
-          token: ${{ secrets.FRONTEND_REPO_TOKEN || github.token }}
-          path: Ops-Incident-frontend
 
       - name: Validate Azure login secrets
         env:
@@ -207,14 +196,13 @@ jobs:
       - name: Build and push images
         working-directory: Ops-Incident-Core
         env:
-          BUILD_FRONTEND: "true"
-          FRONTEND_REPO_PATH: ../Ops-Incident-frontend
+          BUILD_FRONTEND: "false"
         run: scripts/azure_build_push_images.sh
 
       - name: Deploy Azure resources
         working-directory: Ops-Incident-Core
         env:
-          DEPLOY_FRONTEND: "true"
+          DEPLOY_FRONTEND: "false"
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           BOOTSTRAP_ADMIN_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
@@ -245,7 +233,7 @@ jobs:
       - name: Azure smoke
         working-directory: Ops-Incident-Core
         env:
-          FRONTEND_APP_NAME: ${{ vars.AZURE_NAME_PREFIX }}-frontend
+          FRONTEND_URL: ${{ vars.VERCEL_FRONTEND_URL || '' }}
           SMOKE_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
           SMOKE_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
         run: scripts/azure_smoke.sh
@@ -254,6 +242,7 @@ jobs:
         if: inputs.run_release_benchmark
         working-directory: Ops-Incident-Core
         env:
+          FRONTEND_URL: ${{ vars.VERCEL_FRONTEND_URL || '' }}
           SMOKE_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
           SMOKE_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
         run: scripts/azure_user_e2e.sh

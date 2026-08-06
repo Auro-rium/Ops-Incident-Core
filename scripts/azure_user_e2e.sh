@@ -5,7 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:?AZURE_RESOURCE_GROUP is required}"
 NAME_PREFIX="${NAME_PREFIX:?NAME_PREFIX is required}"
 CORE_APP_NAME="${CORE_APP_NAME:-${NAME_PREFIX}-core-api}"
-FRONTEND_APP_NAME="${FRONTEND_APP_NAME:-${NAME_PREFIX}-frontend}"
 BENCHMARK_JOB_NAME="${BENCHMARK_JOB_NAME:-${NAME_PREFIX}-benchmark-job}"
 MCP_APP_NAME="${MCP_APP_NAME:-${NAME_PREFIX}-mcp}"
 SMOKE_EMAIL="${SMOKE_EMAIL:-${BOOTSTRAP_ADMIN_EMAIL:-admin@incidentops.local}}"
@@ -32,9 +31,8 @@ if [[ -z "$SMOKE_PASSWORD" ]]; then
 fi
 
 api_fqdn="$(az containerapp show --resource-group "$AZURE_RESOURCE_GROUP" --name "$CORE_APP_NAME" --query 'properties.configuration.ingress.fqdn' --output tsv --only-show-errors)"
-frontend_fqdn="$(az containerapp show --resource-group "$AZURE_RESOURCE_GROUP" --name "$FRONTEND_APP_NAME" --query 'properties.configuration.ingress.fqdn' --output tsv --only-show-errors)"
 API_URL="${API_URL:-https://$api_fqdn}"
-FRONTEND_URL="${FRONTEND_URL:-https://$frontend_fqdn}"
+FRONTEND_URL="${FRONTEND_URL:?FRONTEND_URL is required and must be the Vercel frontend URL}"
 
 echo "Frontend URL: $FRONTEND_URL"
 echo "Core API URL: $API_URL"
