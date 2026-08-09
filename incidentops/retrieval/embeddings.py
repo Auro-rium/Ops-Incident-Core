@@ -14,6 +14,7 @@ import math
 import random
 import threading
 import time
+from dataclasses import dataclass
 
 import httpx
 
@@ -30,6 +31,66 @@ _azure_backoff_until = 0.0
 _azure_embedding_lock = threading.Lock()
 
 _RETRYABLE_EMBEDDING_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
+
+
+@dataclass
+class _EmbeddingBatchRequest:
+    texts: list[str]
+    future: asyncio.Future[list[list[float]]]
+
+
+class AsyncEmbeddingBatcher:
+    """Coalesce concurrent worker embedding calls into bounded provider batches."""
+
+    def __init__(self, *, max_texts: int = 16, window_ms: int = 50) -> None:
+        self.max_texts = max(1, max_texts)
+        self.window_seconds = max(0, window_ms) / 1000
+        self._lock = asyncio.Lock()
+        self._pending: list[_EmbeddingBatchRequest] = []
+        self._pending_texts = 0
+        self._flush_task: asyncio.Task[None] | None = None
+
+    async def embed(self, texts: list[str], model_name: str | None = None) -> list[list[float]]:
+        if not texts:
+            return []
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[list[list[float]]] = loop.create_future()
+        flush_now = False
+        async with self._lock:
+            self._pending.append(_EmbeddingBatchRequest(texts, future))
+            self._pending_texts += len(texts)
+            if self._pending_texts >= self.max_texts:
+                flush_now = True
+            elif self._flush_task is None or self._flush_task.done():
+                self._flush_task = asyncio.create_task(self._flush_after_window())
+        if flush_now:
+            await self._flush()
+        return await future
+
+    async def _flush_after_window(self) -> None:
+        await asyncio.sleep(self.window_seconds)
+        await self._flush()
+
+    async def _flush(self) -> None:
+        async with self._lock:
+            requests = self._pending
+            self._pending = []
+            self._pending_texts = 0
+        if not requests:
+            return
+        texts = [text for request in requests for text in request.texts]
+        try:
+            vectors = await embed_texts_async(texts)
+            offset = 0
+            for request in requests:
+                count = len(request.texts)
+                if not request.future.done():
+                    request.future.set_result(vectors[offset : offset + count])
+                offset += count
+        except Exception as exc:
+            for request in requests:
+                if not request.future.done():
+                    request.future.set_exception(exc)
 
 
 def _load_model(model_name: str):

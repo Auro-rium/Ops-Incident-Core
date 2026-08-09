@@ -23,11 +23,23 @@ from incidentops.operations.service import (
     run_logging_aggregate,
     run_observer,
 )
-from incidentops.retrieval.embeddings import embed_texts_async
+from incidentops.retrieval.embeddings import AsyncEmbeddingBatcher
 from incidentops.security.audit import record_audit_event
 from incidentops.worker.schemas import Job
 
 logger = logging.getLogger("incidentops.worker.jobs")
+
+_embedding_batcher: AsyncEmbeddingBatcher | None = None
+
+
+def _get_embedding_batcher(settings: Settings) -> AsyncEmbeddingBatcher:
+    global _embedding_batcher
+    if _embedding_batcher is None:
+        _embedding_batcher = AsyncEmbeddingBatcher(
+            max_texts=settings.embedding_batch_max_texts,
+            window_ms=settings.embedding_batch_window_ms,
+        )
+    return _embedding_batcher
 
 TERMINAL_RUN_STATUSES = {
     RunStatus.awaiting_approval,
@@ -262,9 +274,10 @@ async def execute_index_document_job(payload: dict, settings: Settings) -> None:
         index_job.started_at = datetime.now(timezone.utc)
         try:
             normalized = NormalizedDocument.model_validate(index_job.normalized_payload_json)
+            batcher = _get_embedding_batcher(settings)
 
             async def embed_fn(texts: list[str]) -> list[list[float]]:
-                return await embed_texts_async(texts, model_name=settings.embedding_model)
+                return await batcher.embed(texts, model_name=settings.embedding_model)
 
             indexed = await index_normalized_documents(
                 db,

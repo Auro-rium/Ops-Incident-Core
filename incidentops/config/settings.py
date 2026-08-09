@@ -67,6 +67,8 @@ class Settings(BaseSettings):
     embedding_request_initial_backoff_seconds: float = 1.0
     embedding_request_max_backoff_seconds: float = 20.0
     embedding_request_min_interval_seconds: float = 0.25
+    embedding_batch_max_texts: int = 16
+    embedding_batch_window_ms: int = 50
     azure_openai_endpoint: str = ""
     azure_openai_api_key: str = ""
     azure_openai_api_version: str = "2024-10-21"
