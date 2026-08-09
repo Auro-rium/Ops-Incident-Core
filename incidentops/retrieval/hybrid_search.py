@@ -42,6 +42,22 @@ DEPLOY_HASH_RE = re.compile(r"\b([a-f0-9]{6,40})\b", re.IGNORECASE)
 ENDPOINT_RE = re.compile(r"(/\w[\w/-]*)")
 SERVICE_RE = re.compile(r"\b([a-z][a-z0-9_-]{2,40})(?:\s+service)?\b", re.IGNORECASE)
 SERVICE_STOPWORDS = {
+    "a",
+    "an",
+    "are",
+    "application",
+    "app",
+    "backend",
+    "configured",
+    "configuration",
+    "database",
+    "defined",
+    "deployment",
+    "deployments",
+    "fastapi",
+    "settings",
+    "used",
+    "the",
     "why",
     "what",
     "when",

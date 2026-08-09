@@ -61,6 +61,16 @@ def test_code_location_with_latency_symbol_does_not_become_runtime_query():
     assert "implemented" in intent.query_terms
 
 
+def test_query_terms_use_boundaries_and_route_config_questions_correctly():
+    fastapi = classify_query_intent("Where is FastAPI used?")
+    config = classify_query_intent("Where are deployment settings defined?")
+    api = classify_query_intent("Where are workflow APIs defined?")
+
+    assert fastapi.intent == "code_location"
+    assert config.intent == "config_lookup"
+    assert api.intent == "api_contract"
+
+
 def test_runtime_query_warns_when_runtime_evidence_missing():
     intent = classify_query_intent("Why did workflow latency spike?")
     boost, reasons = _metadata_boost(

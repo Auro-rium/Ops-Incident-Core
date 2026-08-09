@@ -36,6 +36,12 @@ _CONFIG_TERMS = {
     "compose",
     "helm",
     "kustomize",
+    "settings",
+    "deployment",
+    "deployments",
+    "database",
+    "databases",
+    "db",
 }
 _API_TERMS = {
     "api",
@@ -201,7 +207,7 @@ def classify_query_intent(query: str) -> QueryIntent:
             query_terms=query_terms,
             explanation="query asks for runbooks, remediation, or operational procedures",
         )
-    if _looks_like_code_location(lower):
+    if _looks_like_code_location(lower) and not _contains_any(lower, _API_TERMS | _CONFIG_TERMS):
         return QueryIntent(
             intent=INTENT_CODE_LOCATION,
             preferred_source_types=["code", "api_doc", "config"],
@@ -319,7 +325,10 @@ def investigate_supported(intent: QueryIntent, available_source_types: set[str])
 
 
 def _contains_any(text: str, terms: set[str]) -> bool:
-    return any(term in text for term in terms)
+    return any(
+        re.search(rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])", text) is not None
+        for term in terms
+    )
 
 
 def _looks_like_code_location(text: str) -> bool:
