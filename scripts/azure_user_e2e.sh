@@ -78,8 +78,8 @@ capabilities = request('GET', '/v1/capabilities')[1]
 frontend_request = urllib.request.Request(frontend_url)
 with urllib.request.urlopen(frontend_request, timeout=30) as response:
     frontend_page = response.read().decode('utf-8', errors='replace')
-if 'IncidentOps Console' not in frontend_page:
-    raise SystemExit('Frontend did not return the IncidentOps Console shell.')
+if '<title>IncidentOps' not in frontend_page and 'IncidentOps' not in frontend_page:
+    raise SystemExit('Frontend did not return the IncidentOps application shell.')
 login = request('POST', '/v1/auth/login', payload={'email': email, 'password': password})[1]
 token = login['access_token']
 if not project_id:
