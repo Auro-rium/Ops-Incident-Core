@@ -54,3 +54,4 @@ class InvestigationResult:
     unknowns: list[str]
     evidence: list[dict]
     debug: dict[str, Any] = field(default_factory=dict)
+    answer: str | None = None

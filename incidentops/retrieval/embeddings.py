@@ -274,7 +274,17 @@ async def embed_texts_async(texts: list[str], model_name: str | None = None) -> 
 
 
 async def embed_query_async(query: str, model_name: str | None = None) -> list[float]:
-    vectors = await embed_texts_async([query], model_name=model_name)
+    settings = get_settings()
+    chosen_model = model_name or settings.embedding_model
+    if chosen_model.startswith(("local-hash", "azure-ml")):
+        vectors = await embed_texts_async([query], model_name=chosen_model)
+    else:
+        cached = await get_embedding(query)
+        if cached is not None:
+            return cached
+        vectors = await embed_texts_async([query], model_name=chosen_model)
+        if vectors:
+            await set_embedding(query, vectors[0])
     return vectors[0] if vectors else []
 
 

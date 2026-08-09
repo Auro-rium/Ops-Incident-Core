@@ -205,10 +205,19 @@ async def hybrid_search_with_debug(
     intent = classify_query_intent(query)
     incr(f"retrieval_intent_{intent.intent}_total")
     logger.info("query classified intent=%s", intent.intent)
-    embed_started = time.perf_counter()
-    with traced("retrieval.query_embedding"):
-        query_embedding = await embed_query_async(query, settings.embedding_model)
-    branch_latencies["query_embedding_ms"] = _elapsed_ms(embed_started)
+    # Exact repository lookups are faster and more precise through lexical and
+    # metadata branches; remote embeddings add latency without helping a query
+    # that already names a path, symbol, config key, or API.
+    skip_vector = intent.intent in {INTENT_CODE_LOCATION, INTENT_CONFIG_LOOKUP, INTENT_API_CONTRACT}
+    if skip_vector:
+        query_embedding = []
+        branch_latencies["query_embedding_ms"] = 0
+        incr("retrieval_vector_skipped_exact_lookup_total")
+    else:
+        embed_started = time.perf_counter()
+        with traced("retrieval.query_embedding"):
+            query_embedding = await embed_query_async(query, settings.embedding_model)
+        branch_latencies["query_embedding_ms"] = _elapsed_ms(embed_started)
     fetch_k = _fetch_budget(top_k, intent)
     branches, branch_errors = await _retrieve_branches(
         db,
@@ -360,15 +369,17 @@ async def _retrieve_branches(
                 return await graph_search(branch_db, project_id, query_info, top_k=fetch_k)
 
         vector, lexical, metadata, graph = await asyncio.gather(
-            _run("vector", _vector),
+            _run("vector", _vector) if query_embedding else _empty_results(),
             _run("lexical", _lexical),
             _run("metadata", _metadata),
             _run("graph", _graph),
         )
         branch_latencies["retrieval_parallel"] = 1
     else:
-        vector = await _run(
-            "vector", lambda: vector_search(db, project_id, query_embedding, top_k=fetch_k, filters=filters)
+        vector = (
+            await _run("vector", lambda: vector_search(db, project_id, query_embedding, top_k=fetch_k, filters=filters))
+            if query_embedding
+            else []
         )
         lexical = await _run("lexical", lambda: lexical_search(db, project_id, query, top_k=fetch_k, filters=filters))
         metadata = await _run(
@@ -540,6 +551,12 @@ def _metadata_boost(chunk, query_info: dict[str, Any], intent: QueryIntent) -> t
     if _should_penalize_readme(intent, lower_path):
         boost -= 0.10
         reasons.append("readme_penalty")
+    if intent.intent in {INTENT_CODE_LOCATION, INTENT_API_CONTRACT} and source_type == "runbook":
+        boost -= 0.24
+        reasons.append("wrong_intent_runbook_penalty")
+    if intent.intent == INTENT_CONFIG_LOOKUP and source_type == "runbook":
+        boost -= 0.12
+        reasons.append("generic_runbook_penalty")
 
     return boost, reasons
 

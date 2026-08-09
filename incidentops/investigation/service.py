@@ -141,6 +141,8 @@ async def investigate(
     elif confidence != "low":
         suggested_fix = "Validate the leading hypothesis against deploy history, recent logs, and ownership documentation before taking action."
 
+    answer = _build_cited_answer(evidence, selected, supported, missing_data)
+
     result = InvestigationResult(
         question=query,
         task_type=task_type,
@@ -158,6 +160,7 @@ async def investigate(
         missing_data=missing_data,
         unknowns=missing_data,
         evidence=evidence,
+        answer=answer,
         debug={
             **retrieval_debug,
             "query_intent": query_intent.as_dict(),
@@ -176,6 +179,19 @@ async def investigate(
         incr("weak_evidence_total")
     observe_latency("investigation", latency_ms)
     return result, latency_ms
+
+
+def _build_cited_answer(evidence: list[dict], selected, supported: bool, missing_data: list[str]) -> str:
+    """Return a bounded cited response without inventing root-cause facts."""
+    if not evidence:
+        return "No supporting evidence was retrieved for this question."
+    labels = ", ".join(item["citation"]["label"] for item in evidence[:3])
+    if not supported:
+        paths = ", ".join(item.get("document_path", "unknown") for item in evidence[:3])
+        return f"The evidence points to {paths}. This is a cited repository lookup, not a confident root-cause finding ({labels})."
+    if selected.confidence == "low" or missing_data:
+        return f"The available evidence does not support a confident root-cause conclusion. The leading assessment is: {selected.summary} ({labels})."
+    return f"The leading assessment is: {selected.summary} ({labels})."
 
 
 def _raw_source_types(results: list[dict]) -> set[str]:

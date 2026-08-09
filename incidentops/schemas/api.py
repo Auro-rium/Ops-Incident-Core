@@ -457,6 +457,7 @@ class RootCauseResponse(BaseModel):
 
 class InvestigationResponse(BaseModel):
     question: str
+    answer: str | None = None
     task_type: str
     query_intent: str
     investigation_supported: bool = True

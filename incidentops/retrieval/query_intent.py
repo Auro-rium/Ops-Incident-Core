@@ -196,7 +196,7 @@ def classify_query_intent(query: str) -> QueryIntent:
     if _looks_like_code_location(lower):
         return QueryIntent(
             intent=INTENT_CODE_LOCATION,
-            preferred_source_types=["code", "api_doc", "config", "runbook"],
+            preferred_source_types=["code", "api_doc", "config"],
             preferred_chunk_types=[
                 "go_function",
                 "go_method",
@@ -262,7 +262,7 @@ def classify_query_intent(query: str) -> QueryIntent:
         return QueryIntent(
             intent=INTENT_API_CONTRACT,
             secondary_intents=[INTENT_CODE_LOCATION] if "implemented" in lower else [],
-            preferred_source_types=["api_doc", "code", "runbook", "config"],
+            preferred_source_types=["api_doc", "code", "config"],
             preferred_chunk_types=["openapi_endpoint", "openapi_schema", "proto_service", "proto_rpc", "proto_message", "proto_enum", "go_function", "markdown_heading_section"],
             query_terms=query_terms,
             explanation="query asks about API, route, RPC, protobuf, or endpoint contracts",
@@ -271,7 +271,7 @@ def classify_query_intent(query: str) -> QueryIntent:
         return QueryIntent(
             intent=INTENT_CONFIG_LOOKUP,
             secondary_intents=[INTENT_CODE_LOCATION] if "implemented" in lower else [],
-            preferred_source_types=["config", "deploy", "runbook", "code"],
+            preferred_source_types=["config", "deploy", "code"],
             preferred_chunk_types=["config_service_block", "env_var_block", "dependency_block", "config_section", "deploy_commit", "deploy_diff", "markdown_heading_section", "go_function"],
             query_terms=query_terms,
             explanation="query asks about configuration, deployment config, environment, or dependency settings",

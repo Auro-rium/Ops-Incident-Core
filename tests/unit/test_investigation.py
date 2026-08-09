@@ -5,7 +5,7 @@ from datetime import datetime
 from incidentops.investigation.classifier import classify_task
 from incidentops.investigation.entity_extractor import extract_entities
 from incidentops.investigation.hypothesis_generator import generate_hypotheses
-from incidentops.investigation.service import _score_confidence
+from incidentops.investigation.service import _build_cited_answer, _score_confidence
 from incidentops.investigation.root_cause_selector import select_root_cause
 from incidentops.investigation.timeline_builder import build_timeline
 from apps.api.routes.answer import _skip_rerank_for_intent
@@ -73,3 +73,16 @@ def test_lookup_and_unsupported_runtime_queries_skip_remote_reranking():
     assert _skip_rerank_for_intent("code_location", supported=False) is True
     assert _skip_rerank_for_intent("runtime_incident", supported=False) is True
     assert _skip_rerank_for_intent("runtime_incident", supported=True) is False
+
+
+def test_investigation_builds_bounded_cited_answer_when_rca_is_unsupported():
+    answer = _build_cited_answer(
+        [{"citation": {"label": "[1]"}, "document_path": "backend/app/main.py"}],
+        type("Selected", (), {"confidence": "low", "summary": "weak evidence"})(),
+        False,
+        ["logs missing timestamps"],
+    )
+
+    assert "backend/app/main.py" in answer
+    assert "[1]" in answer
+    assert "not a confident root-cause" in answer

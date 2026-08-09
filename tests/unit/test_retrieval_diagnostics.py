@@ -48,6 +48,7 @@ def test_code_location_boosts_code_and_penalizes_readme():
     assert "intent_source:code" in code_reasons
     assert "code_path_match" in code_reasons
     assert "readme_penalty" in readme_reasons
+    assert "wrong_intent_runbook_penalty" in readme_reasons
     assert code_boost > readme_boost
 
 
