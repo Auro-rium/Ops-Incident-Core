@@ -220,6 +220,9 @@ jobs:
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
           QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION || 'incidentops_chunks' }}
           EMBEDDING_DIMENSION: ${{ vars.EMBEDDING_DIMENSION || '1024' }}
+          EMBEDDING_MODEL: ${{ vars.EMBEDDING_MODEL || 'azure-openai' }}
+          HF_API_TOKEN: ${{ secrets.HF_API_TOKEN || '' }}
+          HF_EMBEDDING_MODEL: ${{ vars.HF_EMBEDDING_MODEL || 'thenlper/gte-large' }}
         run: scripts/azure_deploy.sh
 
       - name: Run migrations

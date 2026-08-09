@@ -29,6 +29,9 @@ QDRANT_URL="${QDRANT_URL:-}"
 QDRANT_API_KEY="${QDRANT_API_KEY:-}"
 QDRANT_COLLECTION="${QDRANT_COLLECTION:-incidentops_chunks}"
 EMBEDDING_DIMENSION="${EMBEDDING_DIMENSION:-1024}"
+EMBEDDING_MODEL="${EMBEDDING_MODEL:-azure-openai}"
+HF_API_TOKEN="${HF_API_TOKEN:-}"
+HF_EMBEDDING_MODEL="${HF_EMBEDDING_MODEL:-thenlper/gte-large}"
 OUTPUT_FILE="${OUTPUT_FILE:-$ROOT_DIR/infra/azure/.last-deployment.json}"
 PARAMETERS_FILE="$(mktemp)"
 DEPLOY_ERROR_FILE="$(mktemp)"
@@ -42,6 +45,9 @@ test -n "$AZURE_OPENAI_CHAT_DEPLOYMENT" || { echo "AZURE_OPENAI_CHAT_DEPLOYMENT 
 test -n "$AZURE_OPENAI_EMBEDDING_DEPLOYMENT" || { echo "AZURE_OPENAI_EMBEDDING_DEPLOYMENT is required." >&2; exit 1; }
 test -n "$QDRANT_URL" || { echo "QDRANT_URL is required." >&2; exit 1; }
 test -n "$QDRANT_API_KEY" || { echo "QDRANT_API_KEY is required." >&2; exit 1; }
+if [[ "$EMBEDDING_MODEL" == huggingface* || "$EMBEDDING_MODEL" == hf* ]]; then
+  test -n "$HF_API_TOKEN" || { echo "HF_API_TOKEN is required when EMBEDDING_MODEL=$EMBEDDING_MODEL." >&2; exit 1; }
+fi
 
 az group create \
   --name "$AZURE_RESOURCE_GROUP" \
@@ -56,6 +62,7 @@ export INCIDENTOPS_TOKEN INCIDENTOPS_PROJECT_ID COLLECTOR_REPO_URL INCIDENTOPS_M
 export AZURE_OPENAI_ENDPOINT AZURE_OPENAI_API_KEY AZURE_OPENAI_API_VERSION
 export AZURE_OPENAI_CHAT_DEPLOYMENT AZURE_OPENAI_EMBEDDING_DEPLOYMENT
 export QDRANT_URL QDRANT_API_KEY QDRANT_COLLECTION EMBEDDING_DIMENSION
+export EMBEDDING_MODEL HF_API_TOKEN HF_EMBEDDING_MODEL
 python3 - "$PARAMETERS_FILE" <<'PY'
 import json
 import os
@@ -89,6 +96,9 @@ param_names = {
     "qdrantApiKey": "QDRANT_API_KEY",
     "qdrantCollection": "QDRANT_COLLECTION",
     "embeddingDimension": "EMBEDDING_DIMENSION",
+    "embeddingModel": "EMBEDDING_MODEL",
+    "huggingFaceToken": "HF_API_TOKEN",
+    "huggingFaceEmbeddingModel": "HF_EMBEDDING_MODEL",
 }
 
 def coerce_value(env_name: str):
