@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     azure_openai_chat_deployment: str = ""
     azure_openai_embedding_deployment: str = ""
     require_azure_openai: bool = True
+    hf_api_token: str = Field(
+        "",
+        validation_alias=AliasChoices("HF_API_TOKEN", "HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN"),
+    )
+    hf_embedding_model: str = "thenlper/gte-large"
+    hf_embedding_endpoint: str = "https://router.huggingface.co/hf-inference"
 
     vector_weight: float = 0.40
     lexical_weight: float = 0.30
@@ -220,8 +226,12 @@ class Settings(BaseSettings):
     @property
     def cloud_embeddings_configured(self) -> bool:
         if self.effective_cloud_provider == "azure":
-            return self.azure_openai_embeddings_configured or self.gpu_rag_configured
+            return self.azure_openai_embeddings_configured or self.hf_embeddings_configured or self.gpu_rag_configured
         return self.embedding_model.startswith("local-hash") and not self.is_production_like
+
+    @property
+    def hf_embeddings_configured(self) -> bool:
+        return bool(self.hf_api_token.strip() and self.hf_embedding_model.strip())
 
     @property
     def gpu_rag_configured(self) -> bool:

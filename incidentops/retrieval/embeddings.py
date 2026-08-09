@@ -187,6 +187,47 @@ def _azure_embed(texts: list[str]) -> list[list[float]]:
     return embeddings
 
 
+def _huggingface_embed(texts: list[str]) -> list[list[float]]:
+    settings = get_settings()
+    if not settings.hf_embeddings_configured:
+        raise RuntimeError("Hugging Face embedding backend is not configured")
+    url = (
+        f"{settings.hf_embedding_endpoint.rstrip('/')}/models/"
+        f"{settings.hf_embedding_model}/pipeline/feature-extraction"
+    )
+    headers = {
+        "Authorization": f"Bearer {settings.hf_api_token}",
+        "Content-Type": "application/json",
+    }
+    payload = {"inputs": texts, "normalize": True, "truncate": True}
+    with httpx.Client(timeout=float(settings.llm_timeout_seconds)) as client:
+        for attempt in range(settings.embedding_request_max_retries + 1):
+            try:
+                response = client.post(url, headers=headers, json=payload)
+            except (httpx.TimeoutException, httpx.NetworkError):
+                if attempt >= settings.embedding_request_max_retries:
+                    raise
+                time.sleep(_embedding_retry_delay(None, attempt, settings))
+                continue
+            if response.status_code in _RETRYABLE_EMBEDDING_STATUS_CODES and attempt < settings.embedding_request_max_retries:
+                delay = _embedding_retry_delay(response, attempt, settings)
+                logger.warning("Hugging Face embedding request returned HTTP %d; retrying in %.2fs", response.status_code, delay)
+                time.sleep(delay)
+                continue
+            response.raise_for_status()
+            raw = response.json()
+            if raw and isinstance(raw[0], (int, float)):
+                vectors = [raw]
+            elif raw and isinstance(raw[0], list) and (not raw[0] or isinstance(raw[0][0], (int, float))):
+                vectors = raw
+            else:
+                raise RuntimeError("Hugging Face embedding backend returned an unsupported response shape")
+            if len(vectors) != len(texts):
+                raise RuntimeError("Hugging Face embedding backend returned an unexpected result count")
+            return [[float(value) for value in vector] for vector in vectors]
+    raise RuntimeError("Hugging Face embedding request exhausted retries")
+
+
 def embed_texts(texts: list[str], model_name: str | None = None) -> list[list[float]]:
     if not texts:
         return []
@@ -198,6 +239,8 @@ def embed_texts(texts: list[str], model_name: str | None = None) -> list[list[fl
         return [_hash_embed(text, settings.embedding_dim) for text in texts]
     if chosen_model.startswith("azure-openai"):
         return _azure_embed(texts)
+    if chosen_model.startswith(("huggingface", "hf")):
+        return _huggingface_embed(texts)
     try:
         model = _load_model(chosen_model)
         embeddings = model.encode(texts, show_progress_bar=False, normalize_embeddings=True)

@@ -71,6 +71,16 @@ param azureOpenAIChatDeployment string = ''
 @description('Azure OpenAI / Foundry embedding deployment name. Required for production deployment.')
 param azureOpenAIEmbeddingDeployment string = ''
 
+@description('Embedding provider selector: azure-openai or huggingface.')
+param embeddingModel string = 'azure-openai'
+
+@secure()
+@description('Optional Hugging Face Inference Providers token for hosted embeddings.')
+param huggingFaceToken string = ''
+
+@description('Hugging Face embedding model used when embeddingModel is huggingface.')
+param huggingFaceEmbeddingModel string = 'thenlper/gte-large'
+
 @description('Qdrant HTTPS endpoint reachable from the Core API and worker.')
 param qdrantUrl string = ''
 
@@ -279,6 +289,14 @@ resource azureOpenAIKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   }
 }
 
+resource huggingFaceTokenSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: keyVault
+  name: 'HUGGINGFACE-TOKEN'
+  properties: {
+    value: empty(huggingFaceToken) ? 'disabled' : huggingFaceToken
+  }
+}
+
 resource qdrantApiKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: keyVault
   name: 'QDRANT-API-KEY'
@@ -403,7 +421,11 @@ var sharedCoreEnv = [
   }
   {
     name: 'EMBEDDING_MODEL'
-    value: 'azure-openai'
+    value: embeddingModel
+  }
+  {
+    name: 'HF_EMBEDDING_MODEL'
+    value: huggingFaceEmbeddingModel
   }
   {
     name: 'EMBEDDING_DIM'
@@ -486,6 +508,10 @@ var sharedCoreEnv = [
     secretRef: 'azure-openai-api-key'
   }
   {
+    name: 'HF_API_TOKEN'
+    secretRef: 'huggingface-token'
+  }
+  {
     name: 'QDRANT_API_KEY'
     secretRef: 'qdrant-api-key'
   }
@@ -533,6 +559,11 @@ var coreSecrets = [
   {
     name: 'qdrant-api-key'
     keyVaultUrl: qdrantApiKeySecret.properties.secretUri
+    identity: appIdentity.id
+  }
+  {
+    name: 'huggingface-token'
+    keyVaultUrl: huggingFaceTokenSecret.properties.secretUri
     identity: appIdentity.id
   }
 ]

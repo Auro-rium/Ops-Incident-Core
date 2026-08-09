@@ -14,6 +14,8 @@ def build_runtime_status(settings: Settings) -> RuntimeStatusResponse:
     provider = settings.effective_cloud_provider
     if settings.embedding_model.startswith("azure-ml"):
         embedding_backend = "azure_ml_gpu"
+    elif settings.embedding_model.startswith(("huggingface", "hf")):
+        embedding_backend = "huggingface"
     else:
         embedding_backend = "azure_openai" if settings.embedding_model.startswith("azure-openai") else settings.embedding_model
     if settings.azure_openai_configured:
@@ -42,7 +44,11 @@ def build_runtime_status(settings: Settings) -> RuntimeStatusResponse:
         azure_ai_search_configured=False,
         local_fallback_active=local_fallback_active,
         chat_deployment=settings.azure_openai_chat_deployment or None,
-        embedding_deployment=settings.azure_openai_embedding_deployment or None,
+        embedding_deployment=(
+            settings.hf_embedding_model
+            if settings.embedding_model.startswith(("huggingface", "hf"))
+            else settings.azure_openai_embedding_deployment or None
+        ),
         vector_index_version=settings.vector_index_version,
         rag_rerank_mode=settings.rag_rerank_mode,
         gpu_rag_configured=settings.gpu_rag_configured,
