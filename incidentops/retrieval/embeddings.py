@@ -26,6 +26,7 @@ logger = logging.getLogger("incidentops.retrieval.embeddings")
 _model = None
 _model_name: str | None = None
 _last_azure_embed_request_at = 0.0
+_azure_backoff_until = 0.0
 _azure_embedding_lock = threading.Lock()
 
 _RETRYABLE_EMBEDDING_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
@@ -103,6 +104,7 @@ def _azure_embed(texts: list[str]) -> list[list[float]]:
                     continue
                 if response.status_code in _RETRYABLE_EMBEDDING_STATUS_CODES and attempt < settings.embedding_request_max_retries:
                     delay = _embedding_retry_delay(response, attempt, settings)
+                    _extend_azure_backoff(delay)
                     logger.warning(
                         "Azure embedding request returned HTTP %d; retrying in %.2fs (attempt %d/%d)",
                         response.status_code,
@@ -175,13 +177,16 @@ async def embed_query_async(query: str, model_name: str | None = None) -> list[f
 def _respect_embedding_min_interval(settings) -> None:
     global _last_azure_embed_request_at
     min_interval = max(0.0, float(settings.embedding_request_min_interval_seconds))
-    if min_interval <= 0:
-        _last_azure_embed_request_at = time.monotonic()
-        return
-    elapsed = time.monotonic() - _last_azure_embed_request_at
-    if elapsed < min_interval:
-        time.sleep(min_interval - elapsed)
+    now = time.monotonic()
+    next_allowed = max(_last_azure_embed_request_at + min_interval, _azure_backoff_until)
+    if now < next_allowed:
+        time.sleep(next_allowed - now)
     _last_azure_embed_request_at = time.monotonic()
+
+
+def _extend_azure_backoff(delay: float) -> None:
+    global _azure_backoff_until
+    _azure_backoff_until = max(_azure_backoff_until, time.monotonic() + max(0.0, delay))
 
 
 def _embedding_retry_delay(response: httpx.Response | None, attempt: int, settings) -> float:

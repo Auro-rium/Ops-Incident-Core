@@ -102,6 +102,8 @@ def _job_timeout_seconds(job_type: str, settings) -> int:
         return settings.eval_run_timeout_seconds
     if job_type in {"execute_observer_agent", "aggregate_operational_events"}:
         return settings.operational_agent_timeout_seconds
+    if job_type == "index_document":
+        return settings.index_job_timeout_seconds
     return max(settings.rag_remote_timeout_seconds * 4, 30)
 
 

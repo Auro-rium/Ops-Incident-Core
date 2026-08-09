@@ -131,6 +131,7 @@ class Settings(BaseSettings):
     job_queue_consumer_name: str = Field(default_factory=lambda: f"core-worker-{socket.gethostname()}")
     job_queue_claim_idle_ms: int = 60000
     worker_job_max_retries: int = 2
+    index_job_timeout_seconds: int = 600
     operational_agent_timeout_seconds: int = 180
     observer_sync_window: int = 20
     observer_parser_error_rate_threshold: float = 0.10
