@@ -126,6 +126,7 @@ class Settings(BaseSettings):
     workflow_run_timeout_seconds: int = 300
     eval_run_timeout_seconds: int = 600
     job_poll_interval_seconds: int = 2
+    worker_concurrency: int = 1
     job_queue_consumer_group: str = "incidentops-workers"
     job_queue_consumer_name: str = Field(default_factory=lambda: f"core-worker-{socket.gethostname()}")
     job_queue_claim_idle_ms: int = 60000

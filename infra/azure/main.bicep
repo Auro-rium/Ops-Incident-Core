@@ -196,18 +196,30 @@ resource postgresAllowAzureServices 'Microsoft.DBforPostgreSQL/flexibleServers/f
   }
 }
 
-resource redisCache 'Microsoft.Cache/redis@2024-03-01' = {
+resource redisCache 'Microsoft.Cache/redisEnterprise@2025-07-01' = {
   name: redisName
   location: location
+  sku: {
+    name: 'Balanced_B0'
+  }
   properties: {
-    sku: {
-      name: 'Basic'
-      family: 'C'
-      capacity: 0
-    }
-    enableNonSslPort: false
+    encryption: {}
     minimumTlsVersion: '1.2'
+    highAvailability: 'Disabled'
     publicNetworkAccess: 'Enabled'
+  }
+}
+
+resource redisDatabase 'Microsoft.Cache/redisEnterprise/databases@2025-07-01' = {
+  parent: redisCache
+  name: 'default'
+  properties: {
+    accessKeysAuthentication: 'Enabled'
+    clientProtocol: 'Encrypted'
+    clusteringPolicy: 'NoCluster'
+    evictionPolicy: 'VolatileLRU'
+    modules: []
+    port: 10000
   }
 }
 
@@ -223,7 +235,7 @@ resource redisPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: keyVault
   name: 'REDIS-PASSWORD'
   properties: {
-    value: redisCache.listKeys().primaryKey
+    value: redisDatabase.listKeys().primaryKey
   }
 }
 
@@ -439,11 +451,11 @@ var sharedCoreEnv = [
   }
   {
     name: 'REDIS_HOST'
-    value: redisCache.properties.hostName
+    value: '${redisName}.${location}.redis.azure.net'
   }
   {
     name: 'REDIS_PORT'
-    value: '6380'
+    value: '10000'
   }
   {
     name: 'REDIS_SSL'

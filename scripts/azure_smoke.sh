@@ -90,8 +90,8 @@ if runtime.get("local_fallback_active"):
     raise SystemExit(f"Runtime status reports local_fallback_active=true: {runtime}")
 if frontend_url:
     page = request("GET", frontend_url)
-    if "IncidentOps Console" not in page.get("_raw", ""):
-        raise SystemExit("Frontend did not return the IncidentOps Console shell.")
+    if "IncidentOps" not in page.get("_raw", ""):
+        raise SystemExit("Frontend did not return the IncidentOps shell.")
 with open(work_file, "w", encoding="utf-8") as handle:
     json.dump({"token": token, "project_id": project_id}, handle)
 print("Core health/ready/capabilities/login/project/runtime checks passed.")

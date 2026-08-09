@@ -12,6 +12,7 @@ import asyncio
 import logging
 import math
 import random
+import threading
 import time
 
 import httpx
@@ -25,6 +26,7 @@ logger = logging.getLogger("incidentops.retrieval.embeddings")
 _model = None
 _model_name: str | None = None
 _last_azure_embed_request_at = 0.0
+_azure_embedding_lock = threading.Lock()
 
 _RETRYABLE_EMBEDDING_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
 
@@ -72,42 +74,46 @@ def _azure_embed(texts: list[str]) -> list[list[float]]:
         "api-key": settings.azure_openai_api_key,
         "Content-Type": "application/json",
     }
-    with httpx.Client(timeout=float(settings.llm_timeout_seconds)) as client:
-        for attempt in range(settings.embedding_request_max_retries + 1):
-            _respect_embedding_min_interval(settings)
-            try:
-                response = client.post(
-                    url,
-                    params={"api-version": settings.azure_openai_api_version},
-                    headers=headers,
-                    json=payload,
-                )
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                if attempt >= settings.embedding_request_max_retries:
-                    raise
-                delay = _embedding_retry_delay(None, attempt, settings)
-                logger.warning(
-                    "Azure embedding request failed with %s; retrying in %.2fs (attempt %d/%d)",
-                    exc.__class__.__name__,
-                    delay,
-                    attempt + 1,
-                    settings.embedding_request_max_retries,
-                )
-                time.sleep(delay)
-                continue
-            if response.status_code in _RETRYABLE_EMBEDDING_STATUS_CODES and attempt < settings.embedding_request_max_retries:
-                delay = _embedding_retry_delay(response, attempt, settings)
-                logger.warning(
-                    "Azure embedding request returned HTTP %d; retrying in %.2fs (attempt %d/%d)",
-                    response.status_code,
-                    delay,
-                    attempt + 1,
-                    settings.embedding_request_max_retries,
-                )
-                time.sleep(delay)
-                continue
-            response.raise_for_status()
-            break
+    # Worker jobs may run concurrently, but Azure quota is shared by the
+    # deployment. Serialize provider calls while leaving parsing/index writes
+    # parallel so concurrency improves throughput without burst 429s.
+    with _azure_embedding_lock:
+        with httpx.Client(timeout=float(settings.llm_timeout_seconds)) as client:
+            for attempt in range(settings.embedding_request_max_retries + 1):
+                _respect_embedding_min_interval(settings)
+                try:
+                    response = client.post(
+                        url,
+                        params={"api-version": settings.azure_openai_api_version},
+                        headers=headers,
+                        json=payload,
+                    )
+                except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                    if attempt >= settings.embedding_request_max_retries:
+                        raise
+                    delay = _embedding_retry_delay(None, attempt, settings)
+                    logger.warning(
+                        "Azure embedding request failed with %s; retrying in %.2fs (attempt %d/%d)",
+                        exc.__class__.__name__,
+                        delay,
+                        attempt + 1,
+                        settings.embedding_request_max_retries,
+                    )
+                    time.sleep(delay)
+                    continue
+                if response.status_code in _RETRYABLE_EMBEDDING_STATUS_CODES and attempt < settings.embedding_request_max_retries:
+                    delay = _embedding_retry_delay(response, attempt, settings)
+                    logger.warning(
+                        "Azure embedding request returned HTTP %d; retrying in %.2fs (attempt %d/%d)",
+                        response.status_code,
+                        delay,
+                        attempt + 1,
+                        settings.embedding_request_max_retries,
+                    )
+                    time.sleep(delay)
+                    continue
+                response.raise_for_status()
+                break
     data = response.json()["data"]
     ordered = sorted(data, key=lambda item: item.get("index", 0))
     embeddings = [item["embedding"] for item in ordered]

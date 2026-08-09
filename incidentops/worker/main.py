@@ -30,42 +30,51 @@ async def run_worker(*, once: bool = False) -> None:
     logger.info("worker started mode=%s queue_backend=%s", settings.worker_mode, settings.job_queue_backend)
     while True:
         await dispatch_recoverable_index_jobs(queue, settings)
-        job = await queue.dequeue()
-        if job is None:
+        jobs = []
+        for _ in range(max(1, settings.worker_concurrency)):
+            job = await queue.dequeue()
+            if job is None:
+                break
+            jobs.append(job)
+        if not jobs:
             if once:
                 return
             await asyncio.sleep(settings.job_poll_interval_seconds)
             continue
-        start = asyncio.get_running_loop().time()
-        try:
-            incr("jobs_started_total")
-            logger.info("job started id=%s type=%s", job.id, job.job_type)
-            with traced(f"worker.job.{job.job_type}"):
-                await asyncio.wait_for(
-                    execute_job(job, settings),
-                    timeout=_job_timeout_seconds(job.job_type, settings),
-                )
-            await queue.acknowledge(job.id)
-            incr("jobs_completed_total")
-            logger.info("job completed id=%s type=%s", job.id, job.job_type)
-        except Exception as exc:  # pragma: no cover - worker-level guard
-            error = _safe_error(exc)
-            incr("jobs_failed_total")
-            if _can_retry(job.job_type, job.payload, settings):
-                retry_payload = dict(job.payload)
-                retry_payload["_worker_attempt"] = int(job.payload.get("_worker_attempt", 0) or 0) + 1
-                await queue.enqueue(job.job_type, retry_payload)
-                await queue.acknowledge(job.id)
-                incr("jobs_retried_total")
-                logger.warning("job retry scheduled id=%s type=%s error=%s", job.id, job.job_type, error)
-            else:
-                await _mark_operational_failure(job.payload, error)
-                await queue.fail(job.id, error)
-            logger.exception("job failed id=%s type=%s error=%s", job.id, job.job_type, error)
-        finally:
-            observe_latency("job_duration", (asyncio.get_running_loop().time() - start) * 1000)
+        await asyncio.gather(*(_process_job(job, queue, settings) for job in jobs))
         if once:
             return
+
+
+async def _process_job(job, queue, settings) -> None:
+    start = asyncio.get_running_loop().time()
+    try:
+        incr("jobs_started_total")
+        logger.info("job started id=%s type=%s", job.id, job.job_type)
+        with traced(f"worker.job.{job.job_type}"):
+            await asyncio.wait_for(
+                execute_job(job, settings),
+                timeout=_job_timeout_seconds(job.job_type, settings),
+            )
+        await queue.acknowledge(job.id)
+        incr("jobs_completed_total")
+        logger.info("job completed id=%s type=%s", job.id, job.job_type)
+    except Exception as exc:  # pragma: no cover - worker-level guard
+        error = _safe_error(exc)
+        incr("jobs_failed_total")
+        if _can_retry(job.job_type, job.payload, settings):
+            retry_payload = dict(job.payload)
+            retry_payload["_worker_attempt"] = int(job.payload.get("_worker_attempt", 0) or 0) + 1
+            await queue.enqueue(job.job_type, retry_payload)
+            await queue.acknowledge(job.id)
+            incr("jobs_retried_total")
+            logger.warning("job retry scheduled id=%s type=%s error=%s", job.id, job.job_type, error)
+        else:
+            await _mark_operational_failure(job.payload, error)
+            await queue.fail(job.id, error)
+        logger.exception("job failed id=%s type=%s error=%s", job.id, job.job_type, error)
+    finally:
+        observe_latency("job_duration", (asyncio.get_running_loop().time() - start) * 1000)
 
 
 def main() -> None:
