@@ -18,12 +18,20 @@ def _result_json(result) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-async def main() -> None:
+async def _probe() -> None:
     project_id = os.environ["PROJECT_ID"]
-    mcp_url = os.environ.get("MCP_URL", "http://127.0.0.1:8080/mcp")
+    mcp_url = os.environ["MCP_URL"]
     query = os.environ.get("MCP_PROBE_QUERY", "Where is FastAPI used?")
+    token = os.environ.get("MCP_TOKEN", "").strip()
+    if not token:
+        raise RuntimeError("MCP_TOKEN is required")
 
-    async with streamablehttp_client(mcp_url) as (read, write, _):
+    async with streamablehttp_client(
+        mcp_url,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=10,
+        sse_read_timeout=20,
+    ) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
             tool_names = sorted(tool.name for tool in (await session.list_tools()).tools)
@@ -62,6 +70,14 @@ async def main() -> None:
                     sort_keys=True,
                 )
             )
+
+
+async def main() -> None:
+    timeout_seconds = max(1.0, float(os.environ.get("MCP_PROBE_TIMEOUT_SECONDS", "45")))
+    try:
+        await asyncio.wait_for(_probe(), timeout=timeout_seconds)
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(f"MCP probe timed out after {timeout_seconds:.0f}s") from exc
 
 
 if __name__ == "__main__":
