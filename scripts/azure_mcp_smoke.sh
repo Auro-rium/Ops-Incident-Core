@@ -30,6 +30,11 @@ if [[ -z "$MCP_FQDN" ]]; then
   exit 1
 fi
 echo "MCP target: private app $MCP_APP_NAME (URL host only: ${MCP_FQDN})"
+az containerapp job secret set \
+  --resource-group "$AZURE_RESOURCE_GROUP" \
+  --name "$MCP_JOB_NAME" \
+  --secrets "incidentops-mcp-token=$MCP_TOKEN" \
+  --only-show-errors >/dev/null
 execution_name="$(az containerapp job start \
   --resource-group "$AZURE_RESOURCE_GROUP" \
   --name "$MCP_JOB_NAME" \
@@ -40,7 +45,7 @@ execution_name="$(az containerapp job start \
     PROJECT_ID="$PROJECT_ID" \
     MCP_URL="$MCP_URL" \
     MCP_PROBE_QUERY="$SEARCH_QUERY" \
-    MCP_TOKEN="$MCP_TOKEN" \
+    MCP_TOKEN=secretref:incidentops-mcp-token \
     MCP_PROBE_TIMEOUT_SECONDS="$MCP_PROBE_TIMEOUT_SECONDS" \
   --only-show-errors \
   --query name --output tsv --only-show-errors)"
