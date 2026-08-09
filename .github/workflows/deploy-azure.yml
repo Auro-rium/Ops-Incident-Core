@@ -186,6 +186,7 @@ jobs:
           test -n "${{ secrets.JWT_SECRET }}" || { echo "JWT_SECRET secret is required"; exit 1; }
           test -n "${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}" || { echo "BOOTSTRAP_ADMIN_EMAIL secret is required"; exit 1; }
           test -n "${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}" || { echo "BOOTSTRAP_ADMIN_PASSWORD secret is required"; exit 1; }
+          test -n "${{ secrets.INCIDENTOPS_MCP_TOKEN }}" || { echo "INCIDENTOPS_MCP_TOKEN secret is required"; exit 1; }
           test -n "${{ vars.AZURE_OPENAI_ENDPOINT }}" || { echo "AZURE_OPENAI_ENDPOINT variable is required"; exit 1; }
           test -n "${{ secrets.AZURE_OPENAI_API_KEY }}" || { echo "AZURE_OPENAI_API_KEY secret is required"; exit 1; }
           test -n "${{ vars.AZURE_OPENAI_CHAT_DEPLOYMENT }}" || { echo "AZURE_OPENAI_CHAT_DEPLOYMENT variable is required"; exit 1; }
