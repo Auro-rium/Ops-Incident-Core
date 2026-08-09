@@ -10,6 +10,7 @@ COLLECTOR_APP_NAME="${COLLECTOR_APP_NAME:-${NAME_PREFIX}-collector}"
 MCP_APP_NAME="${MCP_APP_NAME:-${NAME_PREFIX}-mcp}"
 API_URL="${API_URL:-}"
 FRONTEND_URL="${FRONTEND_URL:-}"
+VERIFY_COLLECTOR="${VERIFY_COLLECTOR:-false}"
 SMOKE_EMAIL="${SMOKE_EMAIL:-${BOOTSTRAP_ADMIN_EMAIL:-admin@incidentops.local}}"
 SMOKE_PASSWORD="${SMOKE_PASSWORD:-${BOOTSTRAP_ADMIN_PASSWORD:-}}"
 SMOKE_QUERY="${SMOKE_QUERY:-What does this tiny service evidence say?}"
@@ -107,6 +108,11 @@ import json, sys
 print(json.load(open(sys.argv[1], encoding="utf-8"))["project_id"])
 PY
 )"
+
+if [[ "$VERIFY_COLLECTOR" != "true" ]]; then
+  echo "Azure Core smoke passed (Collector verification disabled)."
+  exit 0
+fi
 
 echo "Configuring private Collector app for smoke project..."
 az containerapp secret set \

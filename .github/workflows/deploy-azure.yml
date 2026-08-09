@@ -239,6 +239,7 @@ jobs:
           FRONTEND_URL: ${{ vars.VERCEL_FRONTEND_URL || '' }}
           SMOKE_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
           SMOKE_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
+          VERIFY_COLLECTOR: ${{ inputs.deploy_collector && 'true' || 'false' }}
         run: scripts/azure_smoke.sh
 
       - name: Bounded Azure release benchmark
