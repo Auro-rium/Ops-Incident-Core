@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import uuid
 
 from incidentops.retrieval.evidence_packer import pack_evidence
-from incidentops.retrieval.hybrid_search import _metadata_boost, _weighted_rrf
+from incidentops.retrieval.hybrid_search import _metadata_boost, _should_vector_fallback, _weighted_rrf
 from incidentops.retrieval.query_intent import classify_query_intent
 
 
@@ -71,6 +71,15 @@ def test_runtime_query_warns_when_runtime_evidence_missing():
     assert intent.intent == "runtime_incident"
     assert "intent_source:runbook" in reasons
     assert boost > 0
+
+
+def test_exact_lookup_can_fall_back_when_non_vector_branches_are_empty():
+    branches = {"vector": [], "lexical": [], "metadata": [], "graph": []}
+
+    assert _should_vector_fallback(True, branches)
+    assert not _should_vector_fallback(False, branches)
+    branches["lexical"].append({"chunk": "evidence"})
+    assert not _should_vector_fallback(True, branches)
 
 
 def test_pack_evidence_prefers_highest_score_and_dedupes():

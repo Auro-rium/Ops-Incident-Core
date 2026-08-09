@@ -232,6 +232,29 @@ async def hybrid_search_with_debug(
         timeout_seconds=settings.rag_branch_timeout_seconds,
         branch_latencies=branch_latencies,
     )
+    # Exact lookup routing is intentionally cheap, but it must not become a
+    # recall cliff when lexical metadata has no useful term overlap. Fall back
+    # to one bounded vector lookup only when every non-vector branch is empty.
+    if _should_vector_fallback(skip_vector, branches):
+        embed_started = time.perf_counter()
+        try:
+            with traced("retrieval.query_embedding_fallback"):
+                query_embedding = await asyncio.wait_for(
+                    embed_query_async(query, settings.embedding_model),
+                    timeout=max(settings.rag_branch_timeout_seconds, 0.1),
+                )
+            branch_latencies["query_embedding_ms"] = _elapsed_ms(embed_started)
+            vector_started = time.perf_counter()
+            branches["vector"] = await asyncio.wait_for(
+                vector_search(db, project_id, query_embedding, top_k=fetch_k, filters=filters),
+                timeout=max(settings.rag_branch_timeout_seconds, 0.1),
+            )
+            branch_latencies["vector_fallback_search_ms"] = _elapsed_ms(vector_started)
+            branch_latencies["vector_fallback"] = 1
+            incr("retrieval_vector_fallback_total")
+        except Exception as exc:
+            branch_errors["vector_fallback"] = _safe_branch_error(exc)
+            logger.warning("retrieval vector fallback failed error=%s", branch_errors["vector_fallback"])
     vec_results = branches["vector"]
     lex_results = branches["lexical"]
     metadata_results = branches["metadata"]
@@ -310,6 +333,10 @@ async def hybrid_search_with_debug(
         "top_rejected": _top_rejected_candidates(ranked_all, top_k),
     }
     return results, debug
+
+
+def _should_vector_fallback(skip_vector: bool, branches: dict[str, list[dict]]) -> bool:
+    return skip_vector and not any(branches[name] for name in ("lexical", "metadata", "graph"))
 
 
 async def _retrieve_branches(
