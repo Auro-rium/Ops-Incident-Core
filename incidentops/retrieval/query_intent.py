@@ -143,6 +143,10 @@ _ROOT_CAUSE_TERMS = {
     "cause of",
 }
 _TOKEN_RE = re.compile(r"[a-z0-9_./-]+")
+_QUERY_STOPWORDS = {
+    "a", "an", "are", "be", "can", "does", "for", "how", "is", "it",
+    "of", "the", "this", "was", "what", "where", "which", "who",
+}
 
 
 @dataclass(slots=True)
@@ -175,7 +179,11 @@ class QueryIntent:
 
 def classify_query_intent(query: str) -> QueryIntent:
     lower = query.lower().strip()
-    query_terms = [token for token in _TOKEN_RE.findall(lower) if len(token) >= 3][:30]
+    query_terms = [
+        token
+        for token in _TOKEN_RE.findall(lower)
+        if len(token) >= 3 and token not in _QUERY_STOPWORDS
+    ][:30]
 
     if _contains_any(lower, _INCIDENT_HISTORY_TERMS):
         return QueryIntent(

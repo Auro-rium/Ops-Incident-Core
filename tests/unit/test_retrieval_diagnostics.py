@@ -57,6 +57,8 @@ def test_code_location_with_latency_symbol_does_not_become_runtime_query():
 
     assert intent.intent == "code_location"
     assert "go_function" in intent.preferred_chunk_types
+    assert "where" not in intent.query_terms
+    assert "implemented" in intent.query_terms
 
 
 def test_runtime_query_warns_when_runtime_evidence_missing():
