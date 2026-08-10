@@ -153,7 +153,7 @@ if az containerapp job show --resource-group "$AZURE_RESOURCE_GROUP" --name "$BE
     echo "benchmark_status: ${status:-pending}"
     case "$status" in
       Succeeded|Completed) break ;;
-      Failed) echo "Benchmark job failed. Recent logs:" >&2; az containerapp job logs show --resource-group "$AZURE_RESOURCE_GROUP" --name "$BENCHMARK_JOB_NAME" --follow false --tail 120 --only-show-errors || true; exit 1 ;;
+      Failed) echo "Benchmark job failed. Recent logs:" >&2; az containerapp job logs show --resource-group "$AZURE_RESOURCE_GROUP" --name "$BENCHMARK_JOB_NAME" --execution "$execution_name" --container benchmark --follow false --tail 120 --only-show-errors || true; exit 1 ;;
     esac
     sleep "$POLL_SECONDS"
   done
@@ -162,7 +162,7 @@ if az containerapp job show --resource-group "$AZURE_RESOURCE_GROUP" --name "$BE
     exit 1
   fi
   echo "Benchmark job completed. Recent logs:"
-  az containerapp job logs show --resource-group "$AZURE_RESOURCE_GROUP" --name "$BENCHMARK_JOB_NAME" --follow false --tail 120 --only-show-errors || true
+  az containerapp job logs show --resource-group "$AZURE_RESOURCE_GROUP" --name "$BENCHMARK_JOB_NAME" --execution "$execution_name" --container benchmark --follow false --tail 120 --only-show-errors || true
 else
   echo "Benchmark job '$BENCHMARK_JOB_NAME' does not exist; skipping job start and checking existing Core evidence." >&2
 fi

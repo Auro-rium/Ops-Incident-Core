@@ -396,6 +396,12 @@ var sharedCoreEnv = [
     value: 'redis'
   }
   {
+    // Large collector batches must enqueue durable index jobs instead of
+    // holding the API request open while remote embeddings complete.
+    name: 'RAG_ASYNC_INDEXING'
+    value: 'true'
+  }
+  {
     name: 'METRICS_BACKEND'
     value: 'prometheus'
   }
