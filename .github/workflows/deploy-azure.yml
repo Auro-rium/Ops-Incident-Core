@@ -11,11 +11,6 @@ on:
         required: false
         type: boolean
         default: false
-      run_release_benchmark:
-        description: "Run the bounded cloud benchmark and query-class release proof after smoke."
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -242,12 +237,3 @@ jobs:
           SMOKE_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
           VERIFY_COLLECTOR: ${{ inputs.deploy_collector && 'true' || 'false' }}
         run: scripts/azure_smoke.sh
-
-      - name: Bounded Azure release benchmark
-        if: inputs.run_release_benchmark
-        working-directory: Ops-Incident-Core
-        env:
-          FRONTEND_URL: ${{ vars.VERCEL_FRONTEND_URL || '' }}
-          SMOKE_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
-          SMOKE_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
-        run: scripts/azure_user_e2e.sh
