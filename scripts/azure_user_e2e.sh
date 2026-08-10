@@ -146,7 +146,7 @@ if az containerapp job show --resource-group "$AZURE_RESOURCE_GROUP" --name "$BE
   status="unknown"
   while (( SECONDS < deadline )); do
     if [[ -n "$execution_name" ]]; then
-      status="$(az containerapp job execution show --resource-group "$AZURE_RESOURCE_GROUP" --job-name "$BENCHMARK_JOB_NAME" --job-execution-name "$execution_name" --query 'properties.status' --output tsv --only-show-errors 2>/dev/null || true)"
+      status="$(az containerapp job execution show --resource-group "$AZURE_RESOURCE_GROUP" --name "$BENCHMARK_JOB_NAME" --job-execution-name "$execution_name" --query 'properties.status' --output tsv --only-show-errors 2>/dev/null || true)"
     else
       status="$(az containerapp job execution list --resource-group "$AZURE_RESOURCE_GROUP" --name "$BENCHMARK_JOB_NAME" --query '[0].properties.status' --output tsv --only-show-errors 2>/dev/null || true)"
     fi
