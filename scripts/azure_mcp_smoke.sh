@@ -61,7 +61,7 @@ while (( SECONDS < deadline )); do
   status="$(az containerapp job execution show \
     --resource-group "$AZURE_RESOURCE_GROUP" \
     --job-name "$MCP_JOB_NAME" \
-    --name "$execution_name" \
+    --job-execution-name "$execution_name" \
     --query 'properties.status' --output tsv --only-show-errors 2>/dev/null || true)"
   echo "mcp_probe_status: ${status:-Pending}"
   case "$status" in
