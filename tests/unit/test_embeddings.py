@@ -91,3 +91,26 @@ def test_huggingface_embed_accepts_feature_extraction_batch(monkeypatch):
 
     assert fake_client.calls == 1
     assert result == [[1.0, 0.0], [0.0, 1.0]]
+
+
+def test_huggingface_embed_pools_token_level_feature_extraction(monkeypatch):
+    settings = SimpleNamespace(
+        hf_embeddings_configured=True,
+        hf_api_token="token",
+        hf_embedding_model="thenlper/gte-large",
+        hf_embedding_endpoint="https://router.huggingface.co/hf-inference",
+        llm_timeout_seconds=5,
+        embedding_request_max_retries=0,
+        embedding_request_initial_backoff_seconds=0.01,
+        embedding_request_max_backoff_seconds=0.05,
+        embedding_request_min_interval_seconds=0.0,
+    )
+    fake_client = _FakeClient(
+        [_FakeResponse(200, [[[1.0, 0.0], [0.0, 1.0]], [[2.0, 2.0]]])]
+    )
+    monkeypatch.setattr(embeddings, "get_settings", lambda: settings)
+    monkeypatch.setattr(embeddings.httpx, "Client", lambda timeout: fake_client)
+
+    result = embeddings.embed_texts(["history service", "workflow task"], model_name="huggingface")
+
+    assert result == [[0.5, 0.5], [2.0, 2.0]]

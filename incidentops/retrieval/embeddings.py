@@ -216,16 +216,47 @@ def _huggingface_embed(texts: list[str]) -> list[list[float]]:
                 continue
             response.raise_for_status()
             raw = response.json()
-            if raw and isinstance(raw[0], (int, float)):
-                vectors = [raw]
-            elif raw and isinstance(raw[0], list) and (not raw[0] or isinstance(raw[0][0], (int, float))):
-                vectors = raw
-            else:
-                raise RuntimeError("Hugging Face embedding backend returned an unsupported response shape")
+            vectors = _coerce_huggingface_vectors(raw, len(texts))
             if len(vectors) != len(texts):
                 raise RuntimeError("Hugging Face embedding backend returned an unexpected result count")
             return [[float(value) for value in vector] for vector in vectors]
     raise RuntimeError("Hugging Face embedding request exhausted retries")
+
+
+def _coerce_huggingface_vectors(raw: object, text_count: int) -> list[list[float]]:
+    """Normalize sentence- and token-level HF feature-extraction responses.
+
+    The HF inference API may return one vector per input or one vector per
+    token per input.  The latter is pooled deterministically so the rest of
+    the indexing contract always receives one vector per document chunk.
+    """
+    if not isinstance(raw, list) or not raw:
+        raise RuntimeError("Hugging Face embedding backend returned an empty response")
+    if isinstance(raw[0], (int, float)):
+        vectors = [raw]
+    elif isinstance(raw[0], list) and (not raw[0] or isinstance(raw[0][0], (int, float))):
+        vectors = raw
+    elif (
+        isinstance(raw[0], list)
+        and raw[0]
+        and isinstance(raw[0][0], list)
+        and (not raw[0][0] or isinstance(raw[0][0][0], (int, float)))
+    ):
+        vectors = []
+        for token_vectors in raw:
+            if not token_vectors:
+                raise RuntimeError("Hugging Face embedding backend returned an empty token sequence")
+            width = len(token_vectors[0])
+            if not width or any(len(vector) != width for vector in token_vectors):
+                raise RuntimeError("Hugging Face embedding backend returned inconsistent token dimensions")
+            vectors.append([sum(float(vector[index]) for vector in token_vectors) / len(token_vectors) for index in range(width)])
+    else:
+        raise RuntimeError("Hugging Face embedding backend returned an unsupported response shape")
+    if text_count == 1 and len(vectors) != 1 and vectors and isinstance(vectors[0], list):
+        # A single input can be returned as a token matrix by some providers;
+        # the token-level branch above handles the canonical nested shape.
+        raise RuntimeError("Hugging Face embedding backend returned an unexpected result count")
+    return vectors
 
 
 def embed_texts(texts: list[str], model_name: str | None = None) -> list[list[float]]:
