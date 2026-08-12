@@ -122,10 +122,12 @@ large document bodies.
 
 Direct code/config/API lookups can use a fast cited-evidence path. Optional
 model synthesis is bounded to selected evidence. Local-hash embeddings remain
-available for deterministic tests. Azure OpenAI is the cloud chat provider;
-NVIDIA NIM-compatible Nemotron embeddings (`nvidia/nemotron-3-embed-1b`) are
-the production default. Azure OpenAI remains the chat/synthesis provider;
-Hugging Face is retained only as a compatibility fallback.
+available for deterministic tests. The current production path uses the
+NVIDIA NIM-compatible API for both chat and embeddings: Nemotron chat
+(`nvidia/nemotron-3-super-120b-a12b`) and Nemotron embeddings
+(`nvidia/nemotron-3-embed-1b`). Azure OpenAI remains an explicitly supported
+alternative provider, but is not selected by the current production
+configuration. Hugging Face is retained only as a compatibility fallback.
 
 ## API Surface
 
@@ -213,8 +215,8 @@ Analytics. The legacy frontend Container App remains disabled; Vercel hosts
 `apps/web`.
 
 The current API health and readiness checks have passed against the deployed
-Core URL. Production settings require queue mode, Redis rate limiting, Azure
-OpenAI chat, NVIDIA Nemotron cloud embeddings, and no local fallback. The
+Core URL. Production settings require queue mode, Redis rate limiting, NVIDIA
+Nemotron cloud chat and embeddings, and no local fallback. The
 Nemotron index uses 2048-dimensional vectors in a versioned Qdrant collection;
 existing vectors from another embedding provider must be reingested.
 The private MCP
@@ -252,4 +254,4 @@ This is not yet production-grade. Remaining proof includes:
 - worker and indexing failure/restart testing;
 - measured retrieval quality and latency on multiple repositories;
 - backup/restore and purge/reingestion drills;
-- model token/latency measurements from real Azure OpenAI calls.
+- model token/latency measurements from the active NVIDIA chat path.

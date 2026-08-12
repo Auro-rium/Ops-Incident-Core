@@ -85,6 +85,8 @@ class Settings(BaseSettings):
         "",
         validation_alias=AliasChoices("NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY"),
     )
+    nvidia_chat_model: str = "nvidia/nemotron-3-super-120b-a12b"
+    nvidia_chat_endpoint: str = "https://integrate.api.nvidia.com/v1"
     nvidia_embedding_model: str = "nvidia/nemotron-3-embed-1b"
     nvidia_embedding_endpoint: str = "https://integrate.api.nvidia.com/v1/embeddings"
 
@@ -195,6 +197,7 @@ class Settings(BaseSettings):
     def llm_available(self) -> bool:
         return (
             self.azure_openai_configured
+            or (self.effective_cloud_provider == "nvidia" and self.nvidia_chat_configured)
             or (not self.is_production_like and bool(self.llm_api_key))
         )
 
@@ -205,6 +208,8 @@ class Settings(BaseSettings):
             return configured
         if self.azure_openai_configured or self.azure_openai_embeddings_configured:
             return "azure"
+        if self.embedding_model.startswith("nvidia") and (self.nvidia_chat_configured or self.nvidia_embeddings_configured):
+            return "nvidia"
         if self.is_production_like and self.require_azure_openai:
             return "azure"
         return "local"
@@ -238,6 +243,8 @@ class Settings(BaseSettings):
                 or self.nvidia_embeddings_configured
                 or self.gpu_rag_configured
             )
+        if self.effective_cloud_provider == "nvidia":
+            return self.nvidia_embeddings_configured
         return self.embedding_model.startswith("local-hash") and not self.is_production_like
 
     @property
@@ -247,6 +254,10 @@ class Settings(BaseSettings):
     @property
     def nvidia_embeddings_configured(self) -> bool:
         return bool(self.nvidia_api_key.strip() and self.nvidia_embedding_endpoint.strip())
+
+    @property
+    def nvidia_chat_configured(self) -> bool:
+        return bool(self.nvidia_api_key.strip() and self.nvidia_chat_endpoint.strip() and self.nvidia_chat_model.strip())
 
     @property
     def gpu_rag_configured(self) -> bool:

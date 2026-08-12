@@ -53,8 +53,8 @@ def production_settings_errors(settings: Settings) -> list[str]:
     if settings.cors_origins_list == ["*"] and settings.allow_wildcard_cors:
         errors.append("CORS wildcard is not allowed in staging/production")
     provider = settings.effective_cloud_provider
-    if provider != "azure":
-        errors.append("CLOUD_PROVIDER must resolve to azure in staging/production")
+    if provider not in {"azure", "nvidia"}:
+        errors.append("CLOUD_PROVIDER must resolve to azure or nvidia in staging/production")
     if provider == "azure":
         if settings.require_azure_openai and not settings.azure_openai_configured:
             errors.append(
@@ -80,6 +80,13 @@ def production_settings_errors(settings: Settings) -> list[str]:
             or (settings.rag_gpu_endpoint_required and settings.embedding_model.startswith("azure-ml"))
         ):
             errors.append("EMBEDDING_MODEL must be azure-openai, huggingface, nvidia, or azure-ml in staging/production")
+    if provider == "nvidia":
+        if not settings.nvidia_chat_configured:
+            errors.append("NVIDIA_API_KEY, NVIDIA_CHAT_MODEL, and NVIDIA_CHAT_ENDPOINT are required for NVIDIA chat")
+        if not settings.nvidia_embeddings_configured:
+            errors.append("NVIDIA_API_KEY and NVIDIA_EMBEDDING_ENDPOINT are required for NVIDIA embeddings")
+        if not settings.embedding_model.startswith("nvidia"):
+            errors.append("EMBEDDING_MODEL=nvidia is required when CLOUD_PROVIDER=nvidia")
         if settings.rag_gpu_endpoint_required and not settings.gpu_rag_configured:
             errors.append(
                 "RAG_GPU_ENDPOINT_REQUIRED=true requires Azure ML embedding/reranker endpoints, "

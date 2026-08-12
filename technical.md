@@ -28,7 +28,8 @@ flowchart TB
     REDIS[(Redis)]
   end
   subgraph Models
-    AZURE[Azure OpenAI chat and embeddings]
+    NVIDIA[NVIDIA NIM-compatible chat and embeddings]
+    AZURE[Optional Azure OpenAI provider]
     REMOTE[Optional remote reranker endpoint]
     LOCAL[Deterministic local-hash test fallback]
   end
@@ -205,9 +206,11 @@ logs/deploys/incidents/runbooks. Missing runtime evidence produces a warning.
 
 Supported model paths:
 
-1. Azure OpenAI for cloud chat, plus Azure OpenAI or Hugging Face Inference for
-   production embeddings. NVIDIA Nemotron is the default production embedding
-   backend; HF remains a compatibility option.
+1. NVIDIA NIM-compatible API for production chat and embeddings. The current
+   defaults are `nvidia/nemotron-3-super-120b-a12b` for chat and
+   `nvidia/nemotron-3-embed-1b` for embeddings. Azure OpenAI remains an
+   explicitly supported alternative provider, not the current production
+   selection. HF remains a compatibility option.
 2. Deterministic local-hash embeddings for tests and no-key development.
 3. Optional sentence-transformers when explicitly installed/configured.
 4. Optional remote reranker endpoint through model_gateway.py.
@@ -271,10 +274,10 @@ Core-backed MCP probe from inside the Azure network.
 
 It requires Azure OIDC, registry, model, Qdrant, database, and admin
 configuration as GitHub secrets/variables. No secret values belong in this
-repository. The workflow requires Azure OpenAI chat and a configured cloud
-embedding backend. NVIDIA Nemotron (`nvidia/nemotron-3-embed-1b`) is the
-production default, with native 2048-dimensional vectors and separate Qdrant
-collection/version settings. HF remains a compatibility option; local-hash is
+repository. The current production default is NVIDIA Nemotron chat plus
+`nvidia/nemotron-3-embed-1b`, with native 2048-dimensional vectors and
+separate Qdrant collection/version settings. Azure OpenAI remains selectable
+as an alternative provider; HF remains a compatibility option; local-hash is
 test/development only.
 
 ## Operational Invariants

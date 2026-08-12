@@ -20,13 +20,15 @@ def build_runtime_status(settings: Settings) -> RuntimeStatusResponse:
         embedding_backend = "nvidia_nemotron"
     else:
         embedding_backend = "azure_openai" if settings.embedding_model.startswith("azure-openai") else settings.embedding_model
-    if settings.azure_openai_configured:
+    if provider == "azure" and settings.azure_openai_configured:
         llm_provider = "azure_openai"
+    elif provider == "nvidia" and settings.nvidia_chat_configured:
+        llm_provider = "nvidia"
     else:
         llm_provider = "openai_compatible" if settings.llm_available else "none"
     cloud_embedding_ready = settings.cloud_embeddings_configured
     local_fallback_active = settings.is_production_like and (
-        llm_provider != "azure_openai"
+        llm_provider not in {"azure_openai", "nvidia"}
         or not cloud_embedding_ready
         or settings.worker_mode != "queue"
         or settings.rate_limit_backend != "redis"
@@ -45,7 +47,13 @@ def build_runtime_status(settings: Settings) -> RuntimeStatusResponse:
         azure_openai_configured=settings.azure_openai_configured,
         azure_ai_search_configured=False,
         local_fallback_active=local_fallback_active,
-        chat_deployment=settings.azure_openai_chat_deployment or None,
+        chat_deployment=(
+            settings.azure_openai_chat_deployment
+            if provider == "azure" and settings.azure_openai_configured
+            else settings.nvidia_chat_model
+            if provider == "nvidia" and settings.nvidia_chat_configured
+            else None
+        ),
         embedding_deployment=(
             settings.hf_embedding_model
             if settings.embedding_model.startswith(("huggingface", "hf"))

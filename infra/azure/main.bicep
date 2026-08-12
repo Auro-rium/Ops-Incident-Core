@@ -73,6 +73,8 @@ param azureOpenAIEmbeddingDeployment string = ''
 
 @description('Embedding provider selector: azure-openai, huggingface, or nvidia/nemotron-3-embed-1b.')
 param embeddingModel string = 'nvidia/nemotron-3-embed-1b'
+@description('Production model provider: nvidia or azure.')
+param cloudProvider string = 'nvidia'
 
 @secure()
 @description('Optional Hugging Face Inference Providers token for hosted embeddings.')
@@ -90,6 +92,10 @@ param nvidiaEmbeddingModel string = 'nvidia/nemotron-3-embed-1b'
 
 @description('NVIDIA OpenAI-compatible embeddings endpoint.')
 param nvidiaEmbeddingEndpoint string = 'https://integrate.api.nvidia.com/v1/embeddings'
+@description('NVIDIA OpenAI-compatible chat model identifier.')
+param nvidiaChatModel string = 'nvidia/nemotron-3-super-120b-a12b'
+@description('NVIDIA OpenAI-compatible chat endpoint.')
+param nvidiaChatEndpoint string = 'https://integrate.api.nvidia.com/v1'
 
 @description('Qdrant HTTPS endpoint reachable from the Core API and worker.')
 param qdrantUrl string = ''
@@ -451,6 +457,10 @@ var sharedCoreEnv = [
     value: embeddingModel
   }
   {
+    name: 'CLOUD_PROVIDER'
+    value: cloudProvider
+  }
+  {
     name: 'HF_EMBEDDING_MODEL'
     value: huggingFaceEmbeddingModel
   }
@@ -461,6 +471,14 @@ var sharedCoreEnv = [
   {
     name: 'NVIDIA_EMBEDDING_ENDPOINT'
     value: nvidiaEmbeddingEndpoint
+  }
+  {
+    name: 'NVIDIA_CHAT_MODEL'
+    value: nvidiaChatModel
+  }
+  {
+    name: 'NVIDIA_CHAT_ENDPOINT'
+    value: nvidiaChatEndpoint
   }
   {
     name: 'EMBEDDING_DIM'
@@ -500,7 +518,7 @@ var sharedCoreEnv = [
   }
   {
     name: 'REQUIRE_AZURE_OPENAI'
-    value: 'true'
+    value: 'false'
   }
   {
     name: 'DATABASE_URL'

@@ -30,12 +30,15 @@ QDRANT_API_KEY="${QDRANT_API_KEY:-}"
 QDRANT_COLLECTION="${QDRANT_COLLECTION:-incidentops_chunks_nemotron_3_embed_1b}"
 EMBEDDING_DIMENSION="${EMBEDDING_DIMENSION:-2048}"
 EMBEDDING_MODEL="${EMBEDDING_MODEL:-nvidia/nemotron-3-embed-1b}"
+CLOUD_PROVIDER="${CLOUD_PROVIDER:-nvidia}"
 VECTOR_INDEX_VERSION="${VECTOR_INDEX_VERSION:-nemotron-3-embed-1b-2048}"
 HF_API_TOKEN="${HF_API_TOKEN:-}"
 HF_EMBEDDING_MODEL="${HF_EMBEDDING_MODEL:-thenlper/gte-large}"
 NVIDIA_API_KEY="${NVIDIA_API_KEY:-}"
 NVIDIA_EMBEDDING_MODEL="${NVIDIA_EMBEDDING_MODEL:-nvidia/nemotron-3-embed-1b}"
 NVIDIA_EMBEDDING_ENDPOINT="${NVIDIA_EMBEDDING_ENDPOINT:-https://integrate.api.nvidia.com/v1/embeddings}"
+NVIDIA_CHAT_MODEL="${NVIDIA_CHAT_MODEL:-nvidia/nemotron-3-super-120b-a12b}"
+NVIDIA_CHAT_ENDPOINT="${NVIDIA_CHAT_ENDPOINT:-https://integrate.api.nvidia.com/v1}"
 OUTPUT_FILE="${OUTPUT_FILE:-$ROOT_DIR/infra/azure/.last-deployment.json}"
 PARAMETERS_FILE="$(mktemp)"
 DEPLOY_ERROR_FILE="$(mktemp)"
@@ -51,9 +54,11 @@ if az containerapp job show --resource-group "$AZURE_RESOURCE_GROUP" --name "$le
   az containerapp job delete --resource-group "$AZURE_RESOURCE_GROUP" --name "$legacy_job_name" --yes --only-show-errors >/dev/null
 fi
 
-test -n "$AZURE_OPENAI_ENDPOINT" || { echo "AZURE_OPENAI_ENDPOINT is required." >&2; exit 1; }
-test -n "$AZURE_OPENAI_API_KEY" || { echo "AZURE_OPENAI_API_KEY is required." >&2; exit 1; }
-test -n "$AZURE_OPENAI_CHAT_DEPLOYMENT" || { echo "AZURE_OPENAI_CHAT_DEPLOYMENT is required." >&2; exit 1; }
+if [[ "$CLOUD_PROVIDER" == "azure" ]]; then
+  test -n "$AZURE_OPENAI_ENDPOINT" || { echo "AZURE_OPENAI_ENDPOINT is required for CLOUD_PROVIDER=azure." >&2; exit 1; }
+  test -n "$AZURE_OPENAI_API_KEY" || { echo "AZURE_OPENAI_API_KEY is required for CLOUD_PROVIDER=azure." >&2; exit 1; }
+  test -n "$AZURE_OPENAI_CHAT_DEPLOYMENT" || { echo "AZURE_OPENAI_CHAT_DEPLOYMENT is required for CLOUD_PROVIDER=azure." >&2; exit 1; }
+fi
 if [[ "$EMBEDDING_MODEL" == azure-openai* ]]; then
   test -n "$AZURE_OPENAI_EMBEDDING_DEPLOYMENT" || { echo "AZURE_OPENAI_EMBEDDING_DEPLOYMENT is required for EMBEDDING_MODEL=$EMBEDDING_MODEL." >&2; exit 1; }
 fi
@@ -64,6 +69,9 @@ if [[ "$EMBEDDING_MODEL" == huggingface* || "$EMBEDDING_MODEL" == hf* ]]; then
 fi
 if [[ "$EMBEDDING_MODEL" == nvidia* ]]; then
   test -n "$NVIDIA_API_KEY" || { echo "NVIDIA_API_KEY is required when EMBEDDING_MODEL=$EMBEDDING_MODEL." >&2; exit 1; }
+fi
+if [[ "$CLOUD_PROVIDER" == "nvidia" ]]; then
+  test -n "$NVIDIA_API_KEY" || { echo "NVIDIA_API_KEY is required for CLOUD_PROVIDER=nvidia." >&2; exit 1; }
 fi
 
 az group create \
@@ -76,11 +84,11 @@ export AZURE_LOCATION NAME_PREFIX ENVIRONMENT_NAME ACR_NAME IMAGE_TAG
 export DEPLOY_FRONTEND
 export POSTGRES_ADMIN_USER POSTGRES_PASSWORD JWT_SECRET BOOTSTRAP_ADMIN_EMAIL BOOTSTRAP_ADMIN_PASSWORD
 export INCIDENTOPS_TOKEN INCIDENTOPS_PROJECT_ID COLLECTOR_REPO_URL INCIDENTOPS_MCP_TOKEN CORS_ORIGINS
-export AZURE_OPENAI_ENDPOINT AZURE_OPENAI_API_KEY AZURE_OPENAI_API_VERSION
+export CLOUD_PROVIDER AZURE_OPENAI_ENDPOINT AZURE_OPENAI_API_KEY AZURE_OPENAI_API_VERSION
 export AZURE_OPENAI_CHAT_DEPLOYMENT AZURE_OPENAI_EMBEDDING_DEPLOYMENT
 export QDRANT_URL QDRANT_API_KEY QDRANT_COLLECTION EMBEDDING_DIMENSION
 export EMBEDDING_MODEL VECTOR_INDEX_VERSION HF_API_TOKEN HF_EMBEDDING_MODEL
-export NVIDIA_API_KEY NVIDIA_EMBEDDING_MODEL NVIDIA_EMBEDDING_ENDPOINT
+export NVIDIA_API_KEY NVIDIA_EMBEDDING_MODEL NVIDIA_EMBEDDING_ENDPOINT NVIDIA_CHAT_MODEL NVIDIA_CHAT_ENDPOINT
 python3 - "$PARAMETERS_FILE" <<'PY'
 import json
 import os
@@ -115,12 +123,15 @@ param_names = {
     "qdrantCollection": "QDRANT_COLLECTION",
     "embeddingDimension": "EMBEDDING_DIMENSION",
     "embeddingModel": "EMBEDDING_MODEL",
+    "cloudProvider": "CLOUD_PROVIDER",
     "vectorIndexVersion": "VECTOR_INDEX_VERSION",
     "huggingFaceToken": "HF_API_TOKEN",
     "huggingFaceEmbeddingModel": "HF_EMBEDDING_MODEL",
     "nvidiaApiKey": "NVIDIA_API_KEY",
     "nvidiaEmbeddingModel": "NVIDIA_EMBEDDING_MODEL",
     "nvidiaEmbeddingEndpoint": "NVIDIA_EMBEDDING_ENDPOINT",
+    "nvidiaChatModel": "NVIDIA_CHAT_MODEL",
+    "nvidiaChatEndpoint": "NVIDIA_CHAT_ENDPOINT",
 }
 
 def coerce_value(env_name: str):

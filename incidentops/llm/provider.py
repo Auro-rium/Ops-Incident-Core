@@ -16,7 +16,7 @@ class LLMProvider:
     def __init__(self):
         settings = get_settings()
         azure_key = settings.azure_openai_api_key.strip()
-        self.azure_mode = bool(
+        self.azure_mode = settings.effective_cloud_provider == "azure" and bool(
             settings.azure_openai_endpoint
             and azure_key
             and azure_key != "disabled"
@@ -27,16 +27,25 @@ class LLMProvider:
             self.api_key = settings.azure_openai_api_key
             self.model = settings.azure_openai_chat_deployment
             self.api_version = settings.azure_openai_api_version
+            self.provider_name = "azure_openai"
+        elif settings.effective_cloud_provider == "nvidia" and settings.nvidia_chat_configured:
+            self.base_url = settings.nvidia_chat_endpoint.rstrip("/")
+            self.api_key = settings.nvidia_api_key
+            self.model = settings.nvidia_chat_model
+            self.api_version = ""
+            self.provider_name = "nvidia"
         elif not settings.is_production_like:
             self.base_url = settings.llm_base_url.rstrip("/")
             self.api_key = settings.llm_api_key
             self.model = settings.llm_model
             self.api_version = ""
+            self.provider_name = "openai_compatible"
         else:
             self.base_url = ""
             self.api_key = ""
             self.model = ""
             self.api_version = ""
+            self.provider_name = "none"
         self.timeout = settings.llm_timeout_seconds
         self.available = bool(self.api_key)
 
@@ -104,7 +113,7 @@ class LLMProvider:
                 incr("llm_calls")
                 incr("llm_calls_total")
                 meta = {
-                    "provider": "azure_openai" if self.azure_mode else "openai_compatible",
+                    "provider": self.provider_name,
                     "model": self.model,
                     "latency_ms": latency_ms,
                     "usage": data.get("usage") or {},
