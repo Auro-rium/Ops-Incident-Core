@@ -174,6 +174,10 @@ jobs:
           az bicep build --file infra/azure/main.bicep --stdout >/dev/null
 
       - name: Validate required variables
+        env:
+          EMBEDDING_MODEL_CHECK: ${{ vars.EMBEDDING_MODEL || 'nvidia/nemotron-3-embed-1b' }}
+          AZURE_OPENAI_EMBEDDING_DEPLOYMENT_CHECK: ${{ vars.AZURE_OPENAI_EMBEDDING_DEPLOYMENT || '' }}
+          NVIDIA_API_KEY_CHECK: ${{ secrets.NVIDIA_API_KEY || '' }}
         run: |
           test -n "$AZURE_RESOURCE_GROUP" || { echo "AZURE_RESOURCE_GROUP variable is required"; exit 1; }
           test -n "$AZURE_LOCATION" || { echo "AZURE_LOCATION variable is required"; exit 1; }
@@ -189,7 +193,12 @@ jobs:
           test -n "${{ vars.AZURE_OPENAI_ENDPOINT }}" || { echo "AZURE_OPENAI_ENDPOINT variable is required"; exit 1; }
           test -n "${{ secrets.AZURE_OPENAI_API_KEY }}" || { echo "AZURE_OPENAI_API_KEY secret is required"; exit 1; }
           test -n "${{ vars.AZURE_OPENAI_CHAT_DEPLOYMENT }}" || { echo "AZURE_OPENAI_CHAT_DEPLOYMENT variable is required"; exit 1; }
-          test -n "${{ vars.AZURE_OPENAI_EMBEDDING_DEPLOYMENT }}" || { echo "AZURE_OPENAI_EMBEDDING_DEPLOYMENT variable is required"; exit 1; }
+          if [[ "$EMBEDDING_MODEL_CHECK" == azure-openai* ]]; then
+            test -n "$AZURE_OPENAI_EMBEDDING_DEPLOYMENT_CHECK" || { echo "AZURE_OPENAI_EMBEDDING_DEPLOYMENT variable is required for Azure OpenAI embeddings"; exit 1; }
+          fi
+          if [[ "$EMBEDDING_MODEL_CHECK" == nvidia* ]]; then
+            test -n "$NVIDIA_API_KEY_CHECK" || { echo "NVIDIA_API_KEY secret is required for Nemotron embeddings"; exit 1; }
+          fi
           test -n "${{ vars.QDRANT_URL }}" || { echo "QDRANT_URL variable is required"; exit 1; }
           test -n "${{ secrets.QDRANT_API_KEY }}" || { echo "QDRANT_API_KEY secret is required"; exit 1; }
 
@@ -218,11 +227,15 @@ jobs:
           AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${{ vars.AZURE_OPENAI_EMBEDDING_DEPLOYMENT }}
           QDRANT_URL: ${{ vars.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
-          QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION || 'incidentops_chunks' }}
-          EMBEDDING_DIMENSION: ${{ vars.EMBEDDING_DIMENSION || '1024' }}
-          EMBEDDING_MODEL: ${{ vars.EMBEDDING_MODEL || 'azure-openai' }}
+          QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION || 'incidentops_chunks_nemotron_3_embed_1b' }}
+          EMBEDDING_DIMENSION: ${{ vars.EMBEDDING_DIMENSION || '2048' }}
+          EMBEDDING_MODEL: ${{ vars.EMBEDDING_MODEL || 'nvidia/nemotron-3-embed-1b' }}
+          VECTOR_INDEX_VERSION: ${{ vars.VECTOR_INDEX_VERSION || 'nemotron-3-embed-1b-2048' }}
           HF_API_TOKEN: ${{ secrets.HF_API_TOKEN || '' }}
           HF_EMBEDDING_MODEL: ${{ vars.HF_EMBEDDING_MODEL || 'thenlper/gte-large' }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY || '' }}
+          NVIDIA_EMBEDDING_MODEL: ${{ vars.NVIDIA_EMBEDDING_MODEL || 'nvidia/nemotron-3-embed-1b' }}
+          NVIDIA_EMBEDDING_ENDPOINT: ${{ vars.NVIDIA_EMBEDDING_ENDPOINT || 'https://integrate.api.nvidia.com/v1/embeddings' }}
         run: scripts/azure_deploy.sh
 
       - name: Run migrations

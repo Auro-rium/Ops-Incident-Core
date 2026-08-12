@@ -37,6 +37,8 @@ _RETRYABLE_EMBEDDING_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
 class _EmbeddingBatchRequest:
     texts: list[str]
     future: asyncio.Future[list[list[float]]]
+    model_name: str | None
+    input_type: str
 
 
 class AsyncEmbeddingBatcher:
@@ -50,14 +52,20 @@ class AsyncEmbeddingBatcher:
         self._pending_texts = 0
         self._flush_task: asyncio.Task[None] | None = None
 
-    async def embed(self, texts: list[str], model_name: str | None = None) -> list[list[float]]:
+    async def embed(
+        self,
+        texts: list[str],
+        model_name: str | None = None,
+        *,
+        input_type: str = "passage",
+    ) -> list[list[float]]:
         if not texts:
             return []
         loop = asyncio.get_running_loop()
         future: asyncio.Future[list[list[float]]] = loop.create_future()
         flush_now = False
         async with self._lock:
-            self._pending.append(_EmbeddingBatchRequest(texts, future))
+            self._pending.append(_EmbeddingBatchRequest(texts, future, model_name, input_type))
             self._pending_texts += len(texts)
             if self._pending_texts >= self.max_texts:
                 flush_now = True
@@ -80,7 +88,20 @@ class AsyncEmbeddingBatcher:
             return
         texts = [text for request in requests for text in request.texts]
         try:
-            vectors = await embed_texts_async(texts)
+            # Requests are coalesced only by the current worker batch. Keep
+            # provider/model semantics explicit so query and passage vectors
+            # cannot silently share the wrong NVIDIA input_type.
+            first = requests[0]
+            if any(
+                request.model_name != first.model_name or request.input_type != first.input_type
+                for request in requests
+            ):
+                raise RuntimeError("embedding batch contains mixed model or input types")
+            vectors = await embed_texts_async(
+                texts,
+                model_name=first.model_name,
+                input_type=first.input_type,
+            )
             offset = 0
             for request in requests:
                 count = len(request.texts)
@@ -223,6 +244,37 @@ def _huggingface_embed(texts: list[str]) -> list[list[float]]:
     raise RuntimeError("Hugging Face embedding request exhausted retries")
 
 
+def _nvidia_embed(texts: list[str], input_type: str) -> list[list[float]]:
+    settings = get_settings()
+    if not settings.nvidia_embeddings_configured:
+        raise RuntimeError("NVIDIA embedding endpoint is not configured")
+    payload = {
+        "input": texts,
+        "model": settings.nvidia_embedding_model,
+        "input_type": input_type,
+        "modality": "text",
+        "encoding_format": "float",
+    }
+    headers = {
+        "Authorization": f"Bearer {settings.nvidia_api_key}",
+        "Content-Type": "application/json",
+    }
+    with httpx.Client(timeout=float(settings.llm_timeout_seconds)) as client:
+        response = client.post(settings.nvidia_embedding_endpoint, headers=headers, json=payload)
+        response.raise_for_status()
+    data = response.json()
+    rows = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(rows, list) or len(rows) != len(texts):
+        raise RuntimeError("NVIDIA embedding backend returned an unexpected result count")
+    rows = sorted(rows, key=lambda item: item.get("index", 0))
+    vectors = [item.get("embedding") for item in rows]
+    if any(not isinstance(vector, list) for vector in vectors):
+        raise RuntimeError("NVIDIA embedding backend returned an invalid vector")
+    if any(len(vector) != settings.embedding_dim for vector in vectors):
+        raise RuntimeError("NVIDIA embedding dimension does not match the configured vector index")
+    return [[float(value) for value in vector] for vector in vectors]
+
+
 def _coerce_huggingface_vectors(raw: object, text_count: int) -> list[list[float]]:
     """Normalize sentence- and token-level HF feature-extraction responses.
 
@@ -259,7 +311,12 @@ def _coerce_huggingface_vectors(raw: object, text_count: int) -> list[list[float
     return vectors
 
 
-def embed_texts(texts: list[str], model_name: str | None = None) -> list[list[float]]:
+def embed_texts(
+    texts: list[str],
+    model_name: str | None = None,
+    *,
+    input_type: str = "passage",
+) -> list[list[float]]:
     if not texts:
         return []
     settings = get_settings()
@@ -272,6 +329,8 @@ def embed_texts(texts: list[str], model_name: str | None = None) -> list[list[fl
         return _azure_embed(texts)
     if chosen_model.startswith(("huggingface", "hf")):
         return _huggingface_embed(texts)
+    if chosen_model.startswith("nvidia"):
+        return _nvidia_embed(texts, input_type)
     try:
         model = _load_model(chosen_model)
         embeddings = model.encode(texts, show_progress_bar=False, normalize_embeddings=True)
@@ -283,7 +342,12 @@ def embed_texts(texts: list[str], model_name: str | None = None) -> list[list[fl
         return [_hash_embed(text, settings.embedding_dim) for text in texts]
 
 
-async def embed_texts_async(texts: list[str], model_name: str | None = None) -> list[list[float]]:
+async def embed_texts_async(
+    texts: list[str],
+    model_name: str | None = None,
+    *,
+    input_type: str = "passage",
+) -> list[list[float]]:
     if not texts:
         return []
     settings = get_settings()
@@ -301,19 +365,19 @@ async def embed_texts_async(texts: list[str], model_name: str | None = None) -> 
             for index, vector in zip(missing_indexes, generated):
                 cached[index] = vector
         return [vector for vector in cached if vector is not None]
-    return await asyncio.to_thread(embed_texts, texts, chosen_model)
+    return await asyncio.to_thread(embed_texts, texts, chosen_model, input_type=input_type)
 
 
 async def embed_query_async(query: str, model_name: str | None = None) -> list[float]:
     settings = get_settings()
     chosen_model = model_name or settings.embedding_model
     if chosen_model.startswith(("local-hash", "azure-ml")):
-        vectors = await embed_texts_async([query], model_name=chosen_model)
+        vectors = await embed_texts_async([query], model_name=chosen_model, input_type="query")
     else:
         cached = await get_embedding(query)
         if cached is not None:
             return cached
-        vectors = await embed_texts_async([query], model_name=chosen_model)
+        vectors = await embed_texts_async([query], model_name=chosen_model, input_type="query")
         if vectors:
             await set_embedding(query, vectors[0])
     return vectors[0] if vectors else []

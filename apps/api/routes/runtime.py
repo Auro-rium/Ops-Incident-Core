@@ -16,6 +16,8 @@ def build_runtime_status(settings: Settings) -> RuntimeStatusResponse:
         embedding_backend = "azure_ml_gpu"
     elif settings.embedding_model.startswith(("huggingface", "hf")):
         embedding_backend = "huggingface"
+    elif settings.embedding_model.startswith("nvidia"):
+        embedding_backend = "nvidia_nemotron"
     else:
         embedding_backend = "azure_openai" if settings.embedding_model.startswith("azure-openai") else settings.embedding_model
     if settings.azure_openai_configured:
@@ -47,10 +49,13 @@ def build_runtime_status(settings: Settings) -> RuntimeStatusResponse:
         embedding_deployment=(
             settings.hf_embedding_model
             if settings.embedding_model.startswith(("huggingface", "hf"))
+            else settings.nvidia_embedding_model
+            if settings.embedding_model.startswith("nvidia")
             else settings.azure_openai_embedding_deployment or None
         ),
         embedding_dimension=settings.embedding_dim,
         azure_openai_embeddings_configured=settings.azure_openai_embeddings_configured,
+        nvidia_embeddings_configured=settings.nvidia_embeddings_configured,
         vector_index_version=settings.vector_index_version,
         rag_rerank_mode=settings.rag_rerank_mode,
         gpu_rag_configured=settings.gpu_rag_configured,

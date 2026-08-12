@@ -81,6 +81,12 @@ class Settings(BaseSettings):
     )
     hf_embedding_model: str = "thenlper/gte-large"
     hf_embedding_endpoint: str = "https://router.huggingface.co/hf-inference"
+    nvidia_api_key: str = Field(
+        "",
+        validation_alias=AliasChoices("NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY"),
+    )
+    nvidia_embedding_model: str = "nvidia/nemotron-3-embed-1b"
+    nvidia_embedding_endpoint: str = "https://integrate.api.nvidia.com/v1/embeddings"
 
     vector_weight: float = 0.40
     lexical_weight: float = 0.30
@@ -226,12 +232,21 @@ class Settings(BaseSettings):
     @property
     def cloud_embeddings_configured(self) -> bool:
         if self.effective_cloud_provider == "azure":
-            return self.azure_openai_embeddings_configured or self.hf_embeddings_configured or self.gpu_rag_configured
+            return (
+                self.azure_openai_embeddings_configured
+                or self.hf_embeddings_configured
+                or self.nvidia_embeddings_configured
+                or self.gpu_rag_configured
+            )
         return self.embedding_model.startswith("local-hash") and not self.is_production_like
 
     @property
     def hf_embeddings_configured(self) -> bool:
         return bool(self.hf_api_token.strip() and self.hf_embedding_model.strip())
+
+    @property
+    def nvidia_embeddings_configured(self) -> bool:
+        return bool(self.nvidia_api_key.strip() and self.nvidia_embedding_endpoint.strip())
 
     @property
     def gpu_rag_configured(self) -> bool:

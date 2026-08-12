@@ -216,3 +216,36 @@ def test_production_validation_accepts_huggingface_embedding_backend():
     )
     assert status.embedding_backend == "huggingface"
     assert status.local_fallback_active is False
+
+
+def test_production_validation_accepts_nvidia_nemotron_embedding_backend():
+    from incidentops.config.validation import production_settings_errors
+    from apps.api.routes.runtime import build_runtime_status
+
+    settings = Settings(
+        app_env="production",
+        jwt_secret="a" * 48,
+        embedding_model="nvidia/nemotron-3-embed-1b",
+        embedding_dim=2048,
+        nvidia_api_key="configured",
+        nvidia_embedding_endpoint="https://integrate.api.nvidia.com/v1/embeddings",
+        azure_openai_endpoint="https://example.openai.azure.com",
+        azure_openai_api_key="configured",
+        azure_openai_chat_deployment="incidentops-chat",
+        azure_openai_embedding_deployment="",
+        worker_mode="queue",
+        job_queue_backend="redis",
+        rate_limit_backend="redis",
+        redis_url="redis://example:6379/0",
+        qdrant_url="https://qdrant.example.com",
+        cors_allow_origins="https://example.com",
+    )
+
+    errors = production_settings_errors(settings)
+    assert not any("EMBEDDING_MODEL" in error for error in errors)
+    status = build_runtime_status(settings)
+    assert status.embedding_backend == "nvidia_nemotron"
+    assert status.embedding_deployment == "nvidia/nemotron-3-embed-1b"
+    assert status.embedding_dimension == 2048
+    assert status.nvidia_embeddings_configured is True
+    assert status.local_fallback_active is False

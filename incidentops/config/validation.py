@@ -65,6 +65,7 @@ def production_settings_errors(settings: Settings) -> list[str]:
             settings.require_azure_openai
             and not settings.azure_openai_embeddings_configured
             and not settings.hf_embeddings_configured
+            and not settings.nvidia_embeddings_configured
             and not settings.gpu_rag_configured
         ):
             errors.append(
@@ -75,9 +76,10 @@ def production_settings_errors(settings: Settings) -> list[str]:
             settings.embedding_model.startswith("azure-openai")
             or settings.embedding_model.startswith("huggingface")
             or settings.embedding_model.startswith("hf")
+            or settings.embedding_model.startswith("nvidia")
             or (settings.rag_gpu_endpoint_required and settings.embedding_model.startswith("azure-ml"))
         ):
-            errors.append("EMBEDDING_MODEL must be azure-openai, huggingface, or azure-ml in staging/production")
+            errors.append("EMBEDDING_MODEL must be azure-openai, huggingface, nvidia, or azure-ml in staging/production")
         if settings.rag_gpu_endpoint_required and not settings.gpu_rag_configured:
             errors.append(
                 "RAG_GPU_ENDPOINT_REQUIRED=true requires Azure ML embedding/reranker endpoints, "

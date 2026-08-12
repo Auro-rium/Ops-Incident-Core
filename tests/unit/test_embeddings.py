@@ -114,3 +114,38 @@ def test_huggingface_embed_pools_token_level_feature_extraction(monkeypatch):
     result = embeddings.embed_texts(["history service", "workflow task"], model_name="huggingface")
 
     assert result == [[0.5, 0.5], [2.0, 2.0]]
+
+
+def test_nvidia_nemotron_embed_preserves_provider_order_and_input_type(monkeypatch):
+    settings = SimpleNamespace(
+        nvidia_embeddings_configured=True,
+        nvidia_api_key="token",
+        nvidia_embedding_model="nvidia/nemotron-3-embed-1b",
+        nvidia_embedding_endpoint="https://integrate.api.nvidia.com/v1/embeddings",
+        embedding_dim=2,
+        llm_timeout_seconds=5,
+    )
+    fake_client = _FakeClient(
+        [
+            _FakeResponse(
+                200,
+                {
+                    "data": [
+                        {"index": 1, "embedding": [0.0, 1.0]},
+                        {"index": 0, "embedding": [1.0, 0.0]},
+                    ]
+                },
+            )
+        ]
+    )
+    monkeypatch.setattr(embeddings, "get_settings", lambda: settings)
+    monkeypatch.setattr(embeddings.httpx, "Client", lambda timeout: fake_client)
+
+    result = embeddings.embed_texts(
+        ["history service", "workflow task"],
+        model_name="nvidia/nemotron-3-embed-1b",
+        input_type="query",
+    )
+
+    assert fake_client.calls == 1
+    assert result == [[1.0, 0.0], [0.0, 1.0]]

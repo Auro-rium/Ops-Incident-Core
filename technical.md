@@ -206,7 +206,8 @@ logs/deploys/incidents/runbooks. Missing runtime evidence produces a warning.
 Supported model paths:
 
 1. Azure OpenAI for cloud chat, plus Azure OpenAI or Hugging Face Inference for
-   production embeddings. HF is selected when Azure embedding quota is constrained.
+   production embeddings. NVIDIA Nemotron is the default production embedding
+   backend; HF remains a compatibility option.
 2. Deterministic local-hash embeddings for tests and no-key development.
 3. Optional sentence-transformers when explicitly installed/configured.
 4. Optional remote reranker endpoint through model_gateway.py.
@@ -271,8 +272,10 @@ Core-backed MCP probe from inside the Azure network.
 It requires Azure OIDC, registry, model, Qdrant, database, and admin
 configuration as GitHub secrets/variables. No secret values belong in this
 repository. The workflow requires Azure OpenAI chat and a configured cloud
-embedding backend. HF embeddings are an accepted production option when Azure
-embedding quota is constrained; local-hash remains test/development only.
+embedding backend. NVIDIA Nemotron (`nvidia/nemotron-3-embed-1b`) is the
+production default, with native 2048-dimensional vectors and separate Qdrant
+collection/version settings. HF remains a compatibility option; local-hash is
+test/development only.
 
 ## Operational Invariants
 

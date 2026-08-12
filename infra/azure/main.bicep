@@ -68,11 +68,11 @@ param azureOpenAIApiVersion string = '2024-10-21'
 @description('Azure OpenAI / Foundry chat deployment name. Required for production deployment.')
 param azureOpenAIChatDeployment string = ''
 
-@description('Azure OpenAI / Foundry embedding deployment name. Required for production deployment.')
+@description('Optional Azure OpenAI / Foundry embedding deployment name. Required only when embeddingModel is azure-openai.')
 param azureOpenAIEmbeddingDeployment string = ''
 
-@description('Embedding provider selector: azure-openai or huggingface. HF is useful when Azure embedding quota is constrained.')
-param embeddingModel string = 'azure-openai'
+@description('Embedding provider selector: azure-openai, huggingface, or nvidia/nemotron-3-embed-1b.')
+param embeddingModel string = 'nvidia/nemotron-3-embed-1b'
 
 @secure()
 @description('Optional Hugging Face Inference Providers token for hosted embeddings.')
@@ -80,6 +80,16 @@ param huggingFaceToken string = ''
 
 @description('Hugging Face embedding model used when embeddingModel is huggingface.')
 param huggingFaceEmbeddingModel string = 'thenlper/gte-large'
+
+@secure()
+@description('NVIDIA API key for the hosted NIM-compatible embedding endpoint.')
+param nvidiaApiKey string = ''
+
+@description('NVIDIA embedding model identifier.')
+param nvidiaEmbeddingModel string = 'nvidia/nemotron-3-embed-1b'
+
+@description('NVIDIA OpenAI-compatible embeddings endpoint.')
+param nvidiaEmbeddingEndpoint string = 'https://integrate.api.nvidia.com/v1/embeddings'
 
 @description('Qdrant HTTPS endpoint reachable from the Core API and worker.')
 param qdrantUrl string = ''
@@ -89,10 +99,13 @@ param qdrantUrl string = ''
 param qdrantApiKey string = ''
 
 @description('Qdrant collection name used by Core.')
-param qdrantCollection string = 'incidentops_chunks'
+param qdrantCollection string = 'incidentops_chunks_nemotron_3_embed_1b'
 
 @description('Embedding vector dimension configured for the selected embedding deployment.')
-param embeddingDimension int = 1024
+param embeddingDimension int = 2048
+
+@description('Version marker used to prevent mixing vectors from different embedding models.')
+param vectorIndexVersion string = 'nemotron-3-embed-1b-2048'
 
 @secure()
 @description('Core access token used by the MCP server to call Core APIs. Set after bootstrap or during redeploy.')
@@ -297,6 +310,14 @@ resource huggingFaceTokenSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' =
   }
 }
 
+resource nvidiaApiKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: keyVault
+  name: 'NVIDIA-API-KEY'
+  properties: {
+    value: empty(nvidiaApiKey) ? 'disabled' : nvidiaApiKey
+  }
+}
+
 resource qdrantApiKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: keyVault
   name: 'QDRANT-API-KEY'
@@ -434,6 +455,14 @@ var sharedCoreEnv = [
     value: huggingFaceEmbeddingModel
   }
   {
+    name: 'NVIDIA_EMBEDDING_MODEL'
+    value: nvidiaEmbeddingModel
+  }
+  {
+    name: 'NVIDIA_EMBEDDING_ENDPOINT'
+    value: nvidiaEmbeddingEndpoint
+  }
+  {
     name: 'EMBEDDING_DIM'
     value: string(embeddingDimension)
   }
@@ -451,7 +480,7 @@ var sharedCoreEnv = [
   }
   {
     name: 'VECTOR_INDEX_VERSION'
-    value: 'current'
+    value: vectorIndexVersion
   }
   {
     name: 'AZURE_OPENAI_ENDPOINT'
@@ -518,6 +547,10 @@ var sharedCoreEnv = [
     secretRef: 'huggingface-token'
   }
   {
+    name: 'NVIDIA_API_KEY'
+    secretRef: 'nvidia-api-key'
+  }
+  {
     name: 'QDRANT_API_KEY'
     secretRef: 'qdrant-api-key'
   }
@@ -570,6 +603,11 @@ var coreSecrets = [
   {
     name: 'huggingface-token'
     keyVaultUrl: huggingFaceTokenSecret.properties.secretUri
+    identity: appIdentity.id
+  }
+  {
+    name: 'nvidia-api-key'
+    keyVaultUrl: nvidiaApiKeySecret.properties.secretUri
     identity: appIdentity.id
   }
 ]

@@ -277,7 +277,7 @@ async def execute_index_document_job(payload: dict, settings: Settings) -> None:
             batcher = _get_embedding_batcher(settings)
 
             async def embed_fn(texts: list[str]) -> list[list[float]]:
-                return await batcher.embed(texts, model_name=settings.embedding_model)
+                return await batcher.embed(texts, model_name=settings.embedding_model, input_type="passage")
 
             indexed = await index_normalized_documents(
                 db,

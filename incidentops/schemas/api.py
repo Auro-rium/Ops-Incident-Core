@@ -196,6 +196,7 @@ class RuntimeStatusResponse(BaseModel):
     embedding_deployment: str | None = None
     embedding_dimension: int
     azure_openai_embeddings_configured: bool
+    nvidia_embeddings_configured: bool = False
     vector_index_version: str = "current"
     rag_rerank_mode: str = "conditional"
     gpu_rag_configured: bool = False

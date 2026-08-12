@@ -27,11 +27,15 @@ AZURE_OPENAI_CHAT_DEPLOYMENT="${AZURE_OPENAI_CHAT_DEPLOYMENT:-}"
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT="${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-}"
 QDRANT_URL="${QDRANT_URL:-}"
 QDRANT_API_KEY="${QDRANT_API_KEY:-}"
-QDRANT_COLLECTION="${QDRANT_COLLECTION:-incidentops_chunks}"
-EMBEDDING_DIMENSION="${EMBEDDING_DIMENSION:-1024}"
-EMBEDDING_MODEL="${EMBEDDING_MODEL:-azure-openai}"
+QDRANT_COLLECTION="${QDRANT_COLLECTION:-incidentops_chunks_nemotron_3_embed_1b}"
+EMBEDDING_DIMENSION="${EMBEDDING_DIMENSION:-2048}"
+EMBEDDING_MODEL="${EMBEDDING_MODEL:-nvidia/nemotron-3-embed-1b}"
+VECTOR_INDEX_VERSION="${VECTOR_INDEX_VERSION:-nemotron-3-embed-1b-2048}"
 HF_API_TOKEN="${HF_API_TOKEN:-}"
 HF_EMBEDDING_MODEL="${HF_EMBEDDING_MODEL:-thenlper/gte-large}"
+NVIDIA_API_KEY="${NVIDIA_API_KEY:-}"
+NVIDIA_EMBEDDING_MODEL="${NVIDIA_EMBEDDING_MODEL:-nvidia/nemotron-3-embed-1b}"
+NVIDIA_EMBEDDING_ENDPOINT="${NVIDIA_EMBEDDING_ENDPOINT:-https://integrate.api.nvidia.com/v1/embeddings}"
 OUTPUT_FILE="${OUTPUT_FILE:-$ROOT_DIR/infra/azure/.last-deployment.json}"
 PARAMETERS_FILE="$(mktemp)"
 DEPLOY_ERROR_FILE="$(mktemp)"
@@ -50,11 +54,16 @@ fi
 test -n "$AZURE_OPENAI_ENDPOINT" || { echo "AZURE_OPENAI_ENDPOINT is required." >&2; exit 1; }
 test -n "$AZURE_OPENAI_API_KEY" || { echo "AZURE_OPENAI_API_KEY is required." >&2; exit 1; }
 test -n "$AZURE_OPENAI_CHAT_DEPLOYMENT" || { echo "AZURE_OPENAI_CHAT_DEPLOYMENT is required." >&2; exit 1; }
-test -n "$AZURE_OPENAI_EMBEDDING_DEPLOYMENT" || { echo "AZURE_OPENAI_EMBEDDING_DEPLOYMENT is required." >&2; exit 1; }
+if [[ "$EMBEDDING_MODEL" == azure-openai* ]]; then
+  test -n "$AZURE_OPENAI_EMBEDDING_DEPLOYMENT" || { echo "AZURE_OPENAI_EMBEDDING_DEPLOYMENT is required for EMBEDDING_MODEL=$EMBEDDING_MODEL." >&2; exit 1; }
+fi
 test -n "$QDRANT_URL" || { echo "QDRANT_URL is required." >&2; exit 1; }
 test -n "$QDRANT_API_KEY" || { echo "QDRANT_API_KEY is required." >&2; exit 1; }
 if [[ "$EMBEDDING_MODEL" == huggingface* || "$EMBEDDING_MODEL" == hf* ]]; then
   test -n "$HF_API_TOKEN" || { echo "HF_API_TOKEN is required when EMBEDDING_MODEL=$EMBEDDING_MODEL." >&2; exit 1; }
+fi
+if [[ "$EMBEDDING_MODEL" == nvidia* ]]; then
+  test -n "$NVIDIA_API_KEY" || { echo "NVIDIA_API_KEY is required when EMBEDDING_MODEL=$EMBEDDING_MODEL." >&2; exit 1; }
 fi
 
 az group create \
@@ -70,7 +79,8 @@ export INCIDENTOPS_TOKEN INCIDENTOPS_PROJECT_ID COLLECTOR_REPO_URL INCIDENTOPS_M
 export AZURE_OPENAI_ENDPOINT AZURE_OPENAI_API_KEY AZURE_OPENAI_API_VERSION
 export AZURE_OPENAI_CHAT_DEPLOYMENT AZURE_OPENAI_EMBEDDING_DEPLOYMENT
 export QDRANT_URL QDRANT_API_KEY QDRANT_COLLECTION EMBEDDING_DIMENSION
-export EMBEDDING_MODEL HF_API_TOKEN HF_EMBEDDING_MODEL
+export EMBEDDING_MODEL VECTOR_INDEX_VERSION HF_API_TOKEN HF_EMBEDDING_MODEL
+export NVIDIA_API_KEY NVIDIA_EMBEDDING_MODEL NVIDIA_EMBEDDING_ENDPOINT
 python3 - "$PARAMETERS_FILE" <<'PY'
 import json
 import os
@@ -105,8 +115,12 @@ param_names = {
     "qdrantCollection": "QDRANT_COLLECTION",
     "embeddingDimension": "EMBEDDING_DIMENSION",
     "embeddingModel": "EMBEDDING_MODEL",
+    "vectorIndexVersion": "VECTOR_INDEX_VERSION",
     "huggingFaceToken": "HF_API_TOKEN",
     "huggingFaceEmbeddingModel": "HF_EMBEDDING_MODEL",
+    "nvidiaApiKey": "NVIDIA_API_KEY",
+    "nvidiaEmbeddingModel": "NVIDIA_EMBEDDING_MODEL",
+    "nvidiaEmbeddingEndpoint": "NVIDIA_EMBEDDING_ENDPOINT",
 }
 
 def coerce_value(env_name: str):
