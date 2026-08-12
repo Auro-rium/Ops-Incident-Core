@@ -5,10 +5,10 @@ ingests repository and operational evidence through a deterministic Collector,
 indexes it with Core, and returns project-scoped search and investigation
 results with citations and missing-evidence warnings.
 
-> Version context: This repository is the active V2 rewrite. It is not a
-> production deployment. Azure model resources exist, but no Azure Container
-> Apps, PostgreSQL, Redis, Qdrant, Collector, frontend, or MCP runtime is
-> currently deployed in the inspected subscription.
+> Version context: This repository is the active V2 rewrite. The current cloud
+> proof path is Azure Container Apps plus Azure PostgreSQL/Redis, Key Vault,
+> Log Analytics, Azure OpenAI, and an explicitly external managed Qdrant
+> cluster. The Vercel browser console is deployed separately.
 
 ## Product Boundary
 
@@ -74,10 +74,16 @@ For a live connection, the Core deployment must allow the Vercel origin in
 
 Verified public console: https://web-auroriumnexus-6067s-projects.vercel.app
 
+The deployed Core API is currently exposed at:
+`https://incidentops-core-api.wittydesert-436ece0e.swedencentral.azurecontainerapps.io`
+
+The API and console are separate origins. Configure the console origin in
+Core's `CORS_ORIGINS`; do not put service credentials in the browser.
+
 The Vercel project is linked to `Auro-rium/Ops-Incident-Core`, with `apps/web`
 as its root directory and `core` as its production branch. A push to `core`
-rebuilds the console. This proves frontend delivery only; it does not prove a
-live Core API because no Core runtime is deployed at this time.
+rebuilds the console. The current Azure deployment is verified separately by
+the manual `.github/workflows/deploy-azure.yml` workflow.
 
 ## Data Flow
 
@@ -116,7 +122,9 @@ large document bodies.
 
 Direct code/config/API lookups can use a fast cited-evidence path. Optional
 model synthesis is bounded to selected evidence. Local-hash embeddings remain
-available for deterministic tests; Azure OpenAI is the intended cloud provider.
+available for deterministic tests. Azure OpenAI is the cloud chat provider;
+Hugging Face Inference is also accepted for cloud embeddings when Azure
+embedding quota is constrained.
 
 ## API Surface
 
@@ -196,34 +204,32 @@ docker compose config --quiet
 
 ## Azure State
 
-Azure is the only retained cloud deployment direction in this repository.
-The Bicep scaffold describes Core API, worker, MCP, Collector, PostgreSQL
-Flexible Server, Redis, Key Vault, ACR, Container Apps jobs, and logging. Its
-legacy frontend Container App is disabled by default; Vercel hosts `apps/web`.
+Azure is the only retained cloud deployment direction in this repository. The
+live resource group is `incidentops-demo-swc-rg` in `swedencentral` and the
+deployed path includes Core API, Core worker, private MCP, Collector, Azure
+PostgreSQL Flexible Server, Redis, Key Vault, ACR, Container Apps jobs, and Log
+Analytics. The legacy frontend Container App remains disabled; Vercel hosts
+`apps/web`.
 
-The inspected Azure subscription on 2026-08-07 contains:
+The current API health and readiness checks have passed against the deployed
+Core URL. Production settings require queue mode, Redis rate limiting, Azure
+OpenAI chat, a configured cloud embedding backend, and no local fallback. HF
+Inference embeddings are accepted when Azure embedding requests return 429.
+The private MCP
+probe is opt-in in CI and runs from inside Azure rather than exposing MCP
+publicly.
 
-| Resource group | Resource | Verified state |
-|---|---|---|
-| incident-ops | Cognitive Services account incident-ops | exists |
-| incident-ops | Azure OpenAI incidentops-chat | gpt-5-mini, succeeded |
-| incident-ops | Azure OpenAI incidentops-embed | text-embedding-3-small, succeeded |
-| incidentops-demo-rg | ACR incidentops846e0b9 | exists; no repositories listed |
+Qdrant is a managed external dependency configured through Key Vault. This is
+Azure-first, not single-cloud: migrating vector storage to Azure AI Search or
+PostgreSQL/pgvector is a separate measured project and is intentionally not
+claimed here.
 
-Microsoft.App is NotRegistered. No Container Apps environment, app, or job was
-found. Therefore there is currently no public Core API URL, Collector runtime,
-worker, MCP endpoint, or live cloud E2E result to report. A Vercel UI can be
-deployed independently, but it cannot display live evidence until a Core API is
-deployed and CORS is configured for its origin.
-
-The Azure OpenAI deployments prove resource provisioning only. They do not
-prove that an application call has executed.
-
-The manual workflow is `.github/workflows/deploy-azure.yml`. It tests the Core
-and `apps/web`, then deploys Core runtime resources to Azure without building a
-frontend Container App. Set the public Vercel URL as `VERCEL_FRONTEND_URL` and
-include it in `CORS_ORIGINS` before running Azure smoke. The workflow has not
-been represented as a successful live deployment.
+The manual workflow is `.github/workflows/deploy-azure.yml`. It tests Core and
+`apps/web`, validates the Bicep entrypoint, builds/pushes the image, deploys
+backend resources, runs migrations/bootstrap, and runs Azure smoke. Its
+optional `run_mcp_smoke` input starts a short-lived private MCP probe job.
+Set the public Vercel URL as `VERCEL_FRONTEND_URL` and include it in
+`CORS_ORIGINS` before deployment.
 
 ## Security
 
@@ -239,11 +245,8 @@ been represented as a successful live deployment.
 
 ## Honest Limitations
 
-This is not yet production-grade. Missing proof includes:
+This is not yet production-grade. Remaining proof includes:
 
-- a clean Azure deployment;
-- migration/bootstrap/smoke evidence on Azure;
-- real cloud Collector sync after the V2 reset;
 - worker and indexing failure/restart testing;
 - measured retrieval quality and latency on multiple repositories;
 - backup/restore and purge/reingestion drills;

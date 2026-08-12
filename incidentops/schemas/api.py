@@ -194,6 +194,8 @@ class RuntimeStatusResponse(BaseModel):
     local_fallback_active: bool
     chat_deployment: str | None = None
     embedding_deployment: str | None = None
+    embedding_dimension: int
+    azure_openai_embeddings_configured: bool
     vector_index_version: str = "current"
     rag_rerank_mode: str = "conditional"
     gpu_rag_configured: bool = False

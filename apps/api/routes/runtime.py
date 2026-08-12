@@ -49,6 +49,8 @@ def build_runtime_status(settings: Settings) -> RuntimeStatusResponse:
             if settings.embedding_model.startswith(("huggingface", "hf"))
             else settings.azure_openai_embedding_deployment or None
         ),
+        embedding_dimension=settings.embedding_dim,
+        azure_openai_embeddings_configured=settings.azure_openai_embeddings_configured,
         vector_index_version=settings.vector_index_version,
         rag_rerank_mode=settings.rag_rerank_mode,
         gpu_rag_configured=settings.gpu_rag_configured,

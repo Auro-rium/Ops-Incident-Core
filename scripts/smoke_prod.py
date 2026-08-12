@@ -21,6 +21,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use-collector-batch", default="true", choices=["true", "false"])
     parser.add_argument("--timeout-seconds", type=int, default=120)
     parser.add_argument("--top-k", type=int, default=6)
+    parser.add_argument(
+        "--report-path",
+        help="Optional path for a sanitized JSON session telemetry report.",
+    )
     return parser
 
 
@@ -32,8 +36,15 @@ async def run_smoke() -> int:
     args = build_parser().parse_args()
     deadline = time.time() + args.timeout_seconds
     warnings: list[str] = []
+    session_started = time.perf_counter()
+    phase_latencies_ms: dict[str, float] = {}
+    telemetry: dict = {"query": args.query, "warnings": warnings}
+
+    def mark_phase(name: str, started: float) -> None:
+        phase_latencies_ms[name] = round((time.perf_counter() - started) * 1000, 2)
 
     async with httpx.AsyncClient(base_url=args.base_url.rstrip("/"), timeout=60.0) as client:
+        phase_started = time.perf_counter()
         health = await client.get("/health")
         if not health.is_success:
             print(f"health failed: {health.status_code} {health.text[:300]}")
@@ -42,13 +53,17 @@ async def run_smoke() -> int:
         if not ready.is_success:
             print(f"ready failed: {ready.status_code} {ready.text[:500]}")
             return 1
+        mark_phase("health_ready", phase_started)
 
+        phase_started = time.perf_counter()
         login = await client.post("/v1/auth/login", json={"email": args.email, "password": args.password})
         if not login.is_success:
             print(f"login failed: {login.status_code} {login.text[:300]}")
             return 1
         headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        mark_phase("login", phase_started)
 
+        phase_started = time.perf_counter()
         project_name = f"prod-smoke-{os.urandom(4).hex()}"
         project = await client.post(
             "/v1/projects",
@@ -59,7 +74,9 @@ async def run_smoke() -> int:
             print(f"project create failed: {project.status_code} {project.text[:400]}")
             return 1
         project_id = project.json()["project_id"]
+        mark_phase("project_create", phase_started)
 
+        phase_started = time.perf_counter()
         if args.use_collector_batch == "true":
             ingest_summary = await _collector_batch_flow(client, headers, project_id, args.query)
         elif args.data_path:
@@ -70,7 +87,9 @@ async def run_smoke() -> int:
         if ingest_summary["chunks_created"] <= 0:
             print("batch ingest created zero chunks")
             return 1
+        mark_phase("ingestion", phase_started)
 
+        phase_started = time.perf_counter()
         search = await client.post(
             "/v1/search",
             headers=headers,
@@ -83,7 +102,9 @@ async def run_smoke() -> int:
         if search_payload.get("total", 0) == 0:
             print("search returned zero evidence")
             return 1
+        mark_phase("search", phase_started)
 
+        phase_started = time.perf_counter()
         investigate = await client.post(
             "/v1/investigate",
             headers=headers,
@@ -93,7 +114,9 @@ async def run_smoke() -> int:
             print(f"investigate failed: {investigate.status_code} {investigate.text[:400]}")
             return 1
         investigation_payload = investigate.json()
+        mark_phase("investigation", phase_started)
 
+        phase_started = time.perf_counter()
         run = await client.post(
             "/v1/runs",
             headers=headers,
@@ -106,8 +129,24 @@ async def run_smoke() -> int:
         if run_payload.get("status") == "failed":
             print(f"workflow run failed: {run_payload.get('error')}")
             return 1
+        mark_phase("workflow", phase_started)
 
+        phase_started = time.perf_counter()
         eval_payload = await _run_eval_if_possible(client, headers, project_id, args.query, deadline, warnings)
+        mark_phase("evaluation", phase_started)
+
+        runtime = (await client.get("/v1/runtime/status", headers=headers)).json()
+        telemetry.update(
+            {
+                "project_id": project_id,
+                "runtime": _safe_runtime(runtime),
+                "ingestion": _safe_ingestion(ingest_summary),
+                "search": _safe_search(search_payload),
+                "investigation": _safe_investigation(investigation_payload),
+                "workflow": {"run_id": run_payload.get("run_id"), "status": run_payload.get("status")},
+                "evaluation": _safe_eval(eval_payload),
+            }
+        )
 
     print("Production Smoke Summary")
     print(f"  project_id: {project_id}")
@@ -125,7 +164,56 @@ async def run_smoke() -> int:
         print("  warnings:")
         for warning in warnings:
             print(f"    - {warning}")
+    telemetry["phase_latencies_ms"] = phase_latencies_ms
+    telemetry["total_session_latency_ms"] = round((time.perf_counter() - session_started) * 1000, 2)
+    if args.report_path:
+        report_path = Path(args.report_path).expanduser()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(telemetry, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"  telemetry_report: {report_path}")
     return 0
+
+
+def _safe_runtime(payload: dict) -> dict:
+    keys = (
+        "app_env", "cloud_provider", "llm_provider", "embedding_backend",
+        "retrieval_backend", "worker_mode", "rate_limit_backend", "mcp_enabled",
+        "azure_openai_configured", "azure_openai_embeddings_configured",
+        "local_fallback_active", "chat_deployment", "embedding_deployment",
+        "embedding_dimension", "vector_index_version", "rag_rerank_mode",
+    )
+    return {key: payload.get(key) for key in keys if key in payload}
+
+
+def _safe_ingestion(payload: dict) -> dict:
+    keys = ("received", "documents_received", "normalized_documents", "chunks_created", "skipped_unchanged", "parser_errors", "diagnostics")
+    return {key: payload.get(key) for key in keys if key in payload}
+
+
+def _safe_search(payload: dict) -> dict:
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else {}
+    return {
+        "result_count": payload.get("total", 0),
+        "citation_count": sum(1 for item in payload.get("results", []) if item.get("document_path")),
+        "retrieval_diagnostics": diagnostics,
+    }
+
+
+def _safe_investigation(payload: dict) -> dict:
+    return {
+        "confidence": payload.get("confidence"),
+        "citation_count": len(payload.get("citations", []) or payload.get("evidence", []) or []),
+        "latency_ms": payload.get("latency_ms"),
+        "model_call_count": payload.get("model_call_count"),
+        "input_tokens": payload.get("input_tokens"),
+        "output_tokens": payload.get("output_tokens"),
+    }
+
+
+def _safe_eval(payload: dict | None) -> dict | None:
+    if not payload:
+        return None
+    return {"status": payload.get("status"), "summary": payload.get("summary", {})}
 
 
 async def _collector_batch_flow(client: httpx.AsyncClient, headers: dict[str, str], project_id: str, query: str) -> dict:

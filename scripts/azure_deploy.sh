@@ -39,10 +39,22 @@ trap 'rm -f "$PARAMETERS_FILE" "$DEPLOY_ERROR_FILE"' EXIT
 
 "$ROOT_DIR/scripts/azure_login_check.sh"
 
+# The old benchmark job was a temporary benchmark surface. Remove it once when
+# upgrading an existing resource group; the replacement job is MCP-only.
+legacy_job_name="${NAME_PREFIX}-benchmark-job"
+if az containerapp job show --resource-group "$AZURE_RESOURCE_GROUP" --name "$legacy_job_name" --only-show-errors >/dev/null 2>&1; then
+  echo "Removing obsolete Azure benchmark job '$legacy_job_name'..."
+  az containerapp job delete --resource-group "$AZURE_RESOURCE_GROUP" --name "$legacy_job_name" --yes --only-show-errors >/dev/null
+fi
+
 test -n "$AZURE_OPENAI_ENDPOINT" || { echo "AZURE_OPENAI_ENDPOINT is required." >&2; exit 1; }
 test -n "$AZURE_OPENAI_API_KEY" || { echo "AZURE_OPENAI_API_KEY is required." >&2; exit 1; }
 test -n "$AZURE_OPENAI_CHAT_DEPLOYMENT" || { echo "AZURE_OPENAI_CHAT_DEPLOYMENT is required." >&2; exit 1; }
 test -n "$AZURE_OPENAI_EMBEDDING_DEPLOYMENT" || { echo "AZURE_OPENAI_EMBEDDING_DEPLOYMENT is required." >&2; exit 1; }
+if [[ "$EMBEDDING_MODEL" != "azure-openai" ]]; then
+  echo "EMBEDDING_MODEL=azure-openai is required for Azure production deployment." >&2
+  exit 1
+fi
 test -n "$QDRANT_URL" || { echo "QDRANT_URL is required." >&2; exit 1; }
 test -n "$QDRANT_API_KEY" || { echo "QDRANT_API_KEY is required." >&2; exit 1; }
 if [[ "$EMBEDDING_MODEL" == huggingface* || "$EMBEDDING_MODEL" == hf* ]]; then

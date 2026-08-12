@@ -1,7 +1,8 @@
 # IncidentOps Core Technical Architecture
 
-Status: V2 rewrite, active development, not production-grade.
-Last verified: 2026-08-07.
+Status: V2 rewrite, Azure-first deployment path, active development, not
+production-grade.
+Last verified: 2026-08-12.
 
 This document describes the repository as it exists, not an aspirational
 deployment.
@@ -143,7 +144,8 @@ collectors, syncs, documents, chunk text, retrieval runs/results, workflow
 state, evals, audit events, evidence relations, index jobs, and operational
 findings/events.
 
-Qdrant stores vector points for retrieval. Vector results are reconciled with
+Qdrant stores vector points for retrieval. In the current cloud deployment it
+is an external managed Qdrant dependency, not an Azure resource. Vector results are reconciled with
 authorized Core chunks before return. Qdrant is not the authorization source.
 
 Redis is used for queue, rate-limit, and runtime paths when configured. Durable
@@ -203,7 +205,8 @@ logs/deploys/incidents/runbooks. Missing runtime evidence produces a warning.
 
 Supported model paths:
 
-1. Azure OpenAI for cloud chat and embeddings when configured.
+1. Azure OpenAI for cloud chat, plus Azure OpenAI or Hugging Face Inference for
+   production embeddings. HF is selected when Azure embedding quota is constrained.
 2. Deterministic local-hash embeddings for tests and no-key development.
 3. Optional sentence-transformers when explicitly installed/configured.
 4. Optional remote reranker endpoint through model_gateway.py.
@@ -241,39 +244,35 @@ evidence or replace real repository and incident benchmarks.
 ## Azure IaC and Verified Cloud State
 
 infra/azure/main.bicep describes Azure Container Registry, a Container Apps
-environment, Core API, worker, MCP, Collector, migration and bootstrap jobs,
-PostgreSQL Flexible Server, Redis, Key Vault, Log Analytics, and a benchmark
-job. A legacy frontend Container App definition remains optional but defaults
-to disabled; `apps/web` is deployed on Vercel.
+environment, Core API, worker, private MCP, Collector, migration and bootstrap
+jobs, PostgreSQL Flexible Server, Redis, Key Vault, Log Analytics, and a
+short-lived MCP probe job. A legacy frontend Container App definition remains
+optional but defaults to disabled; `apps/web` is deployed on Vercel.
 
-The Azure subscription inspected on 2026-08-07 contains:
+The verified Azure resource group is `incidentops-demo-swc-rg` in
+`swedencentral`. The deployed Core API, worker, Collector, private MCP, Azure
+database/Redis dependencies, and Azure OpenAI chat/embedding configuration are
+managed by the manual GitHub Actions workflow. Health/readiness and the normal
+Azure smoke path have passed. The private MCP smoke is opt-in because the MCP
+ingress is intentionally not public.
 
-| Resource group | Resource | Result |
-|---|---|---|
-| incident-ops | Cognitive Services account incident-ops | present |
-| incident-ops | incidentops-chat | gpt-5-mini, succeeded |
-| incident-ops | incidentops-embed | text-embedding-3-small, succeeded |
-| incidentops-demo-rg | ACR incidentops846e0b9 | present, no repositories listed |
-
-Microsoft.App is NotRegistered. No Container Apps environment, app, or job was
-found. No live PostgreSQL, Redis, Qdrant, Core API, worker, Collector, or MCP
-runtime was verified. The Vercel console is publicly deployed, but there is no
-live application workflow until Core is deployed and its CORS policy allows its
-origin.
-
-The Azure OpenAI deployments prove resource provisioning only. They do not prove
-an application call, token usage, latency, retrieval quality, or E2E sync.
+Qdrant remains external managed infrastructure configured through Key Vault.
+No Azure AI Search migration is implied by this repository. A future storage
+migration must compare quality, latency, cost, and operational failure modes.
 
 ## CI/CD
 
 .github/workflows/deploy-azure.yml is a manual Azure workflow. It tests Core
 and `apps/web`, validates Bicep, builds/pushes the Core image, deploys backend
-resources, runs migrations/bootstrap, and runs smoke/E2E checks. It does not
-build or deploy a frontend Container App.
+resources, runs migrations/bootstrap, and runs smoke checks. It does not build
+or deploy a frontend Container App. Its optional `run_mcp_smoke` input runs a
+Core-backed MCP probe from inside the Azure network.
 
 It requires Azure OIDC, registry, model, Qdrant, database, and admin
 configuration as GitHub secrets/variables. No secret values belong in this
-repository. No successful live deployment is claimed here.
+repository. The workflow requires Azure OpenAI chat and a configured cloud
+embedding backend. HF embeddings are an accepted production option when Azure
+embedding quota is constrained; local-hash remains test/development only.
 
 ## Operational Invariants
 

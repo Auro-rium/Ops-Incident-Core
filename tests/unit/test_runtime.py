@@ -149,6 +149,8 @@ def test_runtime_status_reports_cloud_mode_without_secret_values():
     assert data["vector_collection"] == "incidentops_chunks"
     assert data["mcp_enabled"] is True
     assert data["azure_openai_configured"] is True
+    assert data["azure_openai_embeddings_configured"] is True
+    assert data["embedding_dimension"] == 384
     assert data["local_fallback_active"] is False
     assert data["chat_deployment"] == "incidentops-chat"
     assert data["embedding_deployment"] == "incidentops-embed"
@@ -170,3 +172,47 @@ def test_runtime_status_flags_production_fallback():
 
     assert status.local_fallback_active is True
     assert status.llm_provider == "none"
+
+
+def test_production_validation_accepts_huggingface_embedding_backend():
+    from incidentops.config.validation import production_settings_errors
+    from apps.api.routes.runtime import build_runtime_status
+
+    errors = production_settings_errors(
+        Settings(
+            app_env="production",
+            jwt_secret="a" * 48,
+            embedding_model="huggingface",
+            hf_api_token="configured",
+            azure_openai_endpoint="https://example.openai.azure.com",
+            azure_openai_api_key="configured",
+            azure_openai_chat_deployment="incidentops-chat",
+            azure_openai_embedding_deployment="incidentops-embed",
+            worker_mode="queue",
+            job_queue_backend="redis",
+            rate_limit_backend="redis",
+            redis_url="redis://example:6379/0",
+            qdrant_url="https://qdrant.example.com",
+            cors_allow_origins="https://example.com",
+        )
+    )
+    assert not any("EMBEDDING_MODEL" in error for error in errors)
+
+    status = build_runtime_status(
+        Settings(
+            app_env="production",
+            embedding_model="huggingface",
+            hf_api_token="configured",
+            azure_openai_endpoint="https://example.openai.azure.com",
+            azure_openai_api_key="configured",
+            azure_openai_chat_deployment="incidentops-chat",
+            azure_openai_embedding_deployment="",
+            worker_mode="queue",
+            rate_limit_backend="redis",
+            job_queue_backend="redis",
+            redis_url="redis://example:6379/0",
+            qdrant_url="https://qdrant.example.com",
+        )
+    )
+    assert status.embedding_backend == "huggingface"
+    assert status.local_fallback_active is False

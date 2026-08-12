@@ -20,7 +20,7 @@ if [[ -z "$PROJECT_ID" ]]; then
 fi
 
 echo "Running MCP smoke from a short-lived Azure Container Apps job..."
-MCP_JOB_NAME="${MCP_JOB_NAME:-${NAME_PREFIX}-benchmark-job}"
+MCP_JOB_NAME="${MCP_JOB_NAME:-${NAME_PREFIX}-mcp-probe-job}"
 CORE_IMAGE="${CORE_IMAGE:-$(az containerapp show --resource-group "$AZURE_RESOURCE_GROUP" --name "${NAME_PREFIX}-core-api" --query 'properties.template.containers[0].image' --output tsv --only-show-errors)}"
 MCP_TOKEN="${MCP_TOKEN:?MCP_TOKEN is required for the private MCP job smoke}"
 MCP_FQDN="$(az containerapp show --resource-group "$AZURE_RESOURCE_GROUP" --name "$MCP_APP_NAME" --query 'properties.configuration.ingress.fqdn' --output tsv --only-show-errors)"
@@ -67,12 +67,12 @@ while (( SECONDS < deadline )); do
   case "$status" in
     Succeeded|Completed)
       echo "MCP probe completed. Safe summary:"
-      az containerapp job logs show --resource-group "$AZURE_RESOURCE_GROUP" --name "$MCP_JOB_NAME" --execution "$execution_name" --container benchmark --tail 120 --only-show-errors || true
+      az containerapp job logs show --resource-group "$AZURE_RESOURCE_GROUP" --name "$MCP_JOB_NAME" --execution "$execution_name" --container mcp-probe --tail 120 --only-show-errors || true
       exit 0
       ;;
     Failed|Canceled|Cancelled)
       echo "MCP probe failed. Safe logs:" >&2
-      az containerapp job logs show --resource-group "$AZURE_RESOURCE_GROUP" --name "$MCP_JOB_NAME" --execution "$execution_name" --container benchmark --tail 120 --only-show-errors || true
+      az containerapp job logs show --resource-group "$AZURE_RESOURCE_GROUP" --name "$MCP_JOB_NAME" --execution "$execution_name" --container mcp-probe --tail 120 --only-show-errors || true
       exit 1
       ;;
   esac
@@ -80,5 +80,5 @@ while (( SECONDS < deadline )); do
 done
 
 echo "MCP probe timed out after ${MCP_WAIT_TIMEOUT_SECONDS}s. Safe logs:" >&2
-az containerapp job logs show --resource-group "$AZURE_RESOURCE_GROUP" --name "$MCP_JOB_NAME" --execution "$execution_name" --container benchmark --tail 120 --only-show-errors || true
+az containerapp job logs show --resource-group "$AZURE_RESOURCE_GROUP" --name "$MCP_JOB_NAME" --execution "$execution_name" --container mcp-probe --tail 120 --only-show-errors || true
 exit 1

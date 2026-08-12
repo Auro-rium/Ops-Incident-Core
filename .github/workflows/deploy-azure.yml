@@ -11,6 +11,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_mcp_smoke:
+        description: "Run the private MCP probe from inside Azure after deployment."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -167,7 +172,6 @@ jobs:
         working-directory: Ops-Incident-Core
         run: |
           az bicep build --file infra/azure/main.bicep --stdout >/dev/null
-          az bicep build --file infra/azure/benchmark-job.bicep --stdout >/dev/null
 
       - name: Validate required variables
         run: |
@@ -237,3 +241,14 @@ jobs:
           SMOKE_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
           VERIFY_COLLECTOR: ${{ inputs.deploy_collector && 'true' || 'false' }}
         run: scripts/azure_smoke.sh
+
+      - name: Private MCP smoke
+        if: inputs.run_mcp_smoke
+        working-directory: Ops-Incident-Core
+        env:
+          PROJECT_ID: ${{ vars.INCIDENTOPS_PROJECT_ID }}
+          MCP_TOKEN: ${{ secrets.INCIDENTOPS_MCP_TOKEN }}
+          SEARCH_QUERY: "Where is the primary application entrypoint implemented?"
+          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          NAME_PREFIX: ${{ vars.AZURE_NAME_PREFIX }}
+        run: scripts/azure_mcp_smoke.sh
