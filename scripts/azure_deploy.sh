@@ -51,10 +51,6 @@ test -n "$AZURE_OPENAI_ENDPOINT" || { echo "AZURE_OPENAI_ENDPOINT is required." 
 test -n "$AZURE_OPENAI_API_KEY" || { echo "AZURE_OPENAI_API_KEY is required." >&2; exit 1; }
 test -n "$AZURE_OPENAI_CHAT_DEPLOYMENT" || { echo "AZURE_OPENAI_CHAT_DEPLOYMENT is required." >&2; exit 1; }
 test -n "$AZURE_OPENAI_EMBEDDING_DEPLOYMENT" || { echo "AZURE_OPENAI_EMBEDDING_DEPLOYMENT is required." >&2; exit 1; }
-if [[ "$EMBEDDING_MODEL" != "azure-openai" ]]; then
-  echo "EMBEDDING_MODEL=azure-openai is required for Azure production deployment." >&2
-  exit 1
-fi
 test -n "$QDRANT_URL" || { echo "QDRANT_URL is required." >&2; exit 1; }
 test -n "$QDRANT_API_KEY" || { echo "QDRANT_API_KEY is required." >&2; exit 1; }
 if [[ "$EMBEDDING_MODEL" == huggingface* || "$EMBEDDING_MODEL" == hf* ]]; then
