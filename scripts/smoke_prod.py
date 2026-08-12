@@ -85,6 +85,18 @@ async def run_smoke() -> int:
             print("--data-path is required when --use-collector-batch=false")
             return 1
         if ingest_summary["chunks_created"] <= 0:
+            runtime = (await client.get("/v1/runtime/status", headers=headers)).json()
+            telemetry.update(
+                {
+                    "project_id": project_id,
+                    "runtime": _safe_runtime(runtime),
+                    "ingestion": _safe_ingestion(ingest_summary),
+                    "failure": "ingestion_created_zero_chunks",
+                }
+            )
+            telemetry["phase_latencies_ms"] = phase_latencies_ms
+            telemetry["total_session_latency_ms"] = round((time.perf_counter() - session_started) * 1000, 2)
+            _write_telemetry_report(args.report_path, telemetry)
             print("batch ingest created zero chunks")
             return 1
         mark_phase("ingestion", phase_started)
@@ -167,11 +179,17 @@ async def run_smoke() -> int:
     telemetry["phase_latencies_ms"] = phase_latencies_ms
     telemetry["total_session_latency_ms"] = round((time.perf_counter() - session_started) * 1000, 2)
     if args.report_path:
-        report_path = Path(args.report_path).expanduser()
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(json.dumps(telemetry, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        print(f"  telemetry_report: {report_path}")
+        _write_telemetry_report(args.report_path, telemetry)
+        print(f"  telemetry_report: {Path(args.report_path).expanduser()}")
     return 0
+
+
+def _write_telemetry_report(report_path: str | None, telemetry: dict) -> None:
+    if not report_path:
+        return
+    path = Path(report_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(telemetry, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _safe_runtime(payload: dict) -> dict:
