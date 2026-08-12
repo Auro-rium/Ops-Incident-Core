@@ -242,6 +242,26 @@ jobs:
           VERIFY_COLLECTOR: ${{ inputs.deploy_collector && 'true' || 'false' }}
         run: scripts/azure_smoke.sh
 
+      - name: Cloud session telemetry smoke
+        working-directory: Ops-Incident-Core
+        env:
+          SMOKE_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
+          SMOKE_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
+        run: |
+          python3 -m venv /tmp/incidentops-smoke-venv
+          /tmp/incidentops-smoke-venv/bin/pip install --quiet -e .
+          API_URL="https://$(az containerapp show --resource-group "$AZURE_RESOURCE_GROUP" --name "${NAME_PREFIX}-core-api" --query 'properties.configuration.ingress.fqdn' --output tsv --only-show-errors)"
+          /tmp/incidentops-smoke-venv/bin/python scripts/smoke_prod.py \
+            --base-url "$API_URL" \
+            --email "$SMOKE_EMAIL" \
+            --password "$SMOKE_PASSWORD" \
+            --query "Which evidence shows the service deployment and latency behavior?" \
+            --use-collector-batch true \
+            --timeout-seconds 240 \
+            --report-path /tmp/incidentops-live-session-telemetry.json
+          echo "Sanitized cloud session telemetry:"
+          cat /tmp/incidentops-live-session-telemetry.json
+
       - name: Private MCP smoke
         if: inputs.run_mcp_smoke
         working-directory: Ops-Incident-Core
