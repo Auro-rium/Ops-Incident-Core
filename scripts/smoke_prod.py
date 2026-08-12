@@ -78,7 +78,7 @@ async def run_smoke() -> int:
 
         phase_started = time.perf_counter()
         if args.use_collector_batch == "true":
-            ingest_summary = await _collector_batch_flow(client, headers, project_id, args.query)
+            ingest_summary = await _collector_batch_flow(client, headers, project_id, args.query, deadline)
         elif args.data_path:
             ingest_summary = await _local_ingest_flow(client, headers, project_id, args.data_path)
         else:
@@ -216,7 +216,13 @@ def _safe_eval(payload: dict | None) -> dict | None:
     return {"status": payload.get("status"), "summary": payload.get("summary", {})}
 
 
-async def _collector_batch_flow(client: httpx.AsyncClient, headers: dict[str, str], project_id: str, query: str) -> dict:
+async def _collector_batch_flow(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    project_id: str,
+    query: str,
+    deadline: float,
+) -> dict:
     source = await client.post(
         f"/v1/projects/{project_id}/sources",
         headers=headers,
@@ -261,6 +267,20 @@ async def _collector_batch_flow(client: httpx.AsyncClient, headers: dict[str, st
         },
     )
     finish.raise_for_status()
+    # Production Azure uses async indexing. The batch response is allowed to
+    # acknowledge documents before the worker has published their chunks.
+    if payload.get("chunks_created", 0) <= 0:
+        while time.time() < deadline:
+            latest = await client.get(
+                f"/v1/sources/{source_id}/syncs/latest",
+                headers=headers,
+            )
+            latest.raise_for_status()
+            latest_payload = latest.json()
+            if latest_payload.get("chunks_created", 0) > 0:
+                payload = {**payload, **latest_payload}
+                break
+            await asyncio.sleep(2)
     return payload
 
 
