@@ -165,6 +165,53 @@ textarea { resize: vertical; line-height: 1.48; }
 .spin { animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+.paused-page {
+  min-height: 100vh;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  padding: 32px 20px;
+  color: var(--ink);
+  background: var(--paper);
+  text-align: center;
+}
+.paused-mark {
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 24px;
+  color: var(--white);
+  background: var(--blue);
+  clip-path: polygon(0 0, 100% 0, 100% 72%, 72% 100%, 0 100%);
+}
+.paused-kicker {
+  margin: 0 0 12px;
+  color: var(--orange);
+  font: 800 11px/1.2 var(--mono);
+  letter-spacing: .16em;
+  text-transform: uppercase;
+}
+.paused-page h1 {
+  margin: 0;
+  color: var(--blue-dark);
+  font: 500 clamp(2.5rem, 7vw, 5rem)/.95 var(--display);
+}
+.paused-message {
+  max-width: 480px;
+  margin: 20px 0 0;
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1.6;
+}
+.paused-note {
+  margin: 22px 0 0;
+  color: var(--blue);
+  font: 700 11px/1.2 var(--mono);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
 @media (max-width: 1000px) {
   .hero { grid-template-columns: 1fr; }
   .chain-card { max-width: 540px; }
