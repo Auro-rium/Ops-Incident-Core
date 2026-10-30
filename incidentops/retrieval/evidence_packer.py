@@ -4,6 +4,7 @@ Evidence packer.
 
 from __future__ import annotations
 
+from incidentops.security.output_sanitizer import sanitize_output
 from incidentops.security.prompt_injection import inspect_untrusted_text
 from incidentops.security.secret_redaction import redact_secrets
 from incidentops.retrieval.source_types import chunk_source_type
@@ -20,6 +21,10 @@ SOURCE_PRIORITY = {
 
 DEFAULT_MAX_CHARS_PER_CHUNK = 1600
 DEFAULT_MAX_TOTAL_CHARS = 10000
+DEFAULT_PREVIEW_CHARS = 300
+# Evidence flagged for instruction-like text stays visible (flag-only policy)
+# but drops this many positions so clean evidence of similar rank leads.
+PROMPT_INJECTION_RANK_PENALTY = 1
 
 
 def _source_type_from_chunk(chunk) -> str:
@@ -70,18 +75,55 @@ def pack_evidence(
             "timestamp_start": chunk.timestamp_start,
             "timestamp_end": chunk.timestamp_end,
             "text": text,
-            "score": r.get("rerank_score") or r.get("fused_score", 0.0),
+            "score": _result_score(r),
+            "reranked": r.get("rerank_score") is not None,
             "vector_score": r.get("vector_score"),
             "lexical_score": r.get("lexical_score"),
             "injection_flags": inspection,
+            "prompt_injection_flagged": bool(inspection["is_suspicious"]),
             "why_retrieved": list(r.get("metadata_boost_reasons") or []),
         }
         evidence.append(item)
         total_chars += len(text)
         if len(evidence) >= max_evidence:
             break
-    evidence.sort(key=lambda e: (-e["score"], SOURCE_PRIORITY.get(e["source_type"], 99), e["document_path"]))
-    return evidence[:max_evidence]
+    # A partial rerank yields a reranked head and a fused-score tail. The two
+    # score scales are not comparable, so order by tier first, then score.
+    evidence.sort(
+        key=lambda e: (
+            not e["reranked"],
+            -e["score"],
+            SOURCE_PRIORITY.get(e["source_type"], 99),
+            e["document_path"],
+        )
+    )
+    return _demote_flagged(evidence)[:max_evidence]
+
+
+def evidence_preview(item: dict, max_chars: int = DEFAULT_PREVIEW_CHARS) -> str:
+    """Sanitized, bounded preview of evidence text for API responses.
+
+    The full text is sanitized before truncation so a cut cannot leave an
+    unterminated script tag that the sanitizer no longer recognizes.
+    """
+    return sanitize_output(item.get("text") or "")[:max_chars]
+
+
+def _result_score(result: dict) -> float:
+    rerank_score = result.get("rerank_score")
+    if rerank_score is not None:
+        return float(rerank_score)
+    return float(result.get("fused_score", 0.0) or 0.0)
+
+
+def _demote_flagged(evidence: list[dict]) -> list[dict]:
+    ranked = list(evidence)
+    for item in [entry for entry in evidence if entry["prompt_injection_flagged"]]:
+        index = ranked.index(item)
+        target = min(index + PROMPT_INJECTION_RANK_PENALTY, len(ranked) - 1)
+        if target != index:
+            ranked.insert(target, ranked.pop(index))
+    return ranked
 
 
 def _compact_text(text: str, *, max_chars: int) -> str:

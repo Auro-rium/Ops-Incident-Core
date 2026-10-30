@@ -13,7 +13,7 @@ from incidentops.llm.provider import get_llm_provider
 from incidentops.observability.metrics import incr, observe_latency
 from incidentops.operations.service import record_operational_event
 from incidentops.retrieval.citation_builder import build_citations
-from incidentops.retrieval.evidence_packer import pack_evidence
+from incidentops.retrieval.evidence_packer import evidence_preview, pack_evidence
 from incidentops.retrieval.hybrid_search import hybrid_search
 from incidentops.retrieval.query_intent import (
     INTENT_API_CONTRACT,
@@ -332,8 +332,9 @@ def _to_evidence_items(evidence: list[dict]) -> list[EvidenceItem]:
             service_name=item.get("service_name"),
             deploy_hash=item.get("deploy_hash"),
             score=round(item.get("score", 0), 4),
-            text_preview=item["text"][:300],
+            text_preview=evidence_preview(item),
             why_retrieved=item.get("why_retrieved") or [],
+            prompt_injection_flagged=bool(item.get("prompt_injection_flagged")),
             citation=CitationInfo(**item["citation"]),
         )
         for item in evidence

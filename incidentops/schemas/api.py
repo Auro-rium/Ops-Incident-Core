@@ -403,6 +403,7 @@ class EvidenceItem(BaseModel):
     score: float
     text_preview: str
     why_retrieved: list[str] = Field(default_factory=list)
+    prompt_injection_flagged: bool = False
     citation: CitationInfo
 
 
