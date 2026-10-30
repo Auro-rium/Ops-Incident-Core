@@ -147,7 +147,9 @@ async def delete_source(
         "retrieval_results": await _count_source_retrieval_results(db, source_id),
     }
     try:
-        await QdrantVectorStore(settings).delete_by_filter(project_id, source_id=str(source_id))
+        await QdrantVectorStore(settings).delete_by_filter(
+            project_id, all_index_versions=True, source_id=str(source_id)
+        )
     except VectorStoreError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Vector store deletion failed") from exc
     chunk_ids = select(Chunk.id).where(Chunk.source_id == source_id)
