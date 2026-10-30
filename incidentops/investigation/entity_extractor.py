@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 
 from incidentops.investigation.schemas import InvestigationEntities
 from incidentops.retrieval.hybrid_search import analyze_query
@@ -19,8 +20,8 @@ SYMPTOM_PATTERNS = {
 TIME_WINDOW_RE = re.compile(r"\b(last\s+\d+\s+(?:m|minutes|h|hours|d|days)|between\s+.+?)\b", re.IGNORECASE)
 
 
-def extract_entities(query: str) -> InvestigationEntities:
-    analyzed = analyze_query(query)
+def extract_entities(query: str, known_services: Iterable[str] | None = None) -> InvestigationEntities:
+    analyzed = analyze_query(query, known_services)
     lower = query.lower()
     symptom = None
     for label, patterns in SYMPTOM_PATTERNS.items():

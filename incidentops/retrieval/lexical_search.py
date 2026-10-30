@@ -8,7 +8,7 @@ import uuid
 import time
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -39,7 +39,7 @@ async def lexical_search(
     )
 
     if filters:
-        stmt = _apply_filters(stmt, filters)
+        stmt = apply_chunk_filters(stmt, filters)
 
     stmt = stmt.order_by(rank.desc()).limit(top_k)
     result = await db.execute(stmt)
@@ -48,7 +48,8 @@ async def lexical_search(
     return rows
 
 
-def _apply_filters(stmt, filters: dict):
+def apply_chunk_filters(stmt, filters: dict[str, Any]):
+    """Apply request filters shared by the lexical, metadata, and graph branches."""
     if filters.get("service_name"):
         stmt = stmt.where(Chunk.service_name == filters["service_name"])
     if filters.get("deploy_hash"):
@@ -56,5 +57,14 @@ def _apply_filters(stmt, filters: dict):
     if filters.get("chunk_type"):
         stmt = stmt.where(Chunk.chunk_type == filters["chunk_type"])
     if filters.get("endpoint"):
-        stmt = stmt.where(Chunk.endpoint == filters["endpoint"])
+        stmt = stmt.where(endpoint_filter_clause(str(filters["endpoint"])))
     return stmt
+
+
+def endpoint_filter_clause(endpoint: str):
+    """Match an endpoint exactly or as a path prefix (``/orders`` matches ``/orders/{id}``)."""
+    base = endpoint.rstrip("/") or "/"
+    escaped = base.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    prefix = f"{escaped}%" if base == "/" else f"{escaped}/%"
+    exact = {base, endpoint}
+    return or_(*(Chunk.endpoint == value for value in sorted(exact)), Chunk.endpoint.like(prefix, escape="\\"))

@@ -30,7 +30,7 @@ from incidentops.retrieval.query_intent import (
     classify_query_intent,
     investigate_supported,
 )
-from incidentops.retrieval.hybrid_search import hybrid_search, hybrid_search_with_debug
+from incidentops.retrieval.hybrid_search import hybrid_search, hybrid_search_with_debug, known_service_names
 from incidentops.retrieval.reranker import rerank_with_debug_async
 
 
@@ -41,12 +41,13 @@ async def investigate(
     top_k: int,
     reranker_model: str,
     debug: bool = False,
+    filters: dict | None = None,
 ) -> tuple[InvestigationResult, int]:
     start = time.time()
     task_type = classify_task(query)
     query_intent = classify_query_intent(query)
-    entities = extract_entities(query)
-    scope = resolve_scope(entities)
+    entities = extract_entities(query, await known_service_names(db, project_id))
+    scope = resolve_scope(entities, explicit_filters=filters)
     if debug:
         raw_results, retrieval_debug = await hybrid_search_with_debug(
             db,

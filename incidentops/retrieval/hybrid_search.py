@@ -8,12 +8,13 @@ import re
 import time
 import uuid
 from collections import Counter
-from typing import Any
+from typing import Any, Iterable
 
+from sqlalchemy import distinct, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from incidentops.config.settings import get_settings
-from incidentops.ingestion.chunking.metadata import extract_deploy_hash
+from incidentops.db.models import Chunk
 from incidentops.retrieval.embeddings import embed_query_async
 from incidentops.retrieval.cache import get_project_json, set_project_json
 from incidentops.retrieval.graph_search import graph_search
@@ -39,67 +40,19 @@ from incidentops.retrieval.source_types import chunk_source_type
 
 logger = logging.getLogger("incidentops.retrieval.hybrid")
 
-DEPLOY_HASH_RE = re.compile(r"\b([a-f0-9]{6,40})\b", re.IGNORECASE)
+# A bare hex token is only treated as a deploy hash when it looks like a git
+# SHA (7-40 chars mixing letters and digits); plain numbers and hex-only words
+# such as "facade" are not. After an explicit keyword the token may be all
+# digits, but still needs at least one digit.
+DEPLOY_HASH_RE = re.compile(r"\b(?=[a-f0-9]*[a-f])(?=[a-f0-9]*[0-9])([a-f0-9]{7,40})\b", re.IGNORECASE)
+KEYWORD_DEPLOY_HASH_RE = re.compile(
+    r"\b(?:deploy|deployment|commit|sha|release|revision)[_\s:=#-]+(?=[a-f0-9]*[0-9])([a-f0-9]{6,40})\b",
+    re.IGNORECASE,
+)
 ENDPOINT_RE = re.compile(r"(/\w[\w/-]*)")
-SERVICE_RE = re.compile(r"\b([a-z][a-z0-9_-]{2,40})(?:\s+service)?\b", re.IGNORECASE)
-SERVICE_STOPWORDS = {
-    "a",
-    "an",
-    "are",
-    "application",
-    "app",
-    "backend",
-    "configured",
-    "configuration",
-    "database",
-    "defined",
-    "deployment",
-    "deployments",
-    "fastapi",
-    "settings",
-    "used",
-    "the",
-    "why",
-    "what",
-    "when",
-    "where",
-    "who",
-    "how",
-    "did",
-    "does",
-    "after",
-    "before",
-    "last",
-    "increase",
-    "increased",
-    "slow",
-    "slower",
-    "spike",
-    "spiked",
-    "latency",
-    "timeout",
-    "timeouts",
-    "error",
-    "errors",
-    "rate",
-    "question",
-    "deploy",
-    "release",
-    "incident",
-    "investigation",
-    "query",
-    "logs",
-    "docs",
-    "config",
-    "get",
-    "post",
-    "put",
-    "delete",
-    "patch",
-    "which",
-    "parts",
-    "repo",
-}
+KNOWN_SERVICES_CACHE_NAMESPACE = "known_services"
+QUERY_ANALYSIS_CACHE_NAMESPACE = "query_classification_v2"
+_MAX_KNOWN_SERVICES = 500
 README_PATH_TOKENS = ("readme.md", "/readme.md")
 
 _CHUNK_TYPE_BOOSTS = {
@@ -111,6 +64,7 @@ _CHUNK_TYPE_BOOSTS = {
     "go_module": 0.08,
     "python_function": 0.14,
     "python_class": 0.12,
+    "python_module": 0.08,
     "ts_function": 0.14,
     "ts_class": 0.12,
     "ts_interface": 0.12,
@@ -157,34 +111,52 @@ _CHUNK_TYPE_BOOSTS = {
 }
 
 
-def analyze_query(query: str) -> dict[str, Any]:
-    lower = query.lower()
+def analyze_query(query: str, known_services: Iterable[str] | None = None) -> dict[str, Any]:
     endpoints = ENDPOINT_RE.findall(query)
-    deploy_hashes: list[str] = []
-    explicit = extract_deploy_hash(query)
-    if explicit:
-        deploy_hashes.append(explicit)
-    deploy_hashes.extend(
-        candidate.lower()
-        for candidate in DEPLOY_HASH_RE.findall(query)
-        if candidate.lower() not in deploy_hashes
+    deploy_hashes = list(
+        dict.fromkeys(
+            candidate.lower()
+            for candidate in [*KEYWORD_DEPLOY_HASH_RE.findall(query), *DEPLOY_HASH_RE.findall(query)]
+        )
     )
-    services = []
-    for match in SERVICE_RE.findall(lower):
-        candidate = match.lower()
-        if candidate in SERVICE_STOPWORDS or candidate.startswith("http"):
-            continue
-        if candidate in endpoints or candidate in deploy_hashes:
-            continue
-        services.append(candidate)
     intent = classify_query_intent(query)
     return {
-        "services": list(dict.fromkeys(services))[:5],
+        "services": _match_known_services(query, known_services)[:5],
         "deploy_hashes": deploy_hashes,
         "endpoints": endpoints,
         "query_intent": intent.as_dict(),
         "query_terms": intent.query_terms,
     }
+
+
+def _match_known_services(query: str, known_services: Iterable[str] | None) -> list[str]:
+    """Return project service names mentioned in the query, in query order."""
+    if not known_services:
+        return []
+    lower = query.lower()
+    positions: dict[str, int] = {}
+    for name in {str(service).lower().strip() for service in known_services if service}:
+        if not name:
+            continue
+        match = re.search(rf"(?<![a-z0-9_-]){re.escape(name)}(?![a-z0-9_-])", lower)
+        if match:
+            positions[name] = match.start()
+    return sorted(positions, key=lambda name: (positions[name], name))
+
+
+async def known_service_names(db: AsyncSession, project_id: uuid.UUID) -> set[str]:
+    """Distinct service names indexed for a project, cached per project generation."""
+    cached = await get_project_json(KNOWN_SERVICES_CACHE_NAMESPACE, project_id, "all")
+    if cached is not None and isinstance(cached.get("services"), list):
+        return {str(name) for name in cached["services"]}
+    result = await db.execute(
+        select(distinct(Chunk.service_name))
+        .where(Chunk.project_id == project_id, Chunk.service_name.is_not(None))
+        .limit(_MAX_KNOWN_SERVICES)
+    )
+    services = {str(name).lower() for name in result.scalars().all() if name}
+    await set_project_json(KNOWN_SERVICES_CACHE_NAMESPACE, project_id, "all", {"services": sorted(services)})
+    return services
 
 
 async def hybrid_search(
@@ -208,10 +180,10 @@ async def hybrid_search_with_debug(
     settings = get_settings()
     started = time.perf_counter()
     branch_latencies: dict[str, int] = {}
-    query_info = await get_project_json("query_classification", project_id, query)
+    query_info = await get_project_json(QUERY_ANALYSIS_CACHE_NAMESPACE, project_id, query)
     if query_info is None:
-        query_info = analyze_query(query)
-        await set_project_json("query_classification", project_id, query, query_info)
+        query_info = analyze_query(query, await known_service_names(db, project_id))
+        await set_project_json(QUERY_ANALYSIS_CACHE_NAMESPACE, project_id, query, query_info)
     intent = classify_query_intent(query)
     incr(f"retrieval_intent_{intent.intent}_total")
     logger.info("query classified intent=%s", intent.intent)
@@ -403,7 +375,7 @@ async def _retrieve_branches(
             if intent.intent != INTENT_ARCHITECTURE:
                 return []
             async with factory() as branch_db:
-                return await graph_search(branch_db, project_id, query_info, top_k=fetch_k)
+                return await graph_search(branch_db, project_id, query_info, top_k=fetch_k, filters=filters)
 
         vector, lexical, metadata, graph = await asyncio.gather(
             _run("vector", _vector) if query_embedding else _empty_results(),
@@ -424,7 +396,7 @@ async def _retrieve_branches(
         )
         graph = await _run(
             "graph",
-            lambda: graph_search(db, project_id, query_info, top_k=fetch_k)
+            lambda: graph_search(db, project_id, query_info, top_k=fetch_k, filters=filters)
             if intent.intent == INTENT_ARCHITECTURE
             else _empty_results(),
         )
