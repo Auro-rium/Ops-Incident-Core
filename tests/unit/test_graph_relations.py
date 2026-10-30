@@ -27,6 +27,21 @@ def test_graph_relations_only_reflect_indexed_chunk_facts():
         ("contains", "package:history", "path:service/history/handler.go"),
         ("defines", "path:service/history/handler.go", "symbol:GetHistory"),
         ("implements", "path:service/history/handler.go", "endpoint:GET /api/history"),
-        ("changed_by", "path:service/history/handler.go", "deploy:abc1234"),
     }
     assert all(relation["project_id"] == project_id for relation in relations)
+
+
+def test_graph_relations_link_deploy_evidence_to_deploy_hash():
+    chunk = SimpleNamespace(
+        id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        chunk_type="deploy_diff",
+        service_name=None,
+        endpoint=None,
+        deploy_hash="abc1234",
+        metadata_json={"source_type": "deploy"},
+    )
+    relations = build_chunk_relations(SimpleNamespace(path="deploys/fix.patch"), [chunk])
+    assert ("changed_by", "path:deploys/fix.patch", "deploy:abc1234") in {
+        (relation["relation_type"], relation["from_key"], relation["to_key"]) for relation in relations
+    }

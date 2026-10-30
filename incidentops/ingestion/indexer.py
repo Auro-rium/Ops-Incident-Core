@@ -229,7 +229,7 @@ async def _index_one_document(
                 "chunk_type": raw_chunk.chunk_type,
                 "service_name": raw_chunk.service_name or service_name or normalized.metadata.get("service_name"),
                 "endpoint": raw_chunk.endpoint or normalized.metadata.get("endpoint"),
-                "deploy_hash": raw_chunk.deploy_hash or normalized.metadata.get("deploy_hash") or normalized.metadata.get("commit_sha"),
+                "deploy_hash": _chunk_deploy_hash(normalized, raw_chunk),
                 "timestamp_start": raw_chunk.timestamp_start,
                 "timestamp_end": raw_chunk.timestamp_end,
                 "section_title": raw_chunk.section_title,
@@ -489,6 +489,19 @@ def _parse_normalized_document(
         return parse_markdown(document.content, document.path, source_type=source_type, service_name=service_name), None
     logger.info("No parser configured for normalized document %s", document.path)
     return [], "no parser configured"
+
+
+def _chunk_deploy_hash(document: NormalizedDocument, raw_chunk: RawChunk) -> str | None:
+    """A repository commit is deploy evidence only for deploy/patch documents."""
+    explicit = raw_chunk.deploy_hash or document.metadata.get("deploy_hash")
+    if explicit:
+        return explicit
+    is_deploy = (
+        raw_chunk.source_type == "deploy"
+        or (document.source_type or "").lower() == "deploy"
+        or PurePosixPath(document.path.lower()).suffix in {".patch", ".diff"}
+    )
+    return document.metadata.get("commit_sha") if is_deploy else None
 
 
 def _parse_generic_code(content: str, path: str, *, service_name: str | None) -> list[RawChunk]:

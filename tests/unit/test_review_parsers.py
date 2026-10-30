@@ -320,3 +320,62 @@ def test_incident_service_from_service_line_and_front_matter():
     front = "---\ntitle: Outage\nservice: payments\n---\n# Outage\n## Summary\nslow\n"
     chunks = parse_incident(front, "incidents/y.md")
     assert {chunk.service_name for chunk in chunks} == {"payments"}
+
+
+# ── Deploy hash propagation and graph relations ─
+
+import uuid  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from incidentops.ingestion import indexer  # noqa: E402
+from incidentops.ingestion.schemas import RawChunk  # noqa: E402
+from incidentops.retrieval.graph_relations import build_chunk_relations  # noqa: E402
+
+
+def _raw(source_type: str, deploy_hash: str | None = None) -> RawChunk:
+    return RawChunk(
+        text="x", chunk_type="c", source_type=source_type, document_path="p", doc_type="code", deploy_hash=deploy_hash
+    )
+
+
+def test_code_chunks_do_not_inherit_repository_commit_as_deploy_hash():
+    document = _doc("service/handler.go", "package x", "code", commit_sha="abcdef1234567")
+    assert indexer._chunk_deploy_hash(document, _raw("code")) is None
+
+
+def test_deploy_documents_fall_back_to_commit_sha():
+    document = _doc("deploys/history.json", "[]", "deploy", commit_sha="abcdef1234567")
+    assert indexer._chunk_deploy_hash(document, _raw("deploy")) == "abcdef1234567"
+    patch = _doc("changes/fix.patch", "diff", "unknown_text", commit_sha="abcdef1234567")
+    assert indexer._chunk_deploy_hash(patch, _raw("deploy")) == "abcdef1234567"
+
+
+def test_chunk_level_deploy_hash_is_preserved():
+    document = _doc("logs/app.log", "x", "logs", commit_sha="abcdef1234567", deploy_hash="meta123")
+    assert indexer._chunk_deploy_hash(document, _raw("logs", "f00d12")) == "f00d12"
+    assert indexer._chunk_deploy_hash(document, _raw("logs")) == "meta123"
+
+
+def _graph_chunk(chunk_type: str, source_type: str):
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        chunk_type=chunk_type,
+        service_name=None,
+        endpoint=None,
+        deploy_hash="abc1234",
+        metadata_json={"source_type": source_type},
+    )
+
+
+def test_changed_by_relation_only_for_deploy_evidence():
+    document = SimpleNamespace(path="service/handler.go")
+    for chunk_type, source_type, expected in [
+        ("go_function", "code", False),
+        ("log_time_window", "logs", False),
+        ("deploy_commit", "deploy", True),
+        ("deploy_diff", "deploy", True),
+    ]:
+        relations = build_chunk_relations(document, [_graph_chunk(chunk_type, source_type)])
+        has_changed_by = any(relation["relation_type"] == "changed_by" for relation in relations)
+        assert has_changed_by is expected, chunk_type
