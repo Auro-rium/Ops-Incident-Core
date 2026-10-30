@@ -20,8 +20,14 @@ from apps.api.deps import (
 from incidentops.config.settings import Settings
 from incidentops.db.models import Chunk, Document, IndexJob, RetrievalResult, SourceSync, Collector, ProjectRole, Source
 from incidentops.ingestion.diagnostics import build_source_coverage
-from incidentops.ingestion.failure_taxonomy import failure_reason_counts
-from incidentops.ingestion.indexer import index_normalized_documents
+from incidentops.ingestion.failure_taxonomy import failure_reason_counts, normalize_failure_code
+from incidentops.ingestion.indexer import (
+    INDEX_REASON_KEY,
+    INDEX_REASON_REINDEX,
+    delete_document_vectors,
+    index_normalized_documents,
+    prune_stale_documents,
+)
 from incidentops.ingestion.normalized import (
     BatchIngestResult,
     DocumentBatchError,
@@ -33,7 +39,7 @@ from incidentops.observability.metrics import incr
 from incidentops.operations.service import record_operational_event
 from incidentops.retrieval.embeddings import embed_texts_async
 from incidentops.retrieval.cache import invalidate_project
-from incidentops.retrieval.vector_store import QdrantVectorStore, VectorStoreError
+from incidentops.retrieval.vector_store import QdrantVectorStore, VectorStoreError, chunk_point
 from incidentops.schemas.api import (
     BatchIngestErrorResponse,
     BatchIngestRequest,
@@ -50,13 +56,16 @@ from incidentops.schemas.api import (
     SyncStartRequest,
     SyncStatusResponse,
 )
-from incidentops.security.rbac import require_project_role
 from incidentops.security.audit import record_audit_event
 from incidentops.security.source_config import find_source_config_secret_violations
 
 router = APIRouter(prefix="/v1", tags=["Sources"])
 
 SYNC_STATUSES = {"running", "success", "partial_success", "failed", "cancelled"}
+# Syncs that saw the whole source; documents they did not see are pruned.
+PRUNING_SYNC_STATUSES = {"success", "partial_success"}
+_REINDEX_PAGE_SIZE = 128
+_SEEN_MARK_BATCH_SIZE = 500
 
 
 @router.post("/projects/{project_id}/sources", response_model=SourceResponse, status_code=status.HTTP_201_CREATED)
@@ -69,7 +78,6 @@ async def create_source(
     user=Depends(require_user),
 ):
     await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.admin)
-    await require_project_role(db, project_id, user.id, ProjectRole.admin)
     violations = find_source_config_secret_violations(body.config)
     if violations:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="config contains raw secret material; use credentials_ref")
@@ -135,7 +143,6 @@ async def delete_source(
     user=Depends(require_user),
 ):
     await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.admin)
-    await require_project_role(db, project_id, user.id, ProjectRole.admin)
     source = await _require_source(db, source_id)
     if source.project_id != project_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Source not found for project")
@@ -184,7 +191,6 @@ async def reindex_source(
     user=Depends(require_user),
 ):
     await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.admin)
-    await require_project_role(db, project_id, user.id, ProjectRole.admin)
     source = await _require_source(db, source_id)
     if source.project_id != project_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Source not found for project")
@@ -313,7 +319,6 @@ async def register_collector(
     user=Depends(require_user),
 ):
     await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.admin)
-    await require_project_role(db, project_id, user.id, ProjectRole.admin)
     now = _utcnow()
     statement = (
         insert(Collector)
@@ -363,7 +368,7 @@ async def start_sync(
     user=Depends(require_user),
 ):
     source = await _require_source(db, source_id)
-    await require_project_role(db, source.project_id, user.id, ProjectRole.admin)
+    await ensure_project_access(db, source.project_id, user, settings, minimum_role=ProjectRole.admin)
     enforce_json_size(body.diagnostics, settings.max_sync_diagnostics_bytes, "sync diagnostics")
     collector = await _validate_collector(db, source.project_id, body.collector_id)
     sync = SourceSync(
@@ -406,7 +411,7 @@ async def ingest_documents_batch(
     user=Depends(require_user),
 ):
     source = await _require_source(db, source_id)
-    await require_project_role(db, source.project_id, user.id, ProjectRole.admin)
+    await ensure_project_access(db, source.project_id, user, settings, minimum_role=ProjectRole.admin)
     await check_rate_limit(
         db,
         settings,
@@ -418,6 +423,8 @@ async def ingest_documents_batch(
         action="documents_batch_ingest",
     )
     sync = await _require_sync(db, body.sync_id, source.id)
+    if sync.status != "running":
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="sync is not running")
     await _validate_collector(db, source.project_id, body.collector_id)
     _validate_sync_collector(sync, body.collector_id)
     if sync.collector_id is None and body.collector_id is not None:
@@ -447,6 +454,8 @@ async def ingest_documents_batch(
             )
         for document in body.documents
     ]
+    # Everything received in this sync (valid or not) is protected from pruning.
+    await _mark_documents_seen(db, source, sync.id, [document.external_id for document in body.documents])
     queued_index_jobs = 0
     if settings.rag_async_indexing:
         validated_documents: list[NormalizedDocument] = []
@@ -462,7 +471,7 @@ async def ingest_documents_batch(
                     DocumentBatchError(
                         external_id=validation.external_id,
                         path=validation.path,
-                        code="duplicate_external_id",
+                        code=normalize_failure_code("duplicate_external_id"),
                         error="duplicate external_id in batch",
                         message="duplicate external_id in batch",
                     )
@@ -470,22 +479,37 @@ async def ingest_documents_batch(
                 continue
             seen_external_ids.add(validation.external_id)
             validated_documents.append(validation)
-        index_jobs = [
-            IndexJob(
-                project_id=source.project_id,
-                source_id=source.id,
-                sync_id=sync.id,
-                normalized_payload_json=document.model_dump(mode="json"),
-                content_hash=document.content_hash,
-                index_version=settings.vector_index_version,
+        existing_hashes = await _existing_document_hashes(
+            db, source, [document.external_id for document in validated_documents]
+        )
+        index_jobs: list[IndexJob] = []
+        created = updated = skipped_unchanged = 0
+        for document in validated_documents:
+            if document.external_id in existing_hashes:
+                if existing_hashes[document.external_id] == document.content_hash:
+                    skipped_unchanged += 1
+                    continue
+                updated += 1
+            else:
+                created += 1
+            index_jobs.append(
+                IndexJob(
+                    project_id=source.project_id,
+                    source_id=source.id,
+                    sync_id=sync.id,
+                    normalized_payload_json=document.model_dump(mode="json"),
+                    content_hash=document.content_hash,
+                    index_version=settings.vector_index_version,
+                )
             )
-            for document in validated_documents
-        ]
         db.add_all(index_jobs)
         await db.flush()
         queued_index_jobs = len(index_jobs)
         result = BatchIngestResult(
             received=len(normalized_documents),
+            created=created,
+            updated=updated,
+            skipped_unchanged=skipped_unchanged,
             skipped_invalid=len(validation_errors),
             errors=validation_errors,
             embedding_backend=settings.embedding_model,
@@ -620,7 +644,7 @@ async def finish_sync(
     user=Depends(require_user),
 ):
     source = await _require_source(db, source_id)
-    await require_project_role(db, source.project_id, user.id, ProjectRole.admin)
+    await ensure_project_access(db, source.project_id, user, settings, minimum_role=ProjectRole.admin)
     enforce_json_size(body.diagnostics, settings.max_sync_diagnostics_bytes, "sync diagnostics")
     enforce_json_size(body.coverage, settings.max_sync_diagnostics_bytes, "sync coverage")
     sync = await _require_sync(db, sync_id, source.id)
@@ -630,7 +654,7 @@ async def finish_sync(
         if sync.status == body.status or (sync.status == "partial_success" and body.status == "success"):
             return SyncStatusResponse(sync_id=sync.id, status=sync.status)
         raise HTTPException(status.HTTP_409_CONFLICT, detail="sync is already finished")
-    diagnostics = {**(sync.diagnostics_json or {}), **(body.diagnostics or {})}
+    diagnostics = _merge_finish_diagnostics(sync.diagnostics_json or {}, body.diagnostics or {})
     parser_errors = max(
         sync.parser_errors,
         int(diagnostics.get("parser_errors", sync.parser_errors) or 0),
@@ -670,6 +694,18 @@ async def finish_sync(
     source.last_sync_finished_at = sync.finished_at
     source.last_sync_status = "indexing" if pending_index_jobs else effective_status
     source.last_error = sync.error_message
+
+    pruned_document_ids: list[uuid.UUID] = []
+    if effective_status in PRUNING_SYNC_STATUSES:
+        if sync.documents_received <= 0:
+            # Never wipe a source because a collector sent nothing.
+            diagnostics["stale_prune_skipped"] = "no_documents_received"
+        else:
+            pruned = await prune_stale_documents(db, source.project_id, source.id, sync.id)
+            pruned_document_ids = pruned.document_ids
+            diagnostics["stale_documents_deleted"] = len(pruned.document_ids)
+            diagnostics["stale_chunks_deleted"] = pruned.chunks_deleted
+    sync.diagnostics_json = diagnostics
     await record_audit_event(
         db,
         action="sync_failed" if effective_status == "failed" else "sync_finished",
@@ -684,10 +720,21 @@ async def finish_sync(
             "files_seen": sync.files_seen,
             "files_skipped": sync.files_skipped,
             "parser_errors": sync.parser_errors,
+            "stale_documents_deleted": len(pruned_document_ids),
         },
     )
     await db.flush()
     await db.commit()
+    if pruned_document_ids:
+        # Postgres is authoritative and already committed; orphaned points are
+        # dropped at read time, so a Qdrant failure here is recorded, not raised.
+        vectors_deleted = await delete_document_vectors(
+            source.project_id, source.id, pruned_document_ids, settings
+        )
+        if not vectors_deleted:
+            sync.diagnostics_json = {**diagnostics, "stale_vector_cleanup_failed": True}
+            await db.commit()
+        await invalidate_project(source.project_id)
     return SyncStatusResponse(sync_id=sync.id, status=sync.status)
 
 
@@ -822,6 +869,81 @@ def _merge_batch_diagnostics(
     diagnostics["warnings"] = result.warnings
     diagnostics["embedding_backend"] = result.embedding_backend
     return diagnostics
+
+
+def _merge_finish_diagnostics(core: dict, collector: dict) -> dict:
+    """Merge collector finish diagnostics into Core's without losing Core counts.
+
+    Keys only the collector reports are added. For keys both sides report,
+    counters take the larger value (per key for count maps), lists are unioned
+    and other values keep Core's. Differing collector values are kept under
+    ``collector_reported`` for inspection.
+    """
+    merged = dict(core)
+    reported: dict = dict(merged.get("collector_reported") or {})
+    for key, value in collector.items():
+        if key not in merged or merged[key] in (None, "", [], {}):
+            merged[key] = value
+            continue
+        current = merged[key]
+        if current != value:
+            reported[key] = value
+        if _is_count(current) and _is_count(value):
+            merged[key] = max(int(current), int(value))
+        elif isinstance(current, dict) and isinstance(value, dict):
+            combined = dict(current)
+            for sub_key, sub_value in value.items():
+                existing = combined.get(sub_key)
+                if _is_count(existing) and _is_count(sub_value):
+                    combined[sub_key] = max(int(existing), int(sub_value))
+                elif existing is None:
+                    combined[sub_key] = sub_value
+            merged[key] = combined
+        elif isinstance(current, list) and isinstance(value, list):
+            merged[key] = current + [item for item in value if item not in current]
+    if reported:
+        merged["collector_reported"] = reported
+    return merged
+
+
+def _is_count(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+async def _mark_documents_seen(
+    db: AsyncSession,
+    source: Source,
+    sync_id: uuid.UUID,
+    external_ids: list[str],
+) -> None:
+    unique_ids = list(dict.fromkeys(external_id for external_id in external_ids if external_id))
+    for start in range(0, len(unique_ids), _SEEN_MARK_BATCH_SIZE):
+        await db.execute(
+            update(Document)
+            .where(
+                Document.project_id == source.project_id,
+                Document.source_id == source.id,
+                Document.external_id.in_(unique_ids[start : start + _SEEN_MARK_BATCH_SIZE]),
+            )
+            .values(last_seen_sync_id=sync_id)
+        )
+
+
+async def _existing_document_hashes(
+    db: AsyncSession,
+    source: Source,
+    external_ids: list[str],
+) -> dict[str, str | None]:
+    if not external_ids:
+        return {}
+    result = await db.execute(
+        select(Document.external_id, Document.content_hash).where(
+            Document.project_id == source.project_id,
+            Document.source_id == source.id,
+            Document.external_id.in_(external_ids),
+        )
+    )
+    return {str(external_id): content_hash for external_id, content_hash in result.all()}
 
 
 def _normalize_coverage(coverage: dict, diagnostics: dict) -> dict:
