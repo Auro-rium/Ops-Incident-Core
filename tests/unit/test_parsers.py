@@ -313,6 +313,11 @@ class TestIncidentParser:
         assert {"incident_timeline", "incident_root_cause", "incident_action"} <= chunk_types
 
     def test_extracts_service(self):
-        md = "# Checkout Timeout\n## Summary\nCheckout was slow"
+        md = "# Checkout Timeout\nservice: checkout\n## Summary\nCheckout was slow"
         chunks = parse_incident(md, "incident.md")
         assert chunks[0].service_name == "checkout"
+
+    def test_does_not_guess_service_from_title(self):
+        md = "# Checkout Timeout\n## Summary\nCheckout was slow"
+        chunks = parse_incident(md, "incident.md")
+        assert chunks[0].service_name is None

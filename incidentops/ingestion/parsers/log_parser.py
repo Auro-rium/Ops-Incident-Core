@@ -5,14 +5,14 @@ Log parser — parse structured log lines and chunk by time windows.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 from incidentops.ingestion.chunking.metadata import extract_service_from_path
 from incidentops.ingestion.schemas import RawChunk
 
 # Regex for common structured log format
 LOG_LINE_RE = re.compile(
-    r"^(?P<timestamp>\d{4}-\d{2}-\d{2}T[\d:.]+Z?)\s+"
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)\s+"
     r"(?P<level>\w+)\s+"
     r"(?P<logger>[\w.]+)\s+"
     r"(?:\[trace_id=(?P<trace_id>[\w_]+)\]\s*)?"
@@ -87,11 +87,9 @@ def _build_log_chunk(
         if match:
             groups = match.groupdict()
             if groups.get("timestamp"):
-                try:
-                    ts = groups["timestamp"].rstrip("Z")
-                    timestamps.append(datetime.fromisoformat(ts))
-                except ValueError:
-                    pass
+                parsed = _parse_timestamp(groups["timestamp"])
+                if parsed is not None:
+                    timestamps.append(parsed)
             if groups.get("deploy_hash"):
                 deploy_hashes.add(groups["deploy_hash"])
             if groups.get("trace_id"):
@@ -172,6 +170,20 @@ def _is_error_line(line: str) -> bool:
     if match and (match.group("level") or "").upper() in {"ERROR", "FATAL", "CRITICAL"}:
         return True
     return bool(re.search(r"\b(?:error|fatal|exception|panic|stack trace)\b", line, re.IGNORECASE))
+
+
+def _parse_timestamp(value: str) -> datetime | None:
+    """Parse an ISO-8601 log timestamp as an aware datetime; naive means UTC."""
+    raw = value.strip()
+    if raw.endswith(("Z", "z")):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _infer_service_from_path(path: str) -> str | None:

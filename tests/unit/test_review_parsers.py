@@ -275,3 +275,48 @@ def test_config_keys_beyond_limit_go_to_overflow_chunk():
     assert overflow.metadata["config_keys"] == [f"key{i}" for i in range(50, 60)]
     assert "key59" in overflow.text
     assert (overflow.start_line, overflow.end_line) == (51, 60)
+
+
+# ── Log, deploy and incident parsers ──────────
+
+from datetime import datetime, timezone  # noqa: E402
+
+from incidentops.ingestion.parsers.deploy_parser import parse_deploy_history  # noqa: E402
+from incidentops.ingestion.parsers.incident_parser import parse_incident  # noqa: E402
+from incidentops.ingestion.parsers.log_parser import parse_logs  # noqa: E402
+
+
+def test_log_timestamps_are_timezone_aware_utc():
+    content = (
+        "2026-03-14T10:00:00Z ERROR checkout.api boom\n"
+        "2026-03-14T10:00:05 INFO checkout.api naive\n"
+        "2026-03-14T12:00:10+02:00 INFO checkout.api offset\n"
+    )
+    chunk = parse_logs(content, "logs/checkout.log")[0]
+    assert chunk.timestamp_start == datetime(2026, 3, 14, 10, 0, 0, tzinfo=timezone.utc)
+    assert chunk.timestamp_end == datetime(2026, 3, 14, 10, 0, 10, tzinfo=timezone.utc)
+    assert chunk.timestamp_start.tzinfo is not None
+
+
+@pytest.mark.parametrize("value", [1773482400, 1773482400.0, 1773482400000])
+def test_deploy_history_accepts_epoch_deployed_at(value):
+    chunks = parse_deploy_history(json.dumps([{"deploy_hash": "abc123", "deployed_at": value}]), "deploys/history.json")
+    assert chunks[0].timestamp_start == datetime(2026, 3, 14, 10, 0, tzinfo=timezone.utc)
+
+
+def test_deploy_history_naive_iso_is_utc():
+    chunks = parse_deploy_history(json.dumps([{"deploy_hash": "abc123", "deployed_at": "2026-03-14T10:00:00"}]), "d.json")
+    assert chunks[0].timestamp_start == datetime(2026, 3, 14, 10, 0, tzinfo=timezone.utc)
+
+
+def test_incident_service_is_not_taken_from_h1_word():
+    chunks = parse_incident("# Summary\nservice was slow\n## Root Cause\nDisk\n", "incidents/x.md")
+    assert all(chunk.service_name is None for chunk in chunks)
+
+
+def test_incident_service_from_service_line_and_front_matter():
+    chunks = parse_incident("# Outage\n## Summary\nService: Checkout-API\n", "incidents/x.md")
+    assert {chunk.service_name for chunk in chunks} == {"checkout-api"}
+    front = "---\ntitle: Outage\nservice: payments\n---\n# Outage\n## Summary\nslow\n"
+    chunks = parse_incident(front, "incidents/y.md")
+    assert {chunk.service_name for chunk in chunks} == {"payments"}
