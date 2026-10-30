@@ -11,12 +11,6 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
-class HealthResponse(BaseModel):
-    status: str
-    database: str
-    vector_index: str
-
-
 class CreateProjectRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=256)
     demo_mode: bool = False

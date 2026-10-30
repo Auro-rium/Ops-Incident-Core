@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     azure_openai_api_version: str = "2024-10-21"
     azure_openai_chat_deployment: str = ""
     azure_openai_embedding_deployment: str = ""
-    require_azure_openai: bool = True
+    require_azure_openai: bool = False
     hf_api_token: str = Field(
         "",
         validation_alias=AliasChoices("HF_API_TOKEN", "HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN"),
@@ -182,6 +182,18 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORS_ALLOW_ORIGINS", "CORS_ORIGINS"),
     )
     allow_wildcard_cors: bool = True
+    # Review fixes: auth/MCP/infra
+    # Comma-separated CIDRs whose X-Forwarded-For header is trusted for client IPs.
+    trusted_proxies: str = ""
+    login_max_failed_attempts: int = 10
+    login_lockout_minutes: int = 15
+    # Login attempts allowed per email across all client IPs within RATE_LIMIT_WINDOW_SECONDS.
+    login_email_request_limit: int = 30
+    ingest_rate_limit_window_seconds: int = 3600
+    # Optional bearer token that lets Prometheus scrape /metrics without a user JWT.
+    metrics_token: str = ""
+    # Bearer token required from MCP clients on HTTP transports (stdio is unaffected).
+    mcp_inbound_token: str = ""
     mcp_enabled: bool = False
     mcp_core_api_url: str = Field(
         "http://127.0.0.1:8000",

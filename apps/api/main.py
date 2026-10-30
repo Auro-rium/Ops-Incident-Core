@@ -13,10 +13,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from incidentops.config.settings import Settings, get_settings
 from incidentops.config.validation import validate_startup_settings
-from incidentops.db.session import create_tables
+from incidentops.db.session import _get_session_factory, create_tables
 from incidentops.observability.metrics import incr, observe_latency
 from incidentops.observability.tracing import configure_tracing
 from incidentops.retrieval.vector_store import QdrantVectorStore
+from incidentops.security.auth import ensure_local_seed_admin
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-5s %(name)s — %(message)s")
 logger = logging.getLogger("incidentops.api")
@@ -43,9 +44,29 @@ async def initialize_database_for_startup(settings: Settings) -> None:
     await create_tables()
 
 
+async def seed_local_admin_on_startup(settings: Settings) -> None:
+    """Create the local demo admin once at startup (never in staging/production)."""
+    if settings.is_production_like or not settings.allow_local_seed_admin:
+        return
+    try:
+        async with _get_session_factory()() as db:
+            await ensure_local_seed_admin(db, settings)
+            await db.commit()
+    except Exception:
+        # A fresh local DB may not be migrated yet; login simply fails until it is.
+        logger.warning("Skipping local seed admin; database not ready", exc_info=True)
+
+
+def resolve_cors_origins(settings: Settings) -> list[str]:
+    # No configured origins means no cross-origin access, never an implicit "*".
+    return settings.cors_origins_list
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await initialize_database_for_startup(get_settings())
+    settings = get_settings()
+    await initialize_database_for_startup(settings)
+    await seed_local_admin_on_startup(settings)
     incr("app_startups")
     yield
 
@@ -59,7 +80,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=get_settings().cors_origins_list or ["*"],
+    allow_origins=resolve_cors_origins(get_settings()),
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -144,7 +144,7 @@ def test_capabilities_endpoint_returns_collector_contract():
     assert payload["limits"]["max_documents_per_batch"] == get_settings().max_documents_per_batch
     assert payload["limits"]["max_document_bytes"] == get_settings().max_document_bytes
     assert payload["limits"]["max_batch_bytes"] == get_settings().max_batch_bytes
-    assert payload["limits"]["max_batch_size"] == get_settings().max_batch_bytes
+    assert payload["limits"]["max_batch_bytes"] == get_settings().max_batch_bytes
     assert payload["endpoints"]["batch_upload"] == "/v1/sources/{source_id}/documents/batch"
     assert payload["endpoints"]["register_collector"] == "/v1/projects/{project_id}/collectors/register"
     assert payload["endpoints"]["run_events"] == "/v1/runs/{run_id}/events"
