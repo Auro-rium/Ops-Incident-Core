@@ -50,7 +50,13 @@ async def execute_run(
 ) -> AgentRun:
     settings = settings or get_settings()
     started = time.time()
-    state = InvestigationState(run_id=str(run.id), project_id=str(run.project_id), user_query=run.user_query, status="running")
+    state = InvestigationState(
+        run_id=str(run.id),
+        project_id=str(run.project_id),
+        user_query=run.user_query,
+        status="running",
+        create_issue_draft=create_issue_draft,
+    )
     run.status = RunStatus.running
     run.error = None
     await append_run_event(db, run.id, "run_started", payload={"status": "running"})
@@ -228,7 +234,7 @@ async def _persist_drafts(db: AsyncSession, run_id, state: InvestigationState) -
                     status=DraftStatus.draft,
                 )
             )
-    if state.issue_draft:
+    if state.issue_draft and state.create_issue_draft:
         existing_issue = await db.execute(select(IssueDraft).where(IssueDraft.run_id == run_id))
         if not existing_issue.scalar_one_or_none():
             db.add(
@@ -240,7 +246,7 @@ async def _persist_drafts(db: AsyncSession, run_id, state: InvestigationState) -
                     status=DraftStatus.draft,
                 )
             )
-        await db.flush()
+    await db.flush()
 
 
 async def resume_after_approval(db: AsyncSession, run: AgentRun, approved: bool, rationale: str | None) -> AgentRun:
