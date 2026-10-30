@@ -25,7 +25,7 @@ def test_collector_redacts_before_normalized_payload():
     content, count = redact("token=sk-abcdefghijklmnopqrstuvwxyz0123456789")
     assert count == 1
     assert "sk-" not in content
-    assert "[REDACTED:openai_key]" in content
+    assert "[REDACTED_API_KEY]" in content
 
 
 def test_collector_go_and_proto_metadata_and_hints_are_deterministic():
