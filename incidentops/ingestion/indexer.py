@@ -460,10 +460,6 @@ def _parse_normalized_document(
     if suffix == ".json" and any(token in lower_path for token in ("deploy", "release", "commit")):
         chunks = parse_deploy_history(document.content, document.path)
         return chunks, None if chunks else "invalid or unsupported deploy JSON structure"
-    if source_type == "incident" or "incident" in lower_path or "postmortem" in lower_path:
-        return parse_incident(document.content, document.path), None
-    if source_type == "code" and suffix == ".py":
-        return parse_python(document.content, document.path, service_name=service_name), None
     if suffix == ".py":
         return parse_python(document.content, document.path, service_name=service_name), None
     if suffix == ".go":
@@ -475,6 +471,10 @@ def _parse_normalized_document(
         return parse_java(document.content, document.path, service_name=service_name), None
     if suffix == ".proto":
         return parse_proto(document.content, document.path, service_name=service_name), None
+    # Incident text is identified by an incidents/ or postmortems/ directory
+    # segment, never by a substring such as "incidentops/".
+    if source_type == "incident" or classify_source_type(document.path) == "incident":
+        return parse_incident(document.content, document.path), None
     if source_type == "code":
         return _parse_generic_code(document.content, document.path, service_name=service_name), None
     if suffix in {".yaml", ".yml", ".toml", ".ini"}:
