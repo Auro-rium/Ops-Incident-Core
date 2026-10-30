@@ -21,8 +21,9 @@ def split_text_by_tokens(text: str, max_tokens: int = 512, overlap_tokens: int =
     """
     words = text.split()
     # Rough conversion: 1.3 tokens per word
-    max_words = int(max_tokens / 1.3)
-    overlap_words = int(overlap_tokens / 1.3)
+    max_words = max(1, int(max_tokens / 1.3))
+    # Overlap must stay below the window size or the cursor never advances.
+    overlap_words = min(max(0, int(overlap_tokens / 1.3)), max_words - 1)
 
     if len(words) <= max_words:
         return [text]
@@ -31,8 +32,11 @@ def split_text_by_tokens(text: str, max_tokens: int = 512, overlap_tokens: int =
     start = 0
     while start < len(words):
         end = start + max_words
-        chunk_words = words[start:end]
-        chunks.append(" ".join(chunk_words))
-        start = end - overlap_words
+        chunks.append(" ".join(words[start:end]))
+        if end >= len(words):
+            break
+        next_start = end - overlap_words
+        assert next_start > start, "split_text_by_tokens must advance"
+        start = next_start
 
     return chunks

@@ -469,7 +469,7 @@ def _parse_normalized_document(
     if suffix == ".go":
         return parse_go(document.content, document.path, service_name=service_name), None
     if suffix in {".js", ".ts", ".jsx", ".tsx"}:
-        language = suffix.lstrip(".") if suffix != ".tsx" else "ts"
+        language = {".jsx": "js", ".tsx": "ts"}.get(suffix, suffix.lstrip("."))
         return parse_jsts(document.content, document.path, service_name=service_name, language=language), None
     if suffix == ".java":
         return parse_java(document.content, document.path, service_name=service_name), None

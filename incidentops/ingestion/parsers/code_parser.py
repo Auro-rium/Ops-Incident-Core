@@ -22,7 +22,9 @@ JS_DECL_RE = re.compile(
     r"^\s*(?:export\s+)?(?:(class|interface|type|enum)\s+([A-Za-z_]\w*)|(async\s+)?function\s+([A-Za-z_]\w*)|const\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\(|let\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\(|var\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\()"
 )
 JAVA_DECL_RE = re.compile(
-    r"^\s*(?:(?:public|private|protected|static|final|abstract)\s+)*(class|interface|enum|record|void|[A-Za-z_][\w<>\[\]]+)\s+([A-Za-z_]\w*)\s*(?:\(|\{)"
+    r"^\s*(?:(?:public|private|protected|static|final|abstract)\s+)*"
+    r"(?!(?:return|if|else|for|while|switch|catch|new|throw)\b)"
+    r"(class|interface|enum|record|void|[A-Za-z_][\w<>\[\]]+)\s+([A-Za-z_]\w*)\s*(?:\(|\{)"
 )
 
 
@@ -410,8 +412,10 @@ def _parse_regex_language(
         groups = [group for group in match.groups() if group]
         if not groups:
             continue
-        kind, symbol = _resolve_regex_declaration(groups, language)
-        declarations.append((index, kind, symbol))
+        resolved = _resolve_regex_declaration(groups, language)
+        if resolved is None:
+            continue
+        declarations.append((index, *resolved))
 
     if not declarations:
         return [
@@ -471,14 +475,16 @@ def _parse_regex_language(
     return chunks
 
 
-def _resolve_regex_declaration(groups: list[str], language: str) -> tuple[str, str]:
-    if language in {"js", "ts"}:
+def _resolve_regex_declaration(groups: list[str], language: str) -> tuple[str, str] | None:
+    if language in {"js", "ts", "jsx", "tsx"}:
         if groups[0] in {"class", "interface", "type", "enum"}:
             return groups[0], groups[1]
         for symbol in groups[3:]:
             if symbol:
                 return "function", symbol
         return "function", groups[-1]
+    if len(groups) < 2:
+        return None
     kind = groups[0].lower()
     symbol = groups[1]
     if kind not in {"class", "interface", "enum", "record"}:
