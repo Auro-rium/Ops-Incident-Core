@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 import httpx
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from incidentops.config.settings import Settings, get_settings
@@ -18,6 +19,33 @@ from incidentops.retrieval.query_intent import classify_query_intent
 from incidentops.security.path_policy import validate_path_under_allowed_roots
 
 DEFAULT_CASES_PATH = Path(__file__).parent / "golden_cases.jsonl"
+
+# Default pass thresholds; Settings may override them with the same lower-case names.
+EVAL_PASS_MIN_EVIDENCE_RECALL = 0.5
+EVAL_PASS_MAX_FORBIDDEN_HITS = 0
+
+_TERM_STOPWORDS = frozenset(
+    {"about", "added", "after", "before", "call", "caused", "from", "into", "that", "this", "under", "with", "when", "were"}
+)
+
+
+def normalize_case(case: dict) -> dict:
+    """Map legacy golden-case fields onto the canonical names the runner scores."""
+    normalized = dict(case)
+    if "expected_terms" not in normalized and normalized.get("expected_root_cause"):
+        normalized["expected_terms"] = _root_cause_terms(str(normalized["expected_root_cause"]))
+    if "forbidden_terms" not in normalized and normalized.get("must_not_claim"):
+        normalized["forbidden_terms"] = [str(term) for term in normalized["must_not_claim"]]
+    return normalized
+
+
+def _root_cause_terms(text: str) -> list[str]:
+    terms: list[str] = []
+    for raw in text.lower().split():
+        word = raw.strip(".,;:()[]\"'")
+        if len(word) >= 4 and word not in _TERM_STOPWORDS and word not in terms:
+            terms.append(word)
+    return terms
 
 
 def resolve_cases_path(cases_path: str | Path | None = None, settings: Settings | None = None) -> Path:
@@ -40,7 +68,7 @@ def load_cases(cases_path: str | Path | None = None, settings: Settings | None =
         for line in handle:
             line = line.strip()
             if line:
-                cases.append(json.loads(line))
+                cases.append(normalize_case(json.loads(line)))
     return cases
 
 
@@ -50,6 +78,7 @@ def evaluate_case_output(
     answer_payload: str,
     evidence_source_types: list[str] | None = None,
 ) -> dict:
+    case = normalize_case(case)
     expected_documents = case.get("expected_documents", [])
     expected_terms = [term.lower() for term in case.get("expected_terms", [])]
     forbidden_terms = [term.lower() for term in case.get("forbidden_terms", [])]
@@ -89,9 +118,10 @@ async def run_eval_persisted(
     top_k: int = 10,
     cases_path: str | Path | None = None,
     settings: Settings | None = None,
+    cases: list[dict] | None = None,
 ) -> EvalRun:
     run = await create_eval_run(db, project_id)
-    return await execute_eval_run(db, run, top_k=top_k, cases_path=cases_path, settings=settings)
+    return await execute_eval_run(db, run, top_k=top_k, cases_path=cases_path, settings=settings, cases=cases)
 
 
 async def create_eval_run(db: AsyncSession, project_id: uuid.UUID) -> EvalRun:
@@ -107,6 +137,7 @@ async def execute_eval_run(
     top_k: int = 10,
     cases_path: str | Path | None = None,
     settings: Settings | None = None,
+    cases: list[dict] | None = None,
 ) -> EvalRun:
     settings = settings or get_settings()
     run_started = time.time()
@@ -115,7 +146,10 @@ async def execute_eval_run(
     run.summary_json = {"status": "running"}
     await db.flush()
     try:
-        cases = load_cases(cases_path, settings=settings)
+        if cases is not None:
+            cases = [normalize_case(case) for case in cases]
+        else:
+            cases = load_cases(cases_path, settings=settings)
     except Exception as exc:
         run.status = EvalStatus.failed
         incr("eval_failures_total")
@@ -131,6 +165,10 @@ async def execute_eval_run(
         observe_latency("eval_run_duration", (time.time() - run_started) * 1000)
         return run
 
+    # A retried job must not duplicate (eval_run_id, case_id) rows.
+    await db.execute(delete(EvalRunCase).where(EvalRunCase.eval_run_id == run.id))
+    min_recall = float(getattr(settings, "eval_pass_min_evidence_recall", EVAL_PASS_MIN_EVIDENCE_RECALL))
+    max_forbidden = int(getattr(settings, "eval_pass_max_forbidden_hits", EVAL_PASS_MAX_FORBIDDEN_HITS))
     results = []
     for case in cases:
         incr("eval_cases_total")
@@ -159,8 +197,10 @@ async def execute_eval_run(
                 answer_payload,
                 [str(item.get("source_type") or "unknown_text") for item in investigation.evidence],
             )
+            usage = _llm_usage(investigation)
             case_result.update(
                 {
+                    **usage,
                     "case_id": case.get("id", ""),
                     "question": question,
                     "expected_documents": case.get("expected_documents", []),
@@ -194,6 +234,11 @@ async def execute_eval_run(
                 "latency_ms": int((time.time() - started) * 1000),
                 "error": _safe_error(exc),
             }
+        case_result["passed"] = (
+            not case_result.get("error")
+            and float(case_result["evidence_recall"]) >= min_recall
+            and len(case_result["forbidden_hits"]) <= max_forbidden
+        )
         results.append(case_result)
         db.add(
             EvalRunCase(
@@ -207,8 +252,16 @@ async def execute_eval_run(
     avg_recall = sum(result["evidence_recall"] for result in results) / len(results) if results else 0.0
     avg_term_coverage = sum(result["term_coverage"] for result in results) / len(results) if results else 0.0
     forbidden_hits = sum(1 for result in results if result["forbidden_hits"])
-    failed_cases = sum(1 for result in results if result.get("error"))
-    passed_cases = len(results) - failed_cases
+    error_cases = sum(1 for result in results if result.get("error"))
+    passed_cases = sum(1 for result in results if result["passed"])
+    failed_cases = len(results) - passed_cases
+    input_tokens = sum(int(result.get("input_tokens") or 0) for result in results)
+    output_tokens = sum(int(result.get("output_tokens") or 0) for result in results)
+    model_call_count = sum(int(result.get("model_call_count") or 0) for result in results)
+    estimated_cost_usd = (
+        input_tokens / 1000 * float(getattr(settings, "llm_input_cost_per_1k_tokens_usd", 0.0) or 0.0)
+        + output_tokens / 1000 * float(getattr(settings, "llm_output_cost_per_1k_tokens_usd", 0.0) or 0.0)
+    )
     zero_result_count = sum(1 for result in results if not result.get("retrieved_documents"))
     citation_count = sum(len(result.get("retrieved_documents") or []) for result in results)
     citation_rate = sum(1 for result in results if result.get("retrieved_documents")) / len(results) if results else 0.0
@@ -221,6 +274,8 @@ async def execute_eval_run(
         "total_cases": len(results),
         "passed_cases": passed_cases,
         "failed_cases": failed_cases,
+        "error_cases": error_cases,
+        "pass_thresholds": {"min_evidence_recall": min_recall, "max_forbidden_hits": max_forbidden},
         "avg_evidence_recall": avg_recall,
         "avg_term_coverage": avg_term_coverage,
         "forbidden_hit_count": forbidden_hits,
@@ -232,10 +287,10 @@ async def execute_eval_run(
         "zero_result_count": zero_result_count,
         "citation_count": citation_count,
         "citation_rate": citation_rate,
-        "model_call_count": 0,
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "estimated_cost_usd": 0.0,
+        "model_call_count": model_call_count,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "estimated_cost_usd": round(estimated_cost_usd, 6),
         "rerank_gain_available": False,
         "rerank_gain_cases": 0,
         "retrieval_backend": settings.retrieval_backend,
@@ -252,6 +307,18 @@ async def execute_eval_run(
     await db.refresh(run)
     observe_latency("eval_run_duration", (time.time() - run_started) * 1000)
     return run
+
+
+def _llm_usage(investigation) -> dict:
+    """Token usage reported by the answer path, when it exposes any."""
+    debug = getattr(investigation, "debug", None) or {}
+    usage = getattr(investigation, "usage", None) or debug.get("llm_usage") or debug.get("usage") or {}
+    if not isinstance(usage, dict):
+        return {"model_call_count": 0, "input_tokens": 0, "output_tokens": 0}
+    input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    calls = int(usage.get("model_call_count") or usage.get("calls") or (1 if input_tokens or output_tokens else 0))
+    return {"model_call_count": calls, "input_tokens": input_tokens, "output_tokens": output_tokens}
 
 
 def _safe_error(exc: Exception) -> str:

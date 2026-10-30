@@ -141,7 +141,14 @@ async def execute_eval_run_job(payload: dict, settings: Settings) -> None:
             resource_type="eval_run",
             resource_id=run.id,
         )
-        run = await execute_eval_run(db, run, top_k=top_k, cases_path=cases_path)
+        run = await execute_eval_run(
+            db,
+            run,
+            top_k=top_k,
+            cases_path=cases_path,
+            settings=settings,
+            cases=payload.get("cases"),
+        )
         await record_audit_event(
             db,
             action="eval_job_failed" if run.status == EvalStatus.failed else "eval_job_completed",
@@ -189,11 +196,12 @@ async def execute_evaluator_agent_job(payload: dict, settings: Settings) -> None
                 top_k=top_k,
                 cases_path=cases_path,
                 settings=settings,
+                cases=payload.get("cases"),
             )
         summary = dict(completed_eval.summary_json or {})
-        op_run.model_call_count = 0
-        op_run.input_tokens = 0
-        op_run.output_tokens = 0
+        op_run.model_call_count = int(summary.get("model_call_count") or 0)
+        op_run.input_tokens = int(summary.get("input_tokens") or 0)
+        op_run.output_tokens = int(summary.get("output_tokens") or 0)
         op_run.summary_json = {
             "status": "completed" if completed_eval.status != EvalStatus.failed else "failed",
             "eval_run_id": str(completed_eval.id),
@@ -202,6 +210,7 @@ async def execute_evaluator_agent_job(payload: dict, settings: Settings) -> None
             "avg_evidence_recall": float(summary.get("avg_evidence_recall") or summary.get("avg_recall") or 0.0),
             "wrong_source_type_rate": float(summary.get("wrong_source_type_rate") or 0.0),
             "latency_p95_ms": float(summary.get("latency_p95_ms") or 0.0),
+            "passed_cases": int(summary.get("passed_cases") or 0),
             "model_judging_used": False,
         }
         op_run.status = OperationalRunStatus.completed if completed_eval.status != EvalStatus.failed else OperationalRunStatus.failed

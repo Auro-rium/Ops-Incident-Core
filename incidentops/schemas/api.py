@@ -540,6 +540,8 @@ class EvalRunRequest(BaseModel):
     project_id: UUID
     top_k: int = Field(default=10, ge=1, le=50)
     cases_path: str | None = Field(default=None, min_length=1, max_length=4096)
+    # Inline alternative to cases_path; bounded by MAX_EVAL_CASES_BYTES.
+    cases: list[dict[str, Any]] | None = Field(default=None, min_length=1)
 
 
 class EvalRunResponse(BaseModel):
