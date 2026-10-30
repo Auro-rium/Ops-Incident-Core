@@ -75,7 +75,9 @@ async def enqueue_logging_aggregate(
 
 async def _enqueue(project_id, run_type, job_type, body, request, db, settings, user):
     await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.admin)
-    run = await create_operational_run(db, project_id, run_type, request={}, idempotency_key=body.idempotency_key)
+    # Without a caller key every request would hash identically and replay the first run forever.
+    idempotency_key = body.idempotency_key or f"{run_type}:{uuid.uuid4().hex}"
+    run = await create_operational_run(db, project_id, run_type, request={}, idempotency_key=idempotency_key)
     if run.status.value == "queued":
         await record_audit_event(
             db,
