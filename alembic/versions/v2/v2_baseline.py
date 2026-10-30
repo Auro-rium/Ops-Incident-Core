@@ -17,7 +17,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Keep the complete fresh-install schema in one deterministic migration.
+        # Keep the complete fresh-install schema in one deterministic migration.
         op.execute("CREATE TYPE projectrole AS ENUM ('viewer', 'investigator', 'approver', 'admin');")
         op.execute("CREATE TYPE runstatus AS ENUM ('queued', 'running', 'awaiting_approval', 'approved', 'rejected', 'completed', 'failed');")
         op.execute("CREATE TYPE approvalstatus AS ENUM ('pending', 'approved', 'rejected');")

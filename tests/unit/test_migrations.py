@@ -65,8 +65,8 @@ async def test_production_startup_does_not_call_create_all(monkeypatch):
     )
 
 
-def test_alembic_head_resolves_to_v2_baseline():
-    assert get_head_revision() == "v2_baseline"
+def test_alembic_head_resolves_to_latest_v2_revision():
+    assert get_head_revision() == "v2_0002_review_fixes"
 
 
 def test_required_tables_match_current_models():
