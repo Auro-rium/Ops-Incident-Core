@@ -32,6 +32,7 @@ from incidentops.retrieval.query_intent import (
 )
 from incidentops.retrieval.hybrid_search import hybrid_search, hybrid_search_with_debug, known_service_names
 from incidentops.retrieval.reranker import rerank_with_debug_async
+from incidentops.retrieval.source_types import chunk_source_type
 
 
 async def investigate(
@@ -196,13 +197,7 @@ def _build_cited_answer(evidence: list[dict], selected, supported: bool, missing
 
 
 def _raw_source_types(results: list[dict]) -> set[str]:
-    source_types: set[str] = set()
-    for result in results:
-        metadata = result["chunk"].metadata_json or {}
-        source_type = metadata.get("source_type")
-        if isinstance(source_type, str) and source_type:
-            source_types.add(source_type)
-    return source_types
+    return {chunk_source_type(result["chunk"]) for result in results} - {"unknown_text"}
 
 
 def _score_confidence(

@@ -25,7 +25,8 @@ from incidentops.retrieval.query_intent import (
     classify_query_intent,
     investigate_supported,
 )
-from incidentops.retrieval.reranker import rerank_with_debug_async
+from incidentops.retrieval.reranker import DECISIVE_SCORE_GAP, rerank_with_debug_async
+from incidentops.retrieval.source_types import chunk_source_type
 from incidentops.schemas.api import (
     AnswerBody,
     AnswerCitation,
@@ -90,6 +91,7 @@ async def answer(
     llm = get_llm_provider()
     answer_body = None
     message = None
+    warning = None
     llm_usage = None
     llm_latency_ms = None
     synthesis_mode = "retrieval_only"
@@ -101,35 +103,20 @@ async def answer(
         evidence = direct_evidence
         build_citations(evidence)
         evidence_items = _to_evidence_items(evidence)
-        answer_body = _build_direct_answer(query_intent.intent, evidence)
+        answer_body = _build_direct_answer(query_intent.intent, evidence, settings)
         synthesis_mode = "direct_evidence"
     elif llm.available:
         messages = build_answer_prompt(body.query, evidence, query_intent=query_intent.intent, warnings=warnings)
         llm_response = await llm.chat(messages, temperature=0.1, max_tokens=1024, response_format={"type": "json_object"})
-        if llm_response and "raw_response" not in llm_response:
-            llm_meta = llm_response.get("_meta") or {}
-            llm_usage = {str(k): int(v) for k, v in (llm_meta.get("usage") or {}).items() if isinstance(v, int | float)}
-            llm_latency_ms = int(llm_meta.get("latency_ms", 0) or 0) or None
-            answer_body = AnswerBody(
-                summary=sanitize_output(llm_response.get("summary", "")),
-                likely_root_cause=sanitize_output(llm_response.get("likely_root_cause", "")),
-                confidence=llm_response.get("confidence", "unknown"),
-                affected_services=llm_response.get("affected_services", []),
-                answer_text=sanitize_output(llm_response.get("answer_text", "")) if llm_response.get("answer_text") else None,
-                reasoning=sanitize_output(llm_response.get("reasoning", "")) if llm_response.get("reasoning") else None,
-                suggested_fix=sanitize_output(llm_response.get("suggested_fix", "")) if llm_response.get("suggested_fix") else None,
-                unknowns=llm_response.get("unknowns"),
-                citations=[
-                    AnswerCitation(
-                        label=item["citation"]["label"],
-                        document_path=item.get("document_path", ""),
-                        lines=item["citation"]["lines"],
-                        chunk_id=item["chunk_id"],
-                    )
-                    for item in evidence
-                ],
-            )
+        llm_meta = (llm_response or {}).get("_meta") or {}
+        llm_usage = {str(k): int(v) for k, v in (llm_meta.get("usage") or {}).items() if isinstance(v, int | float)} or None
+        llm_latency_ms = int(llm_meta.get("latency_ms", 0) or 0) or None
+        answer_body, warning = _llm_answer_body(llm_response, evidence)
+        if answer_body is not None:
             synthesis_mode = "llm_synthesis"
+        else:
+            warnings.append(warning)
+            message = "LLM synthesis failed. Returning retrieved evidence only."
     else:
         message = "LLM provider not configured. Returning retrieved evidence only."
     latency_ms = int((time.time() - start) * 1000)
@@ -164,17 +151,12 @@ async def answer(
         llm_latency_ms=llm_latency_ms,
         latency_ms=latency_ms,
         warnings=warnings,
+        warning=warning,
     )
 
 
 def _raw_source_types(results: list[dict]) -> set[str]:
-    source_types: set[str] = set()
-    for result in results:
-        metadata = result["chunk"].metadata_json or {}
-        source_type = metadata.get("source_type")
-        if isinstance(source_type, str) and source_type:
-            source_types.add(source_type)
-    return source_types
+    return {chunk_source_type(result["chunk"]) for result in results} - {"unknown_text"}
 
 
 def _skip_rerank_for_intent(query_intent: str, supported: bool) -> bool:
@@ -220,19 +202,20 @@ def _insufficient_evidence_answer(question: str, evidence: list[dict], warnings:
     )
 
 
-def _build_direct_answer(query_intent: str, evidence: list[dict]) -> AnswerBody | None:
+def _build_direct_answer(query_intent: str, evidence: list[dict], settings: Settings) -> AnswerBody | None:
     if query_intent not in {INTENT_CODE_LOCATION, INTENT_CONFIG_LOOKUP, INTENT_API_CONTRACT} or not evidence:
         return None
+    max_total_chars = settings.direct_answer_max_total_chars
     snippets = [
-        _direct_snippet(item, max_chars=900)
+        _direct_snippet(item, max_chars=settings.direct_answer_max_chars_per_chunk)
         for item in evidence[:2]
     ]
     snippets = [snippet for snippet in snippets if snippet]
     if not snippets:
         return None
     joined = "\n\n".join(snippets)
-    if len(joined) > 4500:
-        joined = joined[:4500].rstrip()
+    if len(joined) > max_total_chars:
+        joined = joined[:max_total_chars].rstrip()
     summary = {
         INTENT_CODE_LOCATION: "Direct code evidence found for this implementation lookup.",
         INTENT_CONFIG_LOOKUP: "Direct configuration evidence found for this lookup.",
@@ -246,7 +229,7 @@ def _build_direct_answer(query_intent: str, evidence: list[dict]) -> AnswerBody 
     return AnswerBody(
         summary=summary,
         likely_root_cause=likely_root_cause,
-        confidence="high",
+        confidence=_direct_answer_confidence(evidence),
         affected_services=sorted({item.get("service_name") for item in evidence if item.get("service_name")}),
         answer_text=sanitize_output(joined),
         reasoning="A direct evidence answer was returned because the highest-ranked retrieved chunks matched the requested code, config, or API location without needing broader synthesis.",
@@ -261,6 +244,91 @@ def _build_direct_answer(query_intent: str, evidence: list[dict]) -> AnswerBody 
             )
             for item in evidence[: min(len(evidence), 2)]
         ],
+    )
+
+
+def _direct_answer_confidence(evidence: list[dict]) -> str:
+    """High only when the top hit clearly beats the runner-up (the reranker's decisive gap)."""
+    if len(evidence) < 2:
+        return "medium"
+    gap = float(evidence[0].get("score") or 0.0) - float(evidence[1].get("score") or 0.0)
+    return "high" if gap >= DECISIVE_SCORE_GAP else "medium"
+
+
+_VALID_CONFIDENCE = {"low", "medium", "high"}
+_LLM_SYNTHESIS_WARNING = "LLM synthesis failed or returned an invalid answer; showing retrieved evidence only"
+
+
+def _llm_answer_body(llm_response: dict | None, evidence: list[dict]) -> tuple[AnswerBody | None, str | None]:
+    """Validate an LLM JSON reply into an answer, or explain why it was rejected."""
+    if not isinstance(llm_response, dict) or "raw_response" in llm_response:
+        return None, _LLM_SYNTHESIS_WARNING
+    try:
+        affected_services = _string_list(llm_response.get("affected_services"), field="affected_services")
+        unknowns_raw = llm_response.get("unknowns")
+        unknowns = None if unknowns_raw is None else _string_list(unknowns_raw, field="unknowns")
+        texts = {
+            key: _optional_text(llm_response.get(key), field=key)
+            for key in ("summary", "likely_root_cause", "answer_text", "reasoning", "suggested_fix")
+        }
+    except ValueError:
+        return None, _LLM_SYNTHESIS_WARNING
+    confidence = str(llm_response.get("confidence") or "").strip().lower()
+    if confidence not in _VALID_CONFIDENCE:
+        confidence = "low"
+    by_label = {item["citation"]["label"]: item for item in evidence}
+    cited = [by_label[label] for label in _citation_labels(llm_response.get("citations_used")) if label in by_label]
+    return (
+        AnswerBody(
+            summary=texts["summary"] or "",
+            likely_root_cause=texts["likely_root_cause"] or "",
+            confidence=confidence,
+            affected_services=affected_services,
+            answer_text=texts["answer_text"],
+            reasoning=texts["reasoning"],
+            suggested_fix=texts["suggested_fix"],
+            unknowns=unknowns,
+            citations=[_answer_citation(item) for item in cited],
+        ),
+        None,
+    )
+
+
+def _citation_labels(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    labels: list[str] = []
+    for raw in value:
+        if isinstance(raw, bool) or not isinstance(raw, str | int):
+            continue
+        number = str(raw).strip().strip("[]").strip()
+        if number.isdigit():
+            labels.append(f"[{int(number)}]")
+    return list(dict.fromkeys(labels))
+
+
+def _string_list(value, *, field: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{field} must be a list of strings")
+    return [sanitize_output(item) for item in value]
+
+
+def _optional_text(value, *, field: str) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    return sanitize_output(value)
+
+
+def _answer_citation(item: dict) -> AnswerCitation:
+    return AnswerCitation(
+        label=item["citation"]["label"],
+        document_path=item.get("document_path", ""),
+        lines=item["citation"]["lines"],
+        chunk_id=item["chunk_id"],
     )
 
 
@@ -281,7 +349,7 @@ def _pack_direct_lookup_evidence(query_intent: str, results: list[dict], setting
 def _is_direct_lookup_candidate(query_intent: str, result: dict) -> bool:
     chunk = result["chunk"]
     metadata = chunk.metadata_json or {}
-    source_type = str(metadata.get("source_type") or "")
+    source_type = chunk_source_type(chunk)
     chunk_type = str(chunk.chunk_type or "")
     path = str(getattr(getattr(chunk, "document", None), "path", "") or metadata.get("document_path") or "").lower()
     if query_intent == INTENT_CODE_LOCATION:
@@ -300,7 +368,7 @@ def _is_direct_lookup_candidate(query_intent: str, result: dict) -> bool:
                 "python_class",
                 "ts_function",
                 "ts_class",
-                "java_function",
+                "java_method",
                 "java_class",
                 "proto_service",
                 "proto_rpc",

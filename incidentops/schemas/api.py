@@ -418,6 +418,7 @@ class AnswerResponse(BaseModel):
     llm_latency_ms: int | None = None
     latency_ms: int
     warnings: list[str] = Field(default_factory=list)
+    warning: str | None = None
 
 
 class InvestigationRequest(BaseModel):
