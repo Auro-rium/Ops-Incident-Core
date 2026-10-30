@@ -176,3 +176,52 @@ def test_classify_doc_type_uses_incident_directory_segments(path, expected):
 )
 def test_collector_taxonomy_matches_on_path_segments(path, expected):
     assert classify(path) == expected
+
+
+# ── Python parser ─────────────────────────────
+
+from incidentops.ingestion.parsers.code_parser import parse_python  # noqa: E402
+
+PYTHON_MODULE = (
+    "import os\n"                      # 1
+    "\n"                               # 2
+    "@app.get('/health')\n"            # 3
+    "@cached\n"                        # 4
+    "def health():\n"                  # 5
+    "    return 'ok'\n"                # 6
+    "\n"                               # 7
+    "TIMEOUT = 5\n"                    # 8
+    "registry = {}\n"                  # 9
+    "\n"                               # 10
+    "class Worker:\n"                  # 11
+    "    pass\n"                       # 12
+    "\n"                               # 13
+    "if __name__ == '__main__':\n"     # 14
+    "    health()\n"                   # 15
+)
+
+
+def test_python_function_span_includes_decorators():
+    chunks = parse_python(PYTHON_MODULE, "app.py")
+    health = next(chunk for chunk in chunks if chunk.metadata.get("symbol_name") == "health")
+    assert health.start_line == 3
+    assert health.text.startswith("@app.get('/health')")
+    preamble = next(chunk for chunk in chunks if chunk.section_title == "module preamble")
+    assert "@app.get" not in preamble.text
+    assert (preamble.start_line, preamble.end_line) == (1, 1)
+
+
+def test_python_module_level_code_between_and_after_defs_is_kept():
+    chunks = parse_python(PYTHON_MODULE, "app.py")
+    module_chunks = [chunk for chunk in chunks if chunk.chunk_type == "python_module"]
+    texts = "\n".join(chunk.text for chunk in module_chunks)
+    assert "TIMEOUT = 5" in texts
+    assert "if __name__ == '__main__':" in texts
+    covered = {line for chunk in chunks for line in range(chunk.start_line, chunk.end_line + 1)}
+    non_blank = {number for number, line in enumerate(PYTHON_MODULE.split("\n"), start=1) if line.strip()}
+    assert non_blank <= covered
+
+
+def test_python_script_without_defs_keeps_fallback_chunk():
+    chunks = parse_python("print('hi')\n", "script.py")
+    assert [chunk.chunk_type for chunk in chunks] == ["python_fallback"]

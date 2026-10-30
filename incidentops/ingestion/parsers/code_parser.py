@@ -49,35 +49,24 @@ def parse_python(content: str, file_path: str, service_name: str | None = None) 
     lines = content.split("\n")
     chunks: list[RawChunk] = []
 
-    first_def_line = None
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if first_def_line is None or node.lineno < first_def_line:
-                first_def_line = node.lineno
+    definitions = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    ]
+    if not definitions:
+        return [_python_fallback_chunk(content, file_path, service_name, len(lines))]
 
-    if first_def_line and first_def_line > 1:
-        preamble = "\n".join(lines[: first_def_line - 1]).strip()
-        if preamble:
-            chunks.append(
-                RawChunk(
-                    text=preamble,
-                    chunk_type="python_module",
-                    source_type="code",
-                    document_path=file_path,
-                    doc_type="code",
-                    service_name=service_name,
-                    section_title="module preamble",
-                    start_line=1,
-                    end_line=first_def_line - 1,
-                    metadata={"language": "python", "kind": "preamble"},
-                )
-            )
+    spans: list[tuple[int, int, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef]] = []
+    for node in definitions:
+        # Decorators belong to the definition they wrap.
+        start = min([node.lineno, *(decorator.lineno for decorator in node.decorator_list)])
+        spans.append((start, node.end_lineno or node.lineno, node))
 
-    for node in ast.iter_child_nodes(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
-        start = node.lineno
-        end = node.end_lineno or start
+    cursor = 1
+    for start, end, node in spans:
+        if start > cursor:
+            _append_python_module_chunk(chunks, lines, cursor, start - 1, file_path, service_name)
         text = "\n".join(lines[start - 1 : end])
         is_class = isinstance(node, ast.ClassDef)
         chunks.append(
@@ -99,23 +88,57 @@ def parse_python(content: str, file_path: str, service_name: str | None = None) 
                 },
             )
         )
-
-    if not chunks:
-        chunks.append(
-            RawChunk(
-                text=content,
-                chunk_type="python_fallback",
-                source_type="code",
-                document_path=file_path,
-                doc_type="code",
-                service_name=service_name,
-                start_line=1,
-                end_line=len(lines),
-                metadata={"language": "python", "kind": "file", "fallback_reason": "no_declarations"},
-            )
-        )
+        cursor = end + 1
+    if cursor <= len(lines):
+        _append_python_module_chunk(chunks, lines, cursor, len(lines), file_path, service_name)
 
     return chunks
+
+
+def _append_python_module_chunk(
+    chunks: list[RawChunk],
+    lines: list[str],
+    start: int,
+    end: int,
+    file_path: str,
+    service_name: str | None,
+) -> None:
+    """Emit module-level code between or around definitions, trimmed to non-blank lines."""
+    while start <= end and not lines[start - 1].strip():
+        start += 1
+    while end >= start and not lines[end - 1].strip():
+        end -= 1
+    if start > end:
+        return
+    is_preamble = not chunks
+    chunks.append(
+        RawChunk(
+            text="\n".join(lines[start - 1 : end]),
+            chunk_type="python_module",
+            source_type="code",
+            document_path=file_path,
+            doc_type="code",
+            service_name=service_name,
+            section_title="module preamble" if is_preamble else f"module code L{start}-{end}",
+            start_line=start,
+            end_line=end,
+            metadata={"language": "python", "kind": "preamble" if is_preamble else "module_code"},
+        )
+    )
+
+
+def _python_fallback_chunk(content: str, file_path: str, service_name: str | None, line_count: int) -> RawChunk:
+    return RawChunk(
+        text=content,
+        chunk_type="python_fallback",
+        source_type="code",
+        document_path=file_path,
+        doc_type="code",
+        service_name=service_name,
+        start_line=1,
+        end_line=line_count,
+        metadata={"language": "python", "kind": "file", "fallback_reason": "no_declarations"},
+    )
 
 
 def parse_go(content: str, file_path: str, service_name: str | None = None) -> list[RawChunk]:
