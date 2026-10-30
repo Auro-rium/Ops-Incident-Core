@@ -21,6 +21,7 @@ PROTO_PACKAGE_RE = re.compile(r"^\s*package\s+([A-Za-z_][\w.]*)\s*;", re.MULTILI
 JS_DECL_RE = re.compile(
     r"^\s*(?:export\s+)?(?:(class|interface|type|enum)\s+([A-Za-z_]\w*)|(async\s+)?function\s+([A-Za-z_]\w*)|const\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\(|let\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\(|var\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\()"
 )
+MAX_CONFIG_KEY_CHUNKS = 50
 JAVA_DECL_RE = re.compile(
     r"^\s*(?:(?:public|private|protected|static|final|abstract)\s+)*"
     r"(?!(?:return|if|else|for|while|switch|catch|new|throw)\b)"
@@ -281,23 +282,51 @@ def parse_structured_config(
     data = _load_structured_data(content, lower)
     lines = content.splitlines() or [content]
     if isinstance(data, dict) and data:
+        doc_type = "api_doc" if source_type == "api_doc" else "config"
+        language = _language_from_path(lower)
+        keys = list(data.keys())
+        key_ranges = _top_level_key_ranges(content, lower, keys)
         chunks: list[RawChunk] = []
-        for key, value in list(data.items())[:50]:
-            text = _render_structured_section(key, value)
+        for key in keys[:MAX_CONFIG_KEY_CHUNKS]:
+            text = _render_structured_section(key, data[key])
             if not text.strip():
                 continue
+            start_line, end_line = key_ranges.get(key, (1, len(lines)))
             chunks.append(
                 RawChunk(
                     text=text,
                     chunk_type=_config_chunk_type(str(key), source_type),
                     source_type=source_type,
                     document_path=file_path,
-                    doc_type="api_doc" if source_type == "api_doc" else "config",
+                    doc_type=doc_type,
                     service_name=service_name,
                     section_title=f"config {key}",
-                    start_line=1,
-                    end_line=len(lines),
-                    metadata={"language": _language_from_path(lower), "config_key": key, "kind": "config"},
+                    start_line=start_line,
+                    end_line=end_line,
+                    metadata={"language": language, "config_key": key, "kind": "config"},
+                )
+            )
+        overflow_keys = keys[MAX_CONFIG_KEY_CHUNKS:]
+        if overflow_keys:
+            # Keep keys beyond the per-key limit searchable in one bounded chunk.
+            overflow_text = "\n\n".join(_render_structured_section(key, data[key]) for key in overflow_keys)
+            located = [key_ranges[key] for key in overflow_keys if key in key_ranges]
+            chunks.append(
+                RawChunk(
+                    text=overflow_text,
+                    chunk_type="config_section",
+                    source_type=source_type,
+                    document_path=file_path,
+                    doc_type=doc_type,
+                    service_name=service_name,
+                    section_title=f"config overflow ({len(overflow_keys)} keys)",
+                    start_line=min(start for start, _ in located) if located else 1,
+                    end_line=max(end for _, end in located) if located else len(lines),
+                    metadata={
+                        "language": language,
+                        "config_keys": [str(key) for key in overflow_keys],
+                        "kind": "config_overflow",
+                    },
                 )
             )
         if chunks:
@@ -569,6 +598,65 @@ def _parse_openapi_like(content: str, file_path: str, *, service_name: str | Non
             )
         )
     return chunks
+
+
+def _top_level_key_ranges(content: str, lower_path: str, keys: list) -> dict:
+    """Map each top-level key to its 1-based (start, end) line range.
+
+    Keys are located in document order; a key ends just before the next
+    located key (or at EOF). Keys that cannot be located are omitted and the
+    caller falls back to the whole file.
+    """
+    lines = content.splitlines()
+    starts: dict = {}
+    if lower_path.endswith((".yaml", ".yml")):
+        try:
+            node = yaml.compose(content)
+        except yaml.YAMLError:
+            node = None
+        if isinstance(node, yaml.MappingNode):
+            values = {str(key): key for key in keys}
+            for key_node, _ in node.value:
+                key = values.get(str(key_node.value))
+                if key is not None and key not in starts:
+                    starts[key] = key_node.start_mark.line + 1
+    else:
+        cursor = 0
+        indent: str | None = None
+        for key in keys:
+            pattern = _key_line_pattern(str(key), lower_path, indent)
+            if pattern is None:
+                break
+            for index in range(cursor, len(lines)):
+                match = pattern.match(lines[index])
+                if match:
+                    if indent is None and lower_path.endswith(".json"):
+                        indent = match.group(1)
+                    starts[key] = index + 1
+                    cursor = index + 1
+                    break
+
+    ordered = sorted(starts.items(), key=lambda item: item[1])
+    ranges: dict = {}
+    for position, (key, start) in enumerate(ordered):
+        end = ordered[position + 1][1] - 1 if position + 1 < len(ordered) else len(lines)
+        while end > start and not lines[end - 1].strip():
+            end -= 1
+        ranges[key] = (start, end)
+    return ranges
+
+
+def _key_line_pattern(key: str, lower_path: str, json_indent: str | None) -> re.Pattern[str] | None:
+    escaped = re.escape(key)
+    if lower_path.endswith(".json"):
+        indent = re.escape(json_indent) if json_indent is not None else r"\s*"
+        return re.compile(rf'^({indent})(?:\{{\s*)?"{escaped}"\s*:')
+    if lower_path.endswith(".toml"):
+        name = rf'(?:{escaped}|"{escaped}"|\'{escaped}\')'
+        return re.compile(rf"^\s*(?:\[\[?\s*{name}\s*[\].]|{name}\s*[.=])")
+    if lower_path.endswith(".ini"):
+        return re.compile(rf"^\s*\[\s*{escaped}\s*\]")
+    return None
 
 
 def _config_chunk_type(key: str, source_type: str) -> str:

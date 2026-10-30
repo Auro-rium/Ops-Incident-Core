@@ -225,3 +225,53 @@ def test_python_module_level_code_between_and_after_defs_is_kept():
 def test_python_script_without_defs_keeps_fallback_chunk():
     chunks = parse_python("print('hi')\n", "script.py")
     assert [chunk.chunk_type for chunk in chunks] == ["python_fallback"]
+
+
+# ── Structured config ─────────────────────────
+
+import json  # noqa: E402
+
+from incidentops.ingestion.parsers.code_parser import parse_structured_config  # noqa: E402
+
+
+def _ranges(chunks):
+    return {chunk.metadata.get("config_key"): (chunk.start_line, chunk.end_line) for chunk in chunks}
+
+
+def test_yaml_config_chunks_have_per_key_line_ranges():
+    content = "server:\n  port: 80\n  host: x\n\ndatabase:\n  url: pg\nlogging: info\n"
+    ranges = _ranges(parse_structured_config(content, "config/app.yaml", source_type="config"))
+    assert ranges == {"server": (1, 3), "database": (5, 6), "logging": (7, 7)}
+
+
+def test_json_config_ranges_ignore_nested_keys_with_same_name():
+    content = json.dumps({"a": {"b": 1}, "b": 2}, indent=2)
+    lines = content.splitlines()
+    ranges = _ranges(parse_structured_config(content, "config/app.json", source_type="config"))
+    assert ranges["a"][0] == 2
+    assert lines[ranges["b"][0] - 1].startswith('  "b"')
+
+
+def test_toml_and_ini_config_ranges():
+    toml_text = 'title = "x"\n\n[server]\nport = 80\n\n[database]\nurl = "pg"\n'
+    assert _ranges(parse_structured_config(toml_text, "pyproject.toml", source_type="config")) == {
+        "title": (1, 1),
+        "server": (3, 4),
+        "database": (6, 7),
+    }
+    ini_text = "[main]\na = 1\n\n[extra]\nb = 2\n"
+    assert _ranges(parse_structured_config(ini_text, "setup.ini", source_type="config")) == {
+        "main": (1, 2),
+        "extra": (4, 5),
+    }
+
+
+def test_config_keys_beyond_limit_go_to_overflow_chunk():
+    content = "\n".join(f"key{i}: {i}" for i in range(60)) + "\n"
+    chunks = parse_structured_config(content, "config/big.yaml", source_type="config")
+    assert len(chunks) == 51
+    overflow = chunks[-1]
+    assert overflow.metadata["kind"] == "config_overflow"
+    assert overflow.metadata["config_keys"] == [f"key{i}" for i in range(50, 60)]
+    assert "key59" in overflow.text
+    assert (overflow.start_line, overflow.end_line) == (51, 60)
