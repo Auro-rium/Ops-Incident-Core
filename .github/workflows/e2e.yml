@@ -92,6 +92,9 @@ jobs:
         with:
           python-version: "3.11"
       - uses: astral-sh/setup-uv@v5
+        with:
+          # The post-job cache prune fails while the API and worker are still running.
+          enable-cache: false
       - run: uv lock --check
       - run: uv run --extra dev ruff check .
       - name: Migrate up, down and up
@@ -158,6 +161,9 @@ jobs:
         with:
           python-version: "3.11"
       - uses: astral-sh/setup-uv@v5
+        with:
+          # The post-job cache prune fails while the API and worker are still running.
+          enable-cache: false
       - run: uv run --extra dev alembic upgrade head
       - run: uv run --extra dev python -m incidentops.security.bootstrap_admin --email admin@incidentops.local --password incidentops
       - name: Start API
