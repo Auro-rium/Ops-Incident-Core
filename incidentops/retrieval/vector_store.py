@@ -33,6 +33,17 @@ def _headers(settings: Settings) -> dict[str, str]:
     return headers
 
 
+# Collections (and their payload indexes) already verified in this process,
+# keyed by (base_url, collection, embedding_dim). Setup is idempotent in Qdrant,
+# but repeating it on every upsert costs ~len(_FILTER_FIELDS) round trips.
+_ENSURED_COLLECTIONS: set[tuple[str, str, int]] = set()
+
+
+def reset_collection_cache() -> None:
+    """Forget verified collections (tests, or after a collection is dropped)."""
+    _ENSURED_COLLECTIONS.clear()
+
+
 def _base_url(settings: Settings) -> str:
     configured = settings.qdrant_url.strip().rstrip("/")
     if not configured:
@@ -60,6 +71,9 @@ class QdrantVectorStore:
 
     async def ensure_collection(self, embedding_dim: int) -> None:
         base_url = _base_url(self.settings)
+        cache_key = (base_url, self.collection, int(embedding_dim))
+        if cache_key in _ENSURED_COLLECTIONS:
+            return
         headers = _headers(self.settings)
         try:
             async with httpx.AsyncClient(timeout=self.settings.qdrant_timeout_seconds) as client:
@@ -87,10 +101,16 @@ class QdrantVectorStore:
                     self._raise_for_status(payload_index, f"payload index creation for {field_name}")
         except httpx.HTTPError as exc:
             raise VectorStoreError("Qdrant collection setup failed") from exc
+        _ENSURED_COLLECTIONS.add(cache_key)
 
     async def upsert(self, points: list[dict[str, Any]], embedding_dim: int) -> None:
         if not points:
             return
+        for point in points:
+            if len(point.get("vector") or []) != embedding_dim:
+                raise VectorStoreError(
+                    "embedding dimension does not match the configured vector index"
+                )
         await self.ensure_collection(embedding_dim)
         try:
             async with httpx.AsyncClient(timeout=self.settings.qdrant_timeout_seconds) as client:
@@ -99,6 +119,9 @@ class QdrantVectorStore:
                     headers=_headers(self.settings),
                     json={"points": points},
                 )
+            if response.status_code == 404:
+                # The collection disappeared after it was verified; re-check next time.
+                _ENSURED_COLLECTIONS.discard((_base_url(self.settings), self.collection, int(embedding_dim)))
             self._raise_for_status(response, "point upsert")
         except httpx.HTTPError as exc:
             raise VectorStoreError("Qdrant point upsert failed") from exc
@@ -144,18 +167,58 @@ class QdrantVectorStore:
                 continue
         return hits
 
-    async def delete_by_filter(self, project_id: uuid.UUID, **filters: str) -> None:
-        must = [{"key": "project_id", "match": {"value": str(project_id)}}]
+    async def delete_by_filter(
+        self,
+        project_id: uuid.UUID,
+        *,
+        all_index_versions: bool = False,
+        **filters: str | list[str],
+    ) -> None:
+        """Delete points matching the filters, scoped to the active index version.
+
+        ``all_index_versions=True`` is only for purges (project/source/document
+        removal) where vectors of every index version must go.
+        """
+        must = self._scope(project_id, all_index_versions=all_index_versions)
         for field_name, value in filters.items():
             if field_name not in _FILTER_FIELDS:
                 raise VectorStoreError(f"unsupported Qdrant filter field: {field_name}")
-            must.append({"key": field_name, "match": {"value": str(value)}})
+            if isinstance(value, (list, tuple, set)):
+                values = [str(item) for item in value]
+                if not values:
+                    return
+                must.append({"key": field_name, "match": {"any": values}})
+            else:
+                must.append({"key": field_name, "match": {"value": str(value)}})
+        await self._delete({"must": must})
+
+    async def delete_document_points_except(
+        self,
+        project_id: uuid.UUID,
+        document_id: str,
+        keep_point_ids: list[str],
+    ) -> None:
+        """Delete a document's points in the active index except the given ids."""
+        must = self._scope(project_id, all_index_versions=False)
+        must.append({"key": "document_id", "match": {"value": str(document_id)}})
+        point_filter: dict[str, Any] = {"must": must}
+        if keep_point_ids:
+            point_filter["must_not"] = [{"has_id": [str(point_id) for point_id in keep_point_ids]}]
+        await self._delete(point_filter)
+
+    def _scope(self, project_id: uuid.UUID, *, all_index_versions: bool) -> list[dict[str, Any]]:
+        must: list[dict[str, Any]] = [{"key": "project_id", "match": {"value": str(project_id)}}]
+        if not all_index_versions:
+            must.append({"key": "index_version", "match": {"value": self.settings.vector_index_version}})
+        return must
+
+    async def _delete(self, point_filter: dict[str, Any]) -> None:
         try:
             async with httpx.AsyncClient(timeout=self.settings.qdrant_timeout_seconds) as client:
                 response = await client.post(
                     f"{_base_url(self.settings)}/collections/{self.collection}/points/delete?wait=true",
                     headers=_headers(self.settings),
-                    json={"filter": {"must": must}},
+                    json={"filter": point_filter},
                 )
         except httpx.HTTPError as exc:
             raise VectorStoreError("Qdrant point deletion failed") from exc

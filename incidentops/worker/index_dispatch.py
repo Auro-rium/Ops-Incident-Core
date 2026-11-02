@@ -21,6 +21,27 @@ from incidentops.worker.queue import JobQueue
 logger = logging.getLogger("incidentops.worker.index_dispatch")
 
 
+async def _reclaim_stuck_running_jobs(db, settings: Settings, now: datetime) -> None:
+    """Return ``running`` rows older than the job timeout to the retry path.
+
+    A worker that died (or was cancelled without recording the outcome)
+    leaves its row ``running``; workers skip such rows, so only this sweep
+    can recover them. ``attempts`` was already incremented when the run began.
+    """
+    stuck_before = now - timedelta(seconds=settings.index_job_timeout_seconds)
+    stuck = (IndexJob.status == "running") & (IndexJob.started_at < stuck_before)
+    await db.execute(
+        update(IndexJob)
+        .where(stuck, IndexJob.attempts < settings.rag_index_max_retries)
+        .values(status="pending", queued_at=None, error_code="job_timeout")
+    )
+    await db.execute(
+        update(IndexJob)
+        .where(stuck, IndexJob.attempts >= settings.rag_index_max_retries)
+        .values(status="failed", error_code="job_timeout", finished_at=now)
+    )
+
+
 async def dispatch_recoverable_index_jobs(queue: JobQueue, settings: Settings) -> int:
     """Publish pending or abandoned queue records using only their durable IDs."""
     if not settings.rag_async_indexing:
@@ -30,6 +51,8 @@ async def dispatch_recoverable_index_jobs(queue: JobQueue, settings: Settings) -
     reclaim_before = now - timedelta(milliseconds=settings.job_queue_claim_idle_ms)
     factory = _get_session_factory()
     async with factory() as db:
+        await _reclaim_stuck_running_jobs(db, settings, now)
+        await db.commit()
         result = await db.execute(
             select(IndexJob)
             .where(

@@ -7,6 +7,14 @@ from incidentops.config.settings import Settings, get_settings
 from incidentops.ingestion.chunking.metadata import classify_source_type
 
 
+def merge_counts(left: dict | None, right: dict | None) -> dict[str, int]:
+    """Sum two {key: count} mappings without mutating either."""
+    merged = {str(key): int(value or 0) for key, value in (left or {}).items()}
+    for key, value in (right or {}).items():
+        merged[str(key)] = merged.get(str(key), 0) + int(value or 0)
+    return merged
+
+
 def build_source_coverage(source_type_counts: dict[str, int], chunk_type_counts: dict[str, int] | None = None) -> dict:
     chunk_type_counts = chunk_type_counts or {}
     has_logs = source_type_counts.get("logs", 0) > 0
