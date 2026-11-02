@@ -7,7 +7,7 @@ from __future__ import annotations
 import socket
 from urllib.parse import quote
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -177,8 +177,9 @@ class Settings(BaseSettings):
     direct_answer_max_chars_per_chunk: int = 900
     direct_answer_max_total_chars: int = 4500
     supported_extensions: str = ".md,.txt,.log,.json,.yaml,.yml,.toml,.ini,.py,.js,.ts,.jsx,.tsx,.go,.java,.proto,.patch,.diff"
+    # Empty means no cross-origin access; "*" has to be asked for explicitly.
     cors_allow_origins: str = Field(
-        "*",
+        "",
         validation_alias=AliasChoices("CORS_ALLOW_ORIGINS", "CORS_ORIGINS"),
     )
     allow_wildcard_cors: bool = True
@@ -204,6 +205,15 @@ class Settings(BaseSettings):
     mcp_host: str = "127.0.0.1"
     mcp_port: int = 8080
     mcp_path: str = "/mcp"
+
+    @field_validator("metrics_token", "mcp_inbound_token", mode="before")
+    @classmethod
+    def _drop_disabled_placeholder(cls, value: object) -> object:
+        # Key Vault cannot hold an empty secret, so Bicep stores "disabled" for
+        # unset ones. Left as is, "Bearer disabled" would be a valid credential.
+        if isinstance(value, str) and value.strip().lower() == "disabled":
+            return ""
+        return value
 
     @property
     def llm_available(self) -> bool:
