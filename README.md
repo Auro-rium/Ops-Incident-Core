@@ -7,8 +7,8 @@ results with citations and missing-evidence warnings.
 
 > Version context: This repository is the active V2 rewrite. The current cloud
 > proof path is Azure Container Apps plus Azure PostgreSQL/Redis, Key Vault,
-> Log Analytics, Azure OpenAI, and an explicitly external managed Qdrant
-> cluster. The Vercel browser console is deployed separately.
+> Log Analytics, NVIDIA NIM-compatible models, and an explicitly external managed
+> Qdrant cluster. The Vercel browser console is separate and currently paused.
 
 ## Product Boundary
 
@@ -37,7 +37,7 @@ flowchart LR
   W --> Q
   API --> RET[Intent routing and hybrid retrieval]
   RET --> E[Compact cited evidence]
-  E --> A[Direct answer or optional Azure OpenAI synthesis]
+  E --> A[Direct answer or optional LLM synthesis]
   M[Core MCP server] -->|Core API only| API
 ~~~
 
@@ -59,7 +59,7 @@ incidentops/              backend domain code
 incidentops/collector/    in-repository Collector runtime
 incidentops/eval/         active eval runner and golden cases
 incidentops/mcp/          Core MCP server
-alembic/versions/v2/      single clean-project V2 schema baseline
+alembic/versions/v2/      V2 schema baseline and forward migrations
 docker/core.Dockerfile    Core API/worker image
 infra/azure/              Azure Bicep scaffold
 scripts/                  migration, smoke, and Azure operations
@@ -99,6 +99,10 @@ the manual `.github/workflows/deploy-azure.yml` workflow.
 8. Search combines vector, lexical, metadata, path, and graph evidence.
 9. Investigation returns citations, confidence, and missing-data warnings.
 10. Workers execute queued indexing, workflow, eval, observer, and logging jobs.
+11. When a sync finishes as `success` or `partial_success` and received at least
+    one document, Core deletes the source's documents that sync did not see,
+    with their chunks, relations, and Qdrant points. See Honest Limitations for
+    what this means for deliberately partial runs.
 
 ## Retrieval
 
@@ -120,8 +124,18 @@ Retrieval diagnostics expose intent, budget, source/chunk distributions,
 branch latency, and applied ranking adjustments without exposing secrets or
 large document bodies.
 
-Direct code/config/API lookups can use a fast cited-evidence path. Optional
-model synthesis is bounded to selected evidence. Local-hash embeddings remain
+Query analysis is deliberately conservative. Services are matched only against
+names already indexed for the project. A deploy hash found in free text boosts
+matching evidence; it becomes a hard filter only when the caller passes
+`filters.deploy_hash`. Evidence containing instruction-like text is kept but
+moved down the ranking and labelled `prompt_injection_flagged` in answer
+responses.
+
+Direct code/config/API lookups can use a fast cited-evidence path. Their
+confidence is high only when the top hit clearly beats the runner-up. Optional
+model synthesis is bounded to selected evidence and cites only the labels the
+model reports using. A failed, non-JSON, or empty model reply returns
+`retrieval_only` mode with an explicit warning. Local-hash embeddings remain
 available for deterministic tests. The current production path uses the
 NVIDIA NIM-compatible API for both chat and embeddings: Nemotron chat
 (`nvidia/nemotron-3-super-120b-a12b`) and Nemotron embeddings
@@ -136,6 +150,7 @@ Common authenticated endpoints:
 | Purpose | Endpoint |
 |---|---|
 | Login | POST /v1/auth/login |
+| Revoke all of the caller's tokens | POST /v1/auth/logout-all |
 | Capabilities | GET /v1/capabilities |
 | Runtime status | GET /v1/runtime/status |
 | Project readiness | GET /v1/projects/{project_id}/readiness |
@@ -148,6 +163,7 @@ Common authenticated endpoints:
 | Answer | POST /v1/answer |
 | Investigate | POST /v1/investigate |
 | Workflow runs | POST /v1/runs |
+| Resolve a pending approval | POST /v1/runs/{run_id}/approve, POST /v1/runs/{run_id}/reject |
 | Evaluations | POST /v1/evals/run |
 | Source purge | DELETE /v1/projects/{project_id}/sources/{source_id} |
 | Project purge | DELETE /v1/projects/{project_id} |
@@ -155,18 +171,28 @@ Common authenticated endpoints:
 /health is lightweight. /ready checks database, vector store, required
 tables/columns, and the Alembic revision.
 
+Approving or rejecting a run records the decision and marks its IssueDraft
+approved or rejected. **It makes no GitHub API call and files no issue**; the
+draft stays in Core for a person to act on. Resolving a run that is not awaiting
+approval returns 409.
+
+Evaluations are scored by threshold. A case passes only when it ran without
+error, its evidence recall meets the minimum, and its forbidden-term hits stay
+within the limit. Term coverage is reported but does not decide the result.
+
 ## Database
 
-This clean V2 repository uses one Alembic baseline:
+The V2 schema is an immutable baseline plus forward migrations:
 
 ~~~text
 alembic/versions/v2/v2_baseline.py
+alembic/versions/v2/v2_0002_review_fixes.py
 ~~~
 
-It creates the complete current schema in one fresh-install migration.
-incidentops/db/models.py remains the ORM model source; the Alembic file is the
-immutable database bootstrap contract. Production startup does not call
-SQLAlchemy create_all.
+The baseline creates the original fresh-install schema; schema changes are
+added as new migrations rather than edits to it.
+incidentops/db/models.py remains the ORM model source; the Alembic files are the
+database contract. Production startup does not call SQLAlchemy create_all.
 
 ~~~bash
 alembic upgrade head
@@ -238,12 +264,17 @@ Set the public Vercel URL as `VERCEL_FRONTEND_URL` and include it in
 ## Security
 
 - JWT authentication and bcrypt password hashing.
+- Accounts lock temporarily after repeated failed logins
+  (`LOGIN_MAX_FAILED_ATTEMPTS`, `LOGIN_LOCKOUT_MINUTES`).
+- `POST /v1/auth/logout-all` revokes every outstanding token for the caller.
 - Project-scoped RBAC for API operations.
 - Collector path policy and pre-ingest redaction.
 - No secrets in audit events or retrieval diagnostics.
 - Local ingest disabled in production-like settings.
 - Metrics private by default.
 - MCP delegates to Core and cannot access the database directly.
+- HTTP MCP transports require `Authorization: Bearer <MCP_INBOUND_TOKEN>` and
+  refuse to start without that token.
 - Internal PostgreSQL, Redis, Qdrant, Collector, worker, and MCP services must
   not be publicly exposed.
 
@@ -255,3 +286,26 @@ This is not yet production-grade. Remaining proof includes:
 - measured retrieval quality and latency on multiple repositories;
 - backup/restore and purge/reingestion drills;
 - model token/latency measurements from the active NVIDIA chat path.
+
+Known limits of the current behaviour:
+
+- Stale-document removal is driven by sync status, not by a statement that the
+  run was complete. A run narrowed with `--max-files` or path filters can delete
+  documents it did not send, so run only full syncs against a source you want to
+  keep whole. A sync that received no documents never prunes.
+- Approval marks the IssueDraft only. Nothing is filed in GitHub.
+- `MCP_INBOUND_TOKEN` is one shared static bearer token: it does not identify the
+  caller, and outbound calls to Core use the service `MCP_TOKEN`, so Core sees the
+  MCP service rather than the end user. The stdio transport has no inbound auth.
+- Reindex re-embeds from content Core already stores, so on the production
+  configuration it calls the paid NVIDIA embeddings API. It does not re-read the
+  source; picking up source edits needs a Collector sync.
+- Prompt-injection handling only flags, demotes, and labels. Flagged text can
+  still reach the model and direct answers, and detection is pattern-based.
+- Evals measure retrieval against golden cases with default thresholds. They do
+  not judge answer quality or replace real incident benchmarks.
+- Account lockout is per account, so repeated failures can lock out a legitimate
+  user for the lockout window.
+- Network hardening (VNet and private endpoints) is opt-in and has not been
+  deployed.
+- The Vercel console is paused; Core changes are not exercised through it.

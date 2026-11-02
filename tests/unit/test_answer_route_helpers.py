@@ -64,6 +64,21 @@ def test_malformed_llm_fields_return_warning_not_error():
     assert warning
 
 
+def test_llm_reply_without_answer_content_returns_warning():
+    for reply in ({"_meta": {}}, {"summary": "", "answer_text": None, "confidence": "high", "_meta": {}}):
+        body, warning = _llm_answer_body(reply, _evidence())
+
+        assert body is None
+        assert warning
+
+
+def test_llm_reply_with_only_answer_text_is_accepted():
+    body, warning = _llm_answer_body({"answer_text": "See [1].", "citations_used": ["[1]"], "_meta": {}}, _evidence())
+
+    assert warning is None
+    assert body.answer_text == "See [1]."
+
+
 def test_llm_answer_cites_only_citations_used_and_validates_confidence():
     body, warning = _llm_answer_body(
         {

@@ -134,6 +134,17 @@ Collector may read configured source paths and send normalized documents. It
 cannot read Core storage directly. MCP calls Core tools only; it cannot ingest,
 normalize, access the database, or bypass project RBAC.
 
+HTTP MCP transports require `Authorization: Bearer <MCP_INBOUND_TOKEN>`, compared
+in constant time, and refuse to start without the token. This is one shared static
+secret, not per-caller identity. Outbound calls to Core use the service
+`MCP_TOKEN`, so Core authorizes the MCP service rather than the end user. The stdio
+transport has no inbound auth and relies on local process access.
+
+Login locks an account for `LOGIN_LOCKOUT_MINUTES` after
+`LOGIN_MAX_FAILED_ATTEMPTS` failures, and a successful login clears the counter.
+`POST /v1/auth/logout-all` bumps `token_version`, which invalidates every token
+already issued to that user.
+
 Secrets are rejected or redacted before persistence where detected. Audit events
 and diagnostics contain metadata and counters, not raw evidence, passwords,
 tokens, API keys, or connection strings.
@@ -154,13 +165,15 @@ business state remains in PostgreSQL.
 
 ## Migration Model
 
-The repository has one clean V2 baseline:
+The repository has an immutable V2 baseline plus forward migrations:
 
 ~~~text
 alembic/versions/v2/v2_baseline.py
+alembic/versions/v2/v2_0002_review_fixes.py
 ~~~
 
-It creates the complete fresh-install schema. The old 0001-0006 chain was
+The baseline creates the original fresh-install schema, and later changes are
+added as new migrations. The old 0001-0006 chain was
 removed because this repository has no database to preserve. A database built
 from the old chain is not compatible with this reset without deliberate
 recreation.
@@ -190,7 +203,7 @@ flowchart LR
   F --> R[Conditional reranking]
   R --> P[Compact evidence pack]
   P --> D[Direct cited response]
-  P --> S[Optional Azure OpenAI synthesis]
+  P --> S[Optional LLM synthesis]
 ~~~
 
 Intent classes are code_location, architecture, config_lookup, api_contract,
@@ -201,6 +214,19 @@ Diagnostics include query intent, retrieval budget, source/chunk distributions,
 applied boosts/penalties, branch latency, and total retrieval latency. Code
 questions favor code/proto/API evidence; runtime questions favor
 logs/deploys/incidents/runbooks. Missing runtime evidence produces a warning.
+
+Services are detected only from names indexed for the project. A deploy hash in
+free text is a ranking boost; only an explicit `filters.deploy_hash` is a hard
+filter. After a partial rerank the reranked head stays ahead of the fused-score
+tail, because the two score scales are not comparable. Evidence flagged for
+instruction-like text stays visible but moves down one position and carries
+`prompt_injection_flagged` in answer responses.
+
+An investigation reports low confidence with an "insufficient evidence" summary
+when no hypothesis clears the selector's bar, when a hypothesis claims something
+the evidence types do not back, or when the evidence mix scores low. Answer
+synthesis falls back to `retrieval_only` with a warning when the model reply is
+failed, non-JSON, or empty.
 
 ## Models and Inference
 
@@ -242,6 +268,11 @@ Metrics include evidence recall, term coverage, forbidden hits, source-type hit
 rate, zero-result count, citation rate, latency, and model/token counters when
 available.
 
+`passed_cases` is threshold-based: a case passes only with no error, evidence
+recall at or above the minimum, and forbidden-term hits within the limit. The
+thresholds are defaults in `incidentops/eval/runner.py` that Settings may override.
+Term coverage and source-type hit rate are reported but do not decide a pass.
+
 Evaluation detects retrieval regressions; it does not create production
 evidence or replace real repository and incident benchmarks.
 
@@ -255,7 +286,7 @@ optional but defaults to disabled; `apps/web` is deployed on Vercel.
 
 The verified Azure resource group is `incidentops-demo-swc-rg` in
 `swedencentral`. The deployed Core API, worker, Collector, private MCP, Azure
-database/Redis dependencies, and Azure OpenAI chat/embedding configuration are
+database/Redis dependencies, and NVIDIA chat/embedding configuration are
 managed by the manual GitHub Actions workflow. Health/readiness and the normal
 Azure smoke path have passed. The private MCP smoke is opt-in because the MCP
 ingress is intentionally not public.
@@ -287,16 +318,46 @@ test/development only.
 3. Unchanged document hashes are skipped.
 4. Changed documents replace prior chunks without duplicates.
 5. Purge removes source/project evidence and retains only safe audit metadata.
-6. Reindex refreshes Core-held artifacts; full source reparse requires Collector
-   reingestion.
+6. Reindex re-embeds from content Core already stores and republishes the vectors:
+   inline for existing chunks, or through index jobs built from stored payloads
+   when async indexing is on. It does not re-read the source; source edits require
+   Collector reingestion. On the production configuration it calls paid embeddings.
 7. Production-like startup rejects create_all, local ingest, wildcard CORS,
    memory-only rate limits, inline workers, and local model fallback.
 8. Missing logs/deploys/incidents produce warnings rather than invented RCA.
+9. A sync finishing as `success` or `partial_success` with at least one document
+   received deletes the source's documents it did not see, with their chunks,
+   relations, and vectors. PostgreSQL commits first; a failed Qdrant cleanup is
+   recorded in sync diagnostics, and orphaned points are dropped at read time.
+10. Approval changes Core state only: it resolves the Approval, marks the
+    IssueDraft approved or rejected, and finishes the run. No GitHub API call is
+    made. Resolving a run that is not awaiting approval returns 409.
+11. HTTP MCP transports do not serve requests without a valid inbound bearer
+    token.
 
 ## Current Gaps
 
 Before calling this production-grade, prove a clean Azure deployment, database
 and vector/queue connectivity, migration/bootstrap jobs, real Collector sync,
-Azure OpenAI embedding and synthesis calls, MCP tools backed by Core, worker
+NVIDIA embedding and synthesis calls, MCP tools backed by Core, worker
 failure/retry recovery, purge/reingestion, backup/restore, and multi-repository
 quality/latency metrics.
+
+## Honest Limitations
+
+- Pruning (invariant 9) follows sync status, and the finish request has no field
+  saying the run was complete. A run narrowed with `--max-files` or path filters
+  can therefore delete documents it did not send.
+- Approval files nothing in GitHub; the IssueDraft is the end of the path.
+- The MCP inbound token is shared and static, and stdio has no inbound auth.
+- Reindex in production spends on NVIDIA embeddings and needs its own approval.
+- Prompt-injection handling is pattern-based and only flags, demotes by one
+  position, and labels. Flagged text can still reach the model and direct answers.
+- Eval pass/fail reflects retrieval on golden cases, not answer quality.
+- Endpoint filters match exactly or by path prefix in the lexical, metadata, and
+  graph branches. The vector branch matches exactly, and a concrete path such as
+  `/orders/123` does not match the template `/orders/{id}`.
+- Deploy-hash detection needs at least one digit, so an all-letter hash such as
+  `deadbeef` is not recognised from free text.
+- Account lockout can be used to lock out a known account for the lockout window.
+- Network hardening is opt-in and undeployed, and the Vercel console is paused.

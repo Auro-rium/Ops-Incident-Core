@@ -126,11 +126,12 @@ class LLMProvider:
                 content = data["choices"][0]["message"]["content"]
                 try:
                     parsed = json.loads(content)
-                    if isinstance(parsed, dict):
-                        parsed["_meta"] = meta
-                    return parsed
                 except json.JSONDecodeError:
                     return {"raw_response": content, "_meta": meta}
+                if not isinstance(parsed, dict):
+                    return {"raw_response": content, "_meta": meta}
+                parsed["_meta"] = meta
+                return parsed
         except httpx.HTTPStatusError as exc:
             logger.error("LLM HTTP error %d: %s", exc.response.status_code, exc.response.text[:200])
             incr("llm_failures")

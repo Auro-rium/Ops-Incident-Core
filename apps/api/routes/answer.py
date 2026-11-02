@@ -273,6 +273,8 @@ def _llm_answer_body(llm_response: dict | None, evidence: list[dict]) -> tuple[A
         }
     except ValueError:
         return None, _LLM_SYNTHESIS_WARNING
+    if not texts["summary"] and not texts["answer_text"]:
+        return None, _LLM_SYNTHESIS_WARNING
     confidence = str(llm_response.get("confidence") or "").strip().lower()
     if confidence not in _VALID_CONFIDENCE:
         confidence = "low"
