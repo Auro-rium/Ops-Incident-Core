@@ -99,7 +99,7 @@ class QdrantVectorStore:
                         json={"field_name": field_name, "field_schema": "keyword"},
                     )
                     self._raise_for_status(payload_index, f"payload index creation for {field_name}")
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ValueError) as exc:
             raise VectorStoreError("Qdrant collection setup failed") from exc
         _ENSURED_COLLECTIONS.add(cache_key)
 
@@ -138,7 +138,9 @@ class QdrantVectorStore:
             {"key": "index_version", "match": {"value": self.settings.vector_index_version}},
         ]
         for field_name, value in (filters or {}).items():
-            if field_name in _FILTER_FIELDS and value is not None:
+            if field_name == "endpoint" and value is not None:
+                must.append(_endpoint_condition(str(value)))
+            elif field_name in _FILTER_FIELDS and value is not None:
                 must.append({"key": field_name, "match": {"value": str(value)}})
         try:
             async with httpx.AsyncClient(timeout=self.settings.qdrant_timeout_seconds) as client:
@@ -158,7 +160,10 @@ class QdrantVectorStore:
         if response.status_code == 404:
             return []
         self._raise_for_status(response, "vector search")
-        points = response.json().get("result", {}).get("points", [])
+        try:
+            points = response.json().get("result", {}).get("points", [])
+        except ValueError as exc:
+            raise VectorStoreError("Qdrant vector search returned an invalid response") from exc
         hits: list[VectorHit] = []
         for point in points:
             try:
@@ -245,11 +250,41 @@ _FILTER_FIELDS = {
     "package_name",
     "service_name",
     "endpoint",
+    "endpoint_prefixes",
     "commit_sha",
     "deploy_hash",
     "content_hash",
     "index_version",
 }
+
+
+_MAX_ENDPOINT_PREFIXES = 16
+
+
+def endpoint_prefixes(endpoint: str | None) -> list[str]:
+    """Path prefixes of an endpoint, stored because Qdrant keywords cannot prefix-match.
+
+    Mirrors ``lexical_search.endpoint_filter_clause``: ``/orders/{id}`` is found by
+    ``/orders`` but ``/orders-v2`` is not, and non-path values only match exactly.
+    """
+    if not endpoint or not endpoint.startswith("/"):
+        return []
+    prefixes = ["/"]
+    current = ""
+    for segment in [part for part in endpoint.split("/") if part][: _MAX_ENDPOINT_PREFIXES - 1]:
+        current = f"{current}/{segment}"
+        prefixes.append(current)
+    return prefixes
+
+
+def _endpoint_condition(endpoint: str) -> dict[str, Any]:
+    """Exact or path-prefix match. The exact arm keeps points indexed before
+    ``endpoint_prefixes`` existed matching as they did, until they are re-published.
+    """
+    base = endpoint.rstrip("/") or "/"
+    should: list[dict[str, Any]] = [{"key": "endpoint", "match": {"value": value}} for value in sorted({base, endpoint})]
+    should.append({"key": "endpoint_prefixes", "match": {"value": base}})
+    return {"should": should}
 
 
 def chunk_point(
@@ -274,6 +309,7 @@ def chunk_point(
         "package_name": str(metadata.get("package_name") or metadata.get("module_path") or ""),
         "service_name": str(chunk.service_name or ""),
         "endpoint": str(chunk.endpoint or ""),
+        "endpoint_prefixes": endpoint_prefixes(chunk.endpoint),
         "commit_sha": str(metadata.get("commit_sha") or ""),
         "deploy_hash": str(chunk.deploy_hash or ""),
         "content_hash": str(metadata.get("content_hash") or ""),
