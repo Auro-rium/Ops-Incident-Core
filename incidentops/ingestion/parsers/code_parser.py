@@ -32,7 +32,8 @@ JAVA_DECL_RE = re.compile(
 def parse_python(content: str, file_path: str, service_name: str | None = None) -> list[RawChunk]:
     try:
         tree = ast.parse(content)
-    except SyntaxError:
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        # Pathologically nested source raises more than SyntaxError.
         return [
             RawChunk(
                 text=content,

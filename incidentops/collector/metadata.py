@@ -111,7 +111,8 @@ def _source_symbols(language_name: str | None, content: str) -> tuple[list[str],
 def _python_symbols(content: str) -> tuple[list[str], list[str], list[str], str | None]:
     try:
         tree = ast.parse(content)
-    except SyntaxError:
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        # Pathologically nested source raises more than SyntaxError.
         names = _PY_SYMBOL.findall(content)
         return names, names, [], None
     functions: list[str] = []

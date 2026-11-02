@@ -379,3 +379,37 @@ def test_changed_by_relation_only_for_deploy_evidence():
         relations = build_chunk_relations(document, [_graph_chunk(chunk_type, source_type)])
         has_changed_by = any(relation["relation_type"] == "changed_by" for relation in relations)
         assert has_changed_by is expected, chunk_type
+
+
+# ── audit: deploy JSON by path token, unparseable Python ─
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("deploy_history.json", "deploy"),
+        ("bad-deploy-history.json", "deploy"),
+        ("fixtures/deploys/history.json", "deploy"),
+        ("deployments.json", "deploy"),
+        ("releases/2026.json", "deploy"),
+        ("commit.json", "deploy"),
+        ("deployHistory.json", "deploy"),
+        ("docs/committee.json", "config"),
+        ("config/prerelease_flags.json", "config"),
+        ("data/redeployed.json", "config"),
+        ("src/uncommitted.json", "config"),
+    ],
+)
+def test_deploy_json_is_matched_on_whole_path_tokens(path, expected):
+    from incidentops.ingestion.chunking.metadata import classify_doc_type, classify_source_type
+
+    assert classify_source_type(path) == expected
+    assert classify_doc_type(path) == expected
+
+
+@pytest.mark.parametrize("expression", ["1" + "+1" * 200_000, "-" * 200_000 + "1"], ids=["binop", "unary"])
+def test_python_parser_falls_back_when_ast_cannot_parse(expression):
+    from incidentops.ingestion.parsers.code_parser import parse_python
+
+    chunks = parse_python(f"x = {expression}\n", "deep.py")
+    assert [chunk.chunk_type for chunk in chunks] == ["python_fallback"]

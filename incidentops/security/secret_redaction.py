@@ -2,6 +2,13 @@ from __future__ import annotations
 
 import re
 
+# `password: str` and `api_key: Optional[str]` are signatures, not secrets. The
+# trailing delimiter keeps real values such as `string-horse` redactable.
+_NOT_A_TYPE_NAME = (
+    r"(?!(?:str|string|bytes|int|float|bool|boolean|number|none|null|any|optional|union|secretstr)"
+    r"(?:[\s,)\]\[=|;]|$))"
+)
+
 # The single secret pattern set shared by Core and the Collector. Order
 # matters: specific token formats run before the generic key/value rules.
 SECRET_PATTERNS = [
@@ -19,10 +26,17 @@ SECRET_PATTERNS = [
     ),
     (re.compile(r"(Bearer\s+)([a-zA-Z0-9_\-.]{20,})", re.IGNORECASE), r"\1[REDACTED_TOKEN]"),
     (
-        re.compile(r"\b(api[_-]?key\s*[:=]\s*['\"]?)([a-zA-Z0-9_\-]{8,})(['\"]?)", re.IGNORECASE),
+        re.compile(rf"\b(api[_-]?key['\"]?\s*[:=]\s*['\"]?){_NOT_A_TYPE_NAME}([a-zA-Z0-9_\-]{{8,}})(['\"]?)", re.IGNORECASE),
         r"\1[REDACTED_API_KEY]\3",
     ),
-    (re.compile(r"(password\s*[:=]\s*['\"]?)([^\s'\"]{4,})(['\"]?)", re.IGNORECASE), r"\1[REDACTED_PASSWORD]\3"),
+    (
+        # A quoted value is redacted whole, spaces included; a bare one ends at whitespace.
+        re.compile(
+            rf"(password['\"]?\s*[:=]\s*)(?:(['\"])(?:(?!\2)[^\n])+\2|['\"]?{_NOT_A_TYPE_NAME}[^\s'\"]{{4,}}['\"]?)",
+            re.IGNORECASE,
+        ),
+        r"\1\2[REDACTED_PASSWORD]\2",
+    ),
 ]
 
 
