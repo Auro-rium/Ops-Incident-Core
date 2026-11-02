@@ -60,10 +60,10 @@ class TestHealthEndpoint:
         assert response.status_code == 200
         payload = response.json()
         assert payload["status"] == "ready"
-        assert payload["database"] == "ok"
-        assert payload["vector_store"] == "ok"
-        assert payload["required_tables"] == "ok"
-        assert payload["migration"] == "ok"
+        assert payload["database"] is True
+        assert payload["vector_store"] is True
+        assert payload["schema"] is True
+        assert payload["migrations"] is True
 
 
 class TestIngestEndpoint:

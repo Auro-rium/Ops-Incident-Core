@@ -153,4 +153,9 @@ def test_production_validation_rejects_unsafe_security_defaults():
     assert any("JOB_QUEUE_BACKEND" in error for error in errors)
     assert any("METRICS_BACKEND" in error for error in errors)
     assert any("LOCAL_INGEST_ENABLED" in error for error in errors)
-    assert any("Azure OpenAI" in error for error in errors)
+    # With no provider configured, prod fails closed on the provider check.
+    assert any("CLOUD_PROVIDER" in error for error in errors)
+    azure_errors = production_settings_errors(
+        Settings(app_env="production", jwt_secret="x" * 40, require_azure_openai=True)
+    )
+    assert any("Azure OpenAI" in error for error in azure_errors)
