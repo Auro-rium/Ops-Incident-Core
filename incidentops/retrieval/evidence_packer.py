@@ -118,7 +118,9 @@ def _result_score(result: dict) -> float:
 
 def _demote_flagged(evidence: list[dict]) -> list[dict]:
     ranked = list(evidence)
-    for item in [entry for entry in evidence if entry["prompt_injection_flagged"]]:
+    # Lowest-ranked first, so adjacent flagged items cannot swap back past each
+    # other and stay ahead of the clean evidence behind them.
+    for item in [entry for entry in reversed(evidence) if entry["prompt_injection_flagged"]]:
         index = ranked.index(item)
         target = min(index + PROMPT_INJECTION_RANK_PENALTY, len(ranked) - 1)
         if target != index:
