@@ -380,9 +380,11 @@ def test_whitespace_only_file_is_skipped_as_empty(tmp_path, fake_client):
     assert "blank.md" not in {doc["path"] for doc in FakeClient.instances[-1].uploads[0]}
 
 
-def test_python_metadata_survives_source_ast_cannot_parse():
-    deeply_nested = "x = " + "(" * 5000 + "1" + ")" * 5000 + "\ndef handler():\n    pass\n"
-    assert "handler" in extract("deep.py", deeply_nested)["function_names"]
+@pytest.mark.parametrize("expression", ["1" + "+1" * 200_000, "-" * 200_000 + "1"], ids=["binop", "unary"])
+def test_python_metadata_survives_source_ast_cannot_parse(expression):
+    # RecursionError and MemoryError, not SyntaxError: one file must not abort a sync.
+    source = f"x = {expression}\ndef handler():\n    pass\n"
+    assert "handler" in extract("deep.py", source)["function_names"]
 
 
 def test_unreadable_sample_reports_read_failed(tmp_path):
