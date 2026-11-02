@@ -286,3 +286,139 @@ def test_normalized_documents_do_not_carry_chunking_hints(tmp_path):
     assert "hint_counts" not in CollectorSummary().diagnostics()
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("incidentops.collector.hints")
+
+
+# ── failure handling details ──────────────────
+
+
+def test_failed_finish_does_not_mask_the_original_error(tmp_path, fake_client, monkeypatch):
+    _write_docs(tmp_path, 1)
+    fake_client["upload_effects"] = [ValueError("boom")]
+
+    def broken_finish(self, *args):
+        raise RuntimeError("finish down")
+
+    monkeypatch.setattr(FakeClient, "finish_sync", broken_finish)
+    with pytest.raises(ValueError):
+        _sync(tmp_path)
+
+
+def test_failed_sync_diagnostics_never_carry_exception_text(tmp_path, fake_client):
+    _write_docs(tmp_path, 1)
+    fake_client["upload_effects"] = [ValueError("boom with secret content")]
+    with pytest.raises(ValueError):
+        _sync(tmp_path)
+    diagnostics = FakeClient.instances[-1].finished[0][1]
+    assert "secret content" not in str(diagnostics)
+    assert diagnostics["error_message"] == "collector sync failed: ValueError"
+
+
+def test_transient_finish_errors_are_retried(tmp_path, fake_client, monkeypatch):
+    _write_docs(tmp_path, 1)
+    request = httpx.Request("POST", "http://core.test/v1/x")
+    attempts: list[str] = []
+
+    def flaky_finish(self, source_id, sync_id, collector_id, status, diagnostics):
+        attempts.append(status)
+        if len(attempts) == 1:
+            raise httpx.ConnectError("refused", request=request)
+
+    monkeypatch.setattr(FakeClient, "finish_sync", flaky_finish)
+    _sync(tmp_path)
+    assert attempts == ["success", "success"]
+
+
+def test_upload_retries_are_bounded(tmp_path, fake_client):
+    _write_docs(tmp_path, 1)
+    request = httpx.Request("POST", "http://core.test/v1/x")
+    fake_client["upload_effects"] = [httpx.ConnectError("refused", request=request) for _ in range(20)]
+    with pytest.raises(httpx.ConnectError):
+        _sync(tmp_path)
+    assert len(FakeClient.instances[-1].uploads) < 10
+    assert FakeClient.instances[-1].finished[0][0] == "failed"
+
+
+# ── a partial sync must not look complete (Core prunes unseen documents) ──
+
+
+def test_full_sync_reports_complete(tmp_path, fake_client):
+    _write_docs(tmp_path, 2)
+    summary = _sync(tmp_path)
+    assert summary.diagnostics()["complete"] is True
+    assert FakeClient.instances[-1].finished[0][1]["complete"] is True
+
+
+def test_max_files_truncated_sync_reports_incomplete(tmp_path, fake_client):
+    _write_docs(tmp_path, 4)
+    summary = _sync(tmp_path, max_files=2)
+    assert summary.diagnostics()["complete"] is False
+    assert FakeClient.instances[-1].finished[0][1]["complete"] is False
+
+
+def test_scoped_sync_reports_incomplete(tmp_path, fake_client):
+    _write_docs(tmp_path, 2)
+    assert _sync(tmp_path, include_paths=["doc0.md"]).diagnostics()["complete"] is False
+
+
+def test_unreadable_file_makes_sync_incomplete_and_partial(tmp_path, fake_client):
+    _write_docs(tmp_path, 1)
+    (tmp_path / "latin1.md").write_bytes("caf\xe9 notes\n".encode("latin-1"))
+    summary = _sync(tmp_path)
+    assert summary.skipped_reasons["read_failed"] == 1
+    assert summary.diagnostics()["complete"] is False
+    assert FakeClient.instances[-1].finished[0][0] == "partial_success"
+
+
+# ── normalization edge cases ──────────────────
+
+
+def test_whitespace_only_file_is_skipped_as_empty(tmp_path, fake_client):
+    _write_docs(tmp_path, 1)
+    (tmp_path / "blank.md").write_text("  \n\n", encoding="utf-8")
+    summary = _sync(tmp_path)
+    assert summary.skipped_reasons["empty"] == 1
+    assert "blank.md" not in {doc["path"] for doc in FakeClient.instances[-1].uploads[0]}
+
+
+def test_python_metadata_survives_source_ast_cannot_parse():
+    deeply_nested = "x = " + "(" * 5000 + "1" + ")" * 5000 + "\ndef handler():\n    pass\n"
+    assert "handler" in extract("deep.py", deeply_nested)["function_names"]
+
+
+def test_unreadable_sample_reports_read_failed(tmp_path):
+    item = DiscoveredFile(str(tmp_path / "gone.md"), "gone.md", 10, None)
+    assert CollectorService(Settings())._skip_reason(item) == "read_failed"
+
+
+# ── redaction: quoted keys and values, type annotations ─
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "def connect(password: str, retries: int) -> None:",
+        "password: Optional[str] = None",
+        "password: SecretStr",
+        "password: string",
+        "api_key: Optional[str] = None",
+        "api_key: SecretStr",
+    ],
+)
+def test_redaction_leaves_type_annotations_alone(text):
+    assert redact(text) == (text, 0)
+
+
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        ('{"password": "hunter2"}', "hunter2"),
+        ('{"api_key": "abcd1234"}', "abcd1234"),
+        ('password = "my long secret"', "long secret"),
+        ("password: 'abc'", "abc"),
+        ("password: strong-horse", "strong-horse"),
+    ],
+)
+def test_redaction_covers_quoted_keys_and_values(text, secret):
+    redacted, count = redact(text)
+    assert count == 1
+    assert secret not in redacted
