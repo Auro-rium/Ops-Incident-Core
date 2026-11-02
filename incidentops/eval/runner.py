@@ -23,6 +23,7 @@ DEFAULT_CASES_PATH = Path(__file__).parent / "golden_cases.jsonl"
 # Default pass thresholds; Settings may override them with the same lower-case names.
 EVAL_PASS_MIN_EVIDENCE_RECALL = 0.5
 EVAL_PASS_MAX_FORBIDDEN_HITS = 0
+EVAL_PASS_MIN_TERM_COVERAGE = 0.5
 
 _TERM_STOPWORDS = frozenset(
     {"about", "added", "after", "before", "call", "caused", "from", "into", "that", "this", "under", "with", "when", "were"}
@@ -169,6 +170,7 @@ async def execute_eval_run(
     await db.execute(delete(EvalRunCase).where(EvalRunCase.eval_run_id == run.id))
     min_recall = float(getattr(settings, "eval_pass_min_evidence_recall", EVAL_PASS_MIN_EVIDENCE_RECALL))
     max_forbidden = int(getattr(settings, "eval_pass_max_forbidden_hits", EVAL_PASS_MAX_FORBIDDEN_HITS))
+    min_term_coverage = float(getattr(settings, "eval_pass_min_term_coverage", EVAL_PASS_MIN_TERM_COVERAGE))
     results = []
     for case in cases:
         incr("eval_cases_total")
@@ -238,6 +240,8 @@ async def execute_eval_run(
             not case_result.get("error")
             and float(case_result["evidence_recall"]) >= min_recall
             and len(case_result["forbidden_hits"]) <= max_forbidden
+            # Without this, a case naming no expected documents passes on vacuous recall.
+            and (not case_result["expected_terms"] or float(case_result["term_coverage"]) >= min_term_coverage)
         )
         results.append(case_result)
         db.add(
@@ -275,7 +279,11 @@ async def execute_eval_run(
         "passed_cases": passed_cases,
         "failed_cases": failed_cases,
         "error_cases": error_cases,
-        "pass_thresholds": {"min_evidence_recall": min_recall, "max_forbidden_hits": max_forbidden},
+        "pass_thresholds": {
+            "min_evidence_recall": min_recall,
+            "max_forbidden_hits": max_forbidden,
+            "min_term_coverage": min_term_coverage,
+        },
         "avg_evidence_recall": avg_recall,
         "avg_term_coverage": avg_term_coverage,
         "forbidden_hit_count": forbidden_hits,

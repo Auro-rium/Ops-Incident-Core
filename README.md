@@ -99,10 +99,9 @@ the manual `.github/workflows/deploy-azure.yml` workflow.
 8. Search combines vector, lexical, metadata, path, and graph evidence.
 9. Investigation returns citations, confidence, and missing-data warnings.
 10. Workers execute queued indexing, workflow, eval, observer, and logging jobs.
-11. When a sync finishes as `success` or `partial_success` and received at least
-    one document, Core deletes the source's documents that sync did not see,
-    with their chunks, relations, and Qdrant points. See Honest Limitations for
-    what this means for deliberately partial runs.
+11. When the Collector reports a complete sync that finished as `success`, Core
+    deletes the source's documents that sync did not see, with their chunks,
+    relations, and Qdrant points. A narrowed or degraded run never prunes.
 
 ## Retrieval
 
@@ -177,8 +176,8 @@ draft stays in Core for a person to act on. Resolving a run that is not awaiting
 approval returns 409.
 
 Evaluations are scored by threshold. A case passes only when it ran without
-error, its evidence recall meets the minimum, and its forbidden-term hits stay
-within the limit. Term coverage is reported but does not decide the result.
+error, its evidence recall and term coverage (when it lists expected terms)
+meet their minimums, and its forbidden-term hits stay within the limit.
 
 ## Database
 
@@ -278,6 +277,10 @@ Set the public Vercel URL as `VERCEL_FRONTEND_URL` and include it in
 - Internal PostgreSQL, Redis, Qdrant, Collector, worker, and MCP services must
   not be publicly exposed.
 
+Deploying needs a `MCP_INBOUND_TOKEN` secret. `METRICS_TOKEN` is an optional
+secret. `TRUSTED_PROXIES` and `ENABLE_PRIVATE_NETWORKING` are optional variables;
+private networking is off by default and needs a fresh resource group.
+
 ## Honest Limitations
 
 This is not yet production-grade. Remaining proof includes:
@@ -289,10 +292,10 @@ This is not yet production-grade. Remaining proof includes:
 
 Known limits of the current behaviour:
 
-- Stale-document removal is driven by sync status, not by a statement that the
-  run was complete. A run narrowed with `--max-files` or path filters can delete
-  documents it did not send, so run only full syncs against a source you want to
-  keep whole. A sync that received no documents never prunes.
+- Stale-document removal needs a full, clean Collector sync. A run using
+  `--max-files` or path filters, or one with rejected documents, read failures,
+  or failed index jobs, leaves stale documents in place until the next clean run.
+  The reason is recorded in the sync's `diagnostics.stale_prune_skipped`.
 - Approval marks the IssueDraft only. Nothing is filed in GitHub.
 - `MCP_INBOUND_TOKEN` is one shared static bearer token: it does not identify the
   caller, and outbound calls to Core use the service `MCP_TOKEN`, so Core sees the

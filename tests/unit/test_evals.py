@@ -139,3 +139,24 @@ async def test_list_evals_filters_by_project_id():
 
     compiled = db.statements[0].compile()
     assert project_id in compiled.params.values()
+
+
+@pytest.mark.asyncio
+async def test_case_without_expected_documents_cannot_pass_on_vacuous_recall(monkeypatch):
+    responses = {
+        "missing": _investigation(["deploys/a.patch"], "unrelated summary"),
+        "found": _investigation(["deploys/a.patch"], "inventory validation"),
+    }
+
+    async def fake_investigate(_db, _project_id, question, **_kwargs):
+        return responses[question], 5
+
+    monkeypatch.setattr(runner, "investigate", fake_investigate)
+    cases = [{"id": name, "question": name, "expected_terms": ["inventory"]} for name in responses]
+    run = EvalRun(id=uuid.uuid4(), project_id=uuid.uuid4(), status=EvalStatus.queued, summary_json={})
+
+    await runner.execute_eval_run(FakeSession(), run, cases=cases, settings=Settings())
+
+    outcome = {result["case_id"]: result["passed"] for result in run.summary_json["results"]}
+    assert outcome == {"missing": False, "found": True}
+    assert run.summary_json["pass_thresholds"]["min_term_coverage"] == 0.5

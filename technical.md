@@ -269,9 +269,10 @@ rate, zero-result count, citation rate, latency, and model/token counters when
 available.
 
 `passed_cases` is threshold-based: a case passes only with no error, evidence
-recall at or above the minimum, and forbidden-term hits within the limit. The
+recall at or above the minimum, term coverage at or above the minimum when the
+case lists expected terms, and forbidden-term hits within the limit. The
 thresholds are defaults in `incidentops/eval/runner.py` that Settings may override.
-Term coverage and source-type hit rate are reported but do not decide a pass.
+Source-type hit rate is reported but does not decide a pass.
 
 Evaluation detects retrieval regressions; it does not create production
 evidence or replace real repository and incident benchmarks.
@@ -325,9 +326,10 @@ test/development only.
 7. Production-like startup rejects create_all, local ingest, wildcard CORS,
    memory-only rate limits, inline workers, and local model fallback.
 8. Missing logs/deploys/incidents produce warnings rather than invented RCA.
-9. A sync finishing as `success` or `partial_success` with at least one document
-   received deletes the source's documents it did not see, with their chunks,
-   relations, and vectors. PostgreSQL commits first; a failed Qdrant cleanup is
+9. A sync finished with `complete=true` and status `success`, with at least one
+   document received and no failed files or index jobs, deletes the source's
+   documents it did not see, with their chunks, relations, and vectors. Any other
+   sync records why in `diagnostics.stale_prune_skipped`. PostgreSQL commits first; a failed Qdrant cleanup is
    recorded in sync diagnostics, and orphaned points are dropped at read time.
 10. Approval changes Core state only: it resolves the Approval, marks the
     IssueDraft approved or rejected, and finishes the run. No GitHub API call is
@@ -345,9 +347,8 @@ quality/latency metrics.
 
 ## Honest Limitations
 
-- Pruning (invariant 9) follows sync status, and the finish request has no field
-  saying the run was complete. A run narrowed with `--max-files` or path filters
-  can therefore delete documents it did not send.
+- Pruning (invariant 9) only happens on a full, clean sync, so documents deleted
+  upstream stay searchable until the next one.
 - Approval files nothing in GitHub; the IssueDraft is the end of the path.
 - The MCP inbound token is shared and static, and stdio has no inbound auth.
 - Reindex in production spends on NVIDIA embeddings and needs its own approval.
