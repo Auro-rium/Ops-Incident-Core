@@ -43,10 +43,10 @@ async def _reclaim_stuck_running_jobs(db, settings: Settings, now: datetime) -> 
 
 
 async def dispatch_recoverable_index_jobs(queue: JobQueue, settings: Settings) -> int:
-    """Publish pending or abandoned queue records using only their durable IDs."""
-    if not settings.rag_async_indexing:
-        return 0
+    """Publish pending or abandoned queue records using only their durable IDs.
 
+    Not gated on ``rag_async_indexing``: inline indexing queues vector retries too.
+    """
     now = datetime.now(timezone.utc)
     reclaim_before = now - timedelta(milliseconds=settings.job_queue_claim_idle_ms)
     factory = _get_session_factory()

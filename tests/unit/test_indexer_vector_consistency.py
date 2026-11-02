@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy.sql import Select
+from sqlalchemy.sql import Select, Update
 
 from incidentops.config.settings import Settings
 from incidentops.db.models import Document, IndexJob
@@ -143,6 +144,14 @@ def _kinds(events):
     return [event[0] for event in events]
 
 
+def _hash_restores(db) -> list:
+    return [
+        statement
+        for statement in db.executed
+        if isinstance(statement, Update) and "content_hash" in str(statement)
+    ]
+
+
 @pytest.mark.asyncio
 async def test_new_document_commits_postgres_before_publishing_vectors(log):
     db = FakeSession(log)
@@ -190,9 +199,10 @@ async def test_qdrant_failure_after_commit_queues_retry_index_job(log):
     assert job.content_hash == document.content_hash
     assert job.normalized_payload_json["external_id"] == document.external_id
     assert job.normalized_payload_json[indexer.INDEX_REASON_KEY] == indexer.INDEX_REASON_VECTOR_RETRY
-    # The document's hash is cleared so the retry (or the next sync) is not skipped as unchanged.
-    clears = [s for s in db.executed if "UPDATE documents" in str(s)]
-    assert clears, "expected content_hash to be cleared"
+    # The document's hash stays clear so the retry (or the next sync) is not skipped as unchanged.
+    document_row = next(obj for obj in db.added if isinstance(obj, Document))
+    assert document_row.content_hash is None
+    assert not _hash_restores(db)
     assert _kinds(log)[-1] == "commit"
 
 
@@ -213,6 +223,7 @@ async def test_retry_job_is_failed_once_attempts_are_exhausted(log):
 
     job = next(obj for obj in db.added if isinstance(obj, IndexJob))
     assert job.status == "failed"
+    assert job.finished_at is not None
 
 
 @pytest.mark.asyncio
@@ -312,3 +323,95 @@ async def test_prune_with_no_stale_documents_is_a_noop(log):
 
     assert pruned.document_ids == []
     assert len(db.executed) == 1
+
+
+@pytest.mark.asyncio
+async def test_content_hash_is_restored_only_after_vectors_are_live(log):
+    db = FakeSession(log)
+    document = _doc()
+
+    await indexer.index_normalized_documents(db, PROJECT_ID, SOURCE_ID, SYNC_ID, [document], embed_fn=_embed)
+
+    document_row = next(obj for obj in db.added if isinstance(obj, Document))
+    assert document_row.checksum == document.content_hash
+    restores = _hash_restores(db)
+    assert len(restores) == 1
+    assert document.content_hash in restores[0].compile().params.values()
+    assert _kinds(log) == ["commit", "upsert", "delete_except", "commit"]
+
+
+@pytest.mark.asyncio
+async def test_hash_restore_cannot_overwrite_a_concurrent_rewrite(log):
+    db = FakeSession(log)
+
+    await indexer.index_normalized_documents(db, PROJECT_ID, SOURCE_ID, SYNC_ID, [_doc()], embed_fn=_embed)
+
+    assert "documents.checksum" in str(_hash_restores(db)[0])
+
+
+@pytest.mark.asyncio
+async def test_crash_between_commit_and_upsert_leaves_document_reprocessable(log, monkeypatch):
+    # A worker timeout or crash here must not let the next attempt skip the
+    # document as unchanged: its chunks are committed but have no vectors.
+    async def cancelled(self, points, embedding_dim):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(FakeVectorStore, "upsert", cancelled)
+    db = FakeSession(log)
+
+    with pytest.raises(asyncio.CancelledError):
+        await indexer.index_normalized_documents(db, PROJECT_ID, SOURCE_ID, SYNC_ID, [_doc()], embed_fn=_embed)
+
+    document_row = next(obj for obj in db.added if isinstance(obj, Document))
+    assert document_row.content_hash is None
+    assert _kinds(log) == ["commit"]
+
+
+@pytest.mark.asyncio
+async def test_changed_document_hash_is_cleared_at_first_commit(log, monkeypatch):
+    current = _existing()
+    seen = {}
+
+    async def spying_upsert(self, points, embedding_dim):
+        seen["hash_at_upsert"] = current.content_hash
+
+    monkeypatch.setattr(FakeVectorStore, "upsert", spying_upsert)
+    db = FakeSession(log, existing=current)
+
+    await indexer.index_normalized_documents(db, PROJECT_ID, SOURCE_ID, SYNC_ID, [_doc()], embed_fn=_embed)
+
+    assert seen["hash_at_upsert"] is None
+
+
+@pytest.mark.asyncio
+async def test_worker_job_advances_seen_marker_only_forward(log):
+    # sync1's late job can create a row after sync2 asked for the same document;
+    # sync2's job then finds it unchanged and must still claim it, or finishing
+    # sync2 would prune a document it saw.
+    document = _doc()
+    current = _existing(document.content_hash)
+    current.last_seen_sync_id = uuid.uuid4()
+    db = FakeSession(log, existing=current)
+
+    result = await indexer.index_normalized_documents(
+        db, PROJECT_ID, SOURCE_ID, SYNC_ID, [document], embed_fn=_embed, mark_existing_seen=False
+    )
+
+    assert result.skipped_unchanged == 1
+    advances = [s for s in db.executed if isinstance(s, Update) and "last_seen_sync_id" in str(s)]
+    assert len(advances) == 1
+    compiled = str(advances[0])
+    assert "started_at" in compiled and "source_syncs" in compiled
+    assert SYNC_ID in advances[0].compile().params.values()
+
+
+@pytest.mark.asyncio
+async def test_job_without_a_sync_does_not_touch_the_seen_marker(log):
+    document = _doc()
+    db = FakeSession(log, existing=_existing())
+
+    await indexer.index_normalized_documents(
+        db, PROJECT_ID, SOURCE_ID, None, [document], embed_fn=_embed, mark_existing_seen=False
+    )
+
+    assert not [s for s in db.executed if isinstance(s, Update) and "last_seen_sync_id" in str(s)]
