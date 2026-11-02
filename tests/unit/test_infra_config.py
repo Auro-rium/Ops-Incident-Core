@@ -154,7 +154,13 @@ def test_workflow_passes_provider_and_new_secrets_to_deploy():
         "ENABLE_PRIVATE_NETWORKING",
     ):
         assert key in env, key
-    assert "CLOUD_PROVIDER" in WORKFLOW["env"]
+    assert "CLOUD_PROVIDER" in WORKFLOW["jobs"]["deploy"]["env"]
+
+
+def test_test_jobs_do_not_inherit_the_production_provider():
+    # A non-local provider without API keys would change how the CI API behaves.
+    assert "CLOUD_PROVIDER" not in WORKFLOW["env"]
+    assert "CLOUD_PROVIDER" not in WORKFLOW["jobs"]["core-tests"]["env"]
 
 
 def test_workflow_requires_provider_secrets_conditionally():
@@ -234,7 +240,7 @@ def _run_wait_script(tmp_path: Path, exit_code: int) -> tuple[subprocess.Complet
         text=True,
         env={
             "PATH": f"{tmp_path}:/usr/bin:/bin",
-            "MIGRATION_WAIT_ATTEMPTS": "3",
+            "MIGRATION_WAIT_MAX_SECONDS": "1",
             "MIGRATION_WAIT_SECONDS": "0",
         },
     )
@@ -253,7 +259,7 @@ def test_wait_script_gives_up_without_failing_the_container(tmp_path):
     # exits here would block the deployment that the job is waiting on.
     result, calls = _run_wait_script(tmp_path, 1)
     assert result.returncode == 0
-    assert calls == 3
+    assert calls >= 2
     assert "WARNING" in result.stderr
 
 
@@ -306,3 +312,11 @@ async def test_smoke_eval_sends_cases_inline(smoke_prod, tmp_path, monkeypatch):
     assert "cases_path" not in bodies[0]
     assert bodies[0]["cases"][0]["question"] == "why?"
     assert list(tmp_path.iterdir()) == []
+
+
+def test_smoke_eval_case_passes_the_route_validation(smoke_prod):
+    from apps.api.routes.evals import _validate_inline_cases
+    from incidentops.config.settings import Settings
+
+    cases = [smoke_prod._tiny_eval_case("why?")]
+    assert _validate_inline_cases(cases, Settings(_env_file=None)) == cases

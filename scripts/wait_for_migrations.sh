@@ -6,21 +6,24 @@
 # after the wait and /ready reports 503 until the schema is current.
 # azure_run_migrations.sh restarts the API once the job succeeds.
 #
-# The default wait (3 minutes) stays inside the Container Apps default startup
-# probe window of about 4 minutes.
+# With the defaults the wait ends within 3.5 minutes (deadline plus one capped
+# attempt), inside the Container Apps default startup probe window of about 4.
 
-attempts="${MIGRATION_WAIT_ATTEMPTS:-12}"
+max_seconds="${MIGRATION_WAIT_MAX_SECONDS:-180}"
 delay="${MIGRATION_WAIT_SECONDS:-15}"
+attempt_timeout="${MIGRATION_WAIT_ATTEMPT_TIMEOUT_SECONDS:-30}"
 
-attempt=1
-while [ "$attempt" -le "$attempts" ]; do
-  if python scripts/check_migrations.py; then
+deadline=$(($(date +%s) + max_seconds))
+while :; do
+  if timeout "$attempt_timeout" python scripts/check_migrations.py; then
     exit 0
   fi
-  echo "Schema not ready (attempt $attempt/$attempts); retrying in ${delay}s" >&2
-  attempt=$((attempt + 1))
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    break
+  fi
+  echo "Schema not ready; retrying in ${delay}s" >&2
   sleep "$delay"
 done
 
-echo "WARNING: schema still not ready after $attempts attempts; starting the API anyway. /ready returns 503 until migrations run." >&2
+echo "WARNING: schema still not ready after ${max_seconds}s; starting the API anyway. /ready returns 503 until migrations run." >&2
 exit 0
