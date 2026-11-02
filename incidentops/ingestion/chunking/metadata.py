@@ -39,6 +39,31 @@ COMMON_PATH_STOPWORDS = {
 }
 
 
+CODE_SUFFIXES = (".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".rb")
+INCIDENT_DIRECTORY_SEGMENTS = {"incidents", "postmortems"}
+INCIDENT_TEXT_SUFFIXES = (".md", ".txt")
+DEPLOY_JSON_TOKENS = {"deploy", "deploys", "deployment", "deployments", "release", "releases", "commit", "commits"}
+CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+PATH_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def path_segments(path: str) -> list[str]:
+    """Lower-cased path components, tolerant of Windows separators."""
+    return [part for part in path.replace("\\", "/").lower().split("/") if part and part not in (".", "..")]
+
+
+def is_incident_path(path: str) -> bool:
+    """Markdown/text under an ``incidents/`` or ``postmortems/`` directory.
+
+    Matching whole directory segments keeps paths such as ``incidentops/``
+    or ``docs/postmortem-template.md`` out of the incident parser.
+    """
+    lower = path.lower()
+    if not lower.endswith(INCIDENT_TEXT_SUFFIXES):
+        return False
+    return any(segment in INCIDENT_DIRECTORY_SEGMENTS for segment in path_segments(lower)[:-1])
+
+
 def extract_service_from_path(path: str) -> str | None:
     """Infer a likely service name from a path without hardcoded service lists."""
     normalized = PurePosixPath(path.replace("\\", "/"))
@@ -77,9 +102,17 @@ def extract_endpoints(text: str) -> list[str]:
     return ENDPOINT_RE.findall(text)
 
 
+def is_deploy_json_path(path: str) -> bool:
+    """JSON named for deploys by whole path token, so ``committee.json`` stays config."""
+    if not path.lower().endswith(".json"):
+        return False
+    words = CAMEL_BOUNDARY_RE.sub(" ", path).lower()
+    return any(token in DEPLOY_JSON_TOKENS for token in PATH_TOKEN_RE.findall(words))
+
+
 def classify_source_type(path: str) -> str:
     lower = path.lower()
-    if lower.endswith((".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".rb")):
+    if lower.endswith(CODE_SUFFIXES):
         return "code"
     if lower.endswith(".proto"):
         return "api_doc"
@@ -87,9 +120,9 @@ def classify_source_type(path: str) -> str:
         return "logs"
     if lower.endswith((".patch", ".diff")):
         return "deploy"
-    if lower.endswith(".json") and any(token in lower for token in ("deploy", "release", "commit")):
+    if is_deploy_json_path(path):
         return "deploy"
-    if "incident" in lower or "postmortem" in lower:
+    if is_incident_path(lower):
         return "incident"
     if "openapi" in lower or "swagger" in lower:
         return "api_doc"
@@ -110,17 +143,15 @@ def classify_source_type(path: str) -> str:
 
 def classify_doc_type(path: str) -> str:
     lower = path.lower()
-    if lower.endswith((".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".rb")):
+    if lower.endswith(CODE_SUFFIXES):
         return "code"
     if lower.endswith(".proto"):
         return "api_doc"
     if lower.endswith(".log") or "/logs/" in lower:
         return "log"
-    if lower.endswith((".patch", ".diff")) or (
-        lower.endswith(".json") and any(token in lower for token in ("deploy", "release", "commit"))
-    ):
+    if lower.endswith((".patch", ".diff")) or is_deploy_json_path(path):
         return "deploy"
-    if "incident" in lower or "postmortem" in lower:
+    if is_incident_path(lower):
         return "incident"
     if lower.endswith((".yaml", ".yml")):
         if "openapi" in lower or "swagger" in lower:

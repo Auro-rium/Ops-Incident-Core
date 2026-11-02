@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import re
 
-from incidentops.ingestion.chunking.metadata import extract_service_from_path
 from incidentops.ingestion.schemas import RawChunk
 
 INCIDENT_SECTIONS = {
@@ -92,12 +91,19 @@ def _chunk_type(title: str) -> str:
     return "incident_section"
 
 
+FRONT_MATTER_RE = re.compile(r"\A---\s*\n(?P<body>.*?)\n---\s*(?:\n|\Z)", re.DOTALL)
+SERVICE_LINE_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?(?:\*\*)?service(?:[_ ]name)?(?:\*\*)?\s*:\s*(?:\*\*)?\s*[`'\"]?([A-Za-z][A-Za-z0-9_-]{1,62})",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
 def _extract_service(content: str, path: str) -> str | None:
-    title_match = re.search(r"^#\s+([A-Za-z][A-Za-z0-9_-]{2,40})", content, re.MULTILINE)
-    if title_match and title_match.group(1).lower() not in {"incident", "postmortem"}:
-        return title_match.group(1).lower()
-    match = re.search(r"\bservice[:\s-]+([a-z][a-z0-9_-]{2,40})\b", content, re.IGNORECASE)
-    if match:
-        return match.group(1).lower()
-    service = extract_service_from_path(path)
-    return service if service not in {"incident", "postmortem"} else None
+    """Only explicit service declarations; the indexer supplies path/source fallbacks."""
+    front_matter = FRONT_MATTER_RE.match(content)
+    if front_matter:
+        match = SERVICE_LINE_RE.search(front_matter.group("body"))
+        if match:
+            return match.group(1).lower()
+    match = SERVICE_LINE_RE.search(content)
+    return match.group(1).lower() if match else None

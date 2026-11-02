@@ -1,25 +1,29 @@
 from __future__ import annotations
 
-import fnmatch
-import hashlib
+import logging
 import os
 import subprocess
-from datetime import datetime, timezone
+import time
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator, TypeVar
+
+import httpx
 
 from incidentops.config.settings import Settings
 from incidentops.ingestion.normalized import safe_json_size
 
 from .client import CoreCollectorClient
-from .hints import build as build_hints
-from .metadata import extract as extract_metadata
+from .discovery import discover_files, normalize_file, skip_reason
 from .models import CollectorSummary, DiscoveredFile
-from .redaction import redact
 from .taxonomy import classify, language
 
-_DENIED_PARTS = {".git", ".venv", "venv", "node_modules", "__pycache__", "dist", "build", "target", ".next", ".pytest_cache"}
-_DENIED_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".sqlite", ".db", ".zip", ".gz", ".png", ".jpg", ".jpeg", ".pdf"}
+logger = logging.getLogger("incidentops.collector")
+
+T = TypeVar("T")
+
+_MAX_RETRIES = 3
+_RETRY_BASE_SECONDS = 1.0
+_TRANSIENT_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 
 class CollectorService:
@@ -34,12 +38,17 @@ class CollectorService:
         exclude_paths: list[str] | None = None,
     ) -> CollectorSummary:
         summary = CollectorSummary()
-        for item in self._discover(root, max_files, include_paths=include_paths, exclude_paths=exclude_paths):
+        accepted = 0
+        for item in self._discover(root, include_paths=include_paths, exclude_paths=exclude_paths):
+            if max_files is not None and accepted >= max_files:
+                summary.complete = False
+                break
             summary.files_seen += 1
             reason = self._skip_reason(item)
             if reason:
                 summary.skip(reason)
                 continue
+            accepted += 1
             summary.count(summary.source_type_counts, classify(item.relative_path))
             detected_language = language(item.relative_path)
             if detected_language:
@@ -67,7 +76,9 @@ class CollectorService:
         if not token or not base_url:
             raise RuntimeError("INCIDENTOPS_API_URL and INCIDENTOPS_TOKEN are required for Collector sync")
         summary = CollectorSummary()
+        summary.complete = not (include_paths or exclude_paths)
         client = CoreCollectorClient(base_url, token)
+        source_id = collector_id = sync_id = None
         try:
             repository_context = self._repository_context(
                 root,
@@ -85,7 +96,10 @@ class CollectorService:
             summary.sync_id = sync_id
             batch: list[dict] = []
             max_batch_bytes = int(limits.get("max_batch_bytes") or self.settings.max_batch_bytes)
-            for item in self._discover(root, max_files, include_paths=include_paths, exclude_paths=exclude_paths):
+            for item in self._discover(root, include_paths=include_paths, exclude_paths=exclude_paths):
+                if max_files is not None and summary.documents_normalized >= max_files:
+                    summary.complete = False
+                    break
                 summary.files_seen += 1
                 reason = self._skip_reason(item)
                 if reason:
@@ -101,10 +115,6 @@ class CollectorService:
                 document_language = document["metadata"].get("language")
                 if isinstance(document_language, str):
                     summary.count(summary.language_counts, document_language)
-                for hint in document["metadata"].get("chunking_hints", []):
-                    hint_type = hint.get("type") if isinstance(hint, dict) else None
-                    if isinstance(hint_type, str):
-                        summary.count(summary.hint_counts, hint_type)
                 if safe_json_size({"documents": [*batch, document]}) > max_batch_bytes and batch:
                     self._upload_batch(client, source_id, sync_id, collector_id, batch, summary)
                     batch = []
@@ -114,18 +124,45 @@ class CollectorService:
                     batch = []
             if batch:
                 self._upload_batch(client, source_id, sync_id, collector_id, batch, summary)
-            finish_status = "partial_success" if summary.parser_error_count or summary.embedding_failures else "success"
-            client.finish_sync(source_id, sync_id, collector_id, finish_status, summary.diagnostics())
+            degraded = summary.parser_error_count or summary.embedding_failures or summary.lost_evidence
+            finish_status = "partial_success" if degraded else "success"
+            self._with_retries(
+                summary,
+                lambda: client.finish_sync(source_id, sync_id, collector_id, finish_status, summary.diagnostics()),
+            )
             return summary
-        except Exception:
-            # Core records a failed sync when the upload operation reaches it. Do not leak document content.
+        except Exception as exc:
             summary.warnings.append("sync failed; inspect Core sync diagnostics and Collector logs")
+            summary.complete = False
+            if sync_id is not None:
+                self._finish_failed(client, source_id, sync_id, collector_id, summary, exc)
             raise
         finally:
             client.close()
 
+    def _finish_failed(
+        self,
+        client: CoreCollectorClient,
+        source_id: str,
+        sync_id: str,
+        collector_id: str,
+        summary: CollectorSummary,
+        exc: Exception,
+    ) -> None:
+        """Close the sync on Core. Only the class name is sent: messages can quote document content."""
+        error = type(exc).__name__
+        diagnostics = {**summary.diagnostics(), "error": error, "error_message": f"collector sync failed: {error}"}
+        try:
+            self._with_retries(
+                summary,
+                lambda: client.finish_sync(source_id, sync_id, collector_id, "failed", diagnostics),
+            )
+        except Exception as finish_exc:
+            # The sync error is what the caller must see, not this one.
+            logger.warning("could not mark sync %s failed: %s", sync_id, type(finish_exc).__name__)
+
     def _upload_batch(self, client: CoreCollectorClient, source_id: str, sync_id: str, collector_id: str, batch: list[dict], summary: CollectorSummary) -> None:
-        response = client.upload(source_id, sync_id, collector_id, batch)
+        response = self._with_retries(summary, lambda: client.upload(source_id, sync_id, collector_id, batch))
         created = int(response.get("created", 0))
         updated = int(response.get("updated", 0))
         unchanged = int(response.get("skipped_unchanged", 0))
@@ -134,39 +171,39 @@ class CollectorService:
         summary.documents_unchanged += unchanged
         summary.documents_synced += created + updated + unchanged
         if unchanged:
-            summary.skipped_reasons["unchanged"] = summary.skipped_reasons.get("unchanged", 0) + unchanged
+            summary.skip("unchanged", unchanged)
         summary.chunks_created += int(response.get("chunks_created", 0))
         diagnostics = response.get("diagnostics")
         if isinstance(diagnostics, dict):
             summary.record_core_diagnostics(diagnostics)
-        summary.bytes_uploaded += sum(int(item["size_bytes"]) for item in batch)
+        rejected = {error.get("external_id") for error in response.get("errors") or [] if isinstance(error, dict)}
+        summary.bytes_uploaded += sum(int(item["size_bytes"]) for item in batch if item["external_id"] not in rejected)
+
+    @staticmethod
+    def _with_retries(summary: CollectorSummary, call: Callable[[], T]) -> T:
+        """Retry transient Core failures.
+
+        Core skips content hashes it has already indexed, so a re-sent batch does
+        not re-index them. With async indexing, a batch whose first attempt landed
+        but is still queued can be queued and counted again.
+        """
+        retries = 0
+        while True:
+            try:
+                result = call()
+            except Exception as exc:
+                if retries >= _MAX_RETRIES or not _is_transient(exc):
+                    raise
+                summary.retry_attempted += 1
+                time.sleep(_RETRY_BASE_SECONDS * 2**retries)
+                retries += 1
+                continue
+            if retries:
+                summary.retry_succeeded += 1
+            return result
 
     def _normalize(self, item: DiscoveredFile, **repo_metadata: str | None) -> tuple[dict | None, str | None]:
-        try:
-            text = Path(item.absolute_path).read_text(encoding="utf-8", errors="strict")
-        except (OSError, UnicodeDecodeError):
-            return None, "read_failed"
-        try:
-            content, redaction_count = redact(text)
-        except Exception:
-            return None, "redaction_failed"
-        source_type = classify(item.relative_path, content)
-        metadata = extract_metadata(item.relative_path, content, **repo_metadata)
-        hints = build_hints(item.relative_path, content, source_type)
-        metadata["chunking_hints"] = hints[: self.settings.max_chunks_per_document]
-        metadata["hints_are_advisory"] = True
-        metadata["redaction_count"] = redaction_count
-        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        return {
-            "external_id": item.relative_path,
-            "path": item.relative_path,
-            "source_type": source_type,
-            "content": content,
-            "content_hash": content_hash,
-            "size_bytes": len(content.encode("utf-8")),
-            "modified_at": item.modified_at.isoformat() if item.modified_at else None,
-            "metadata": metadata,
-        }, None
+        return normalize_file(item, **repo_metadata)
 
     @staticmethod
     def _repository_context(
@@ -189,49 +226,20 @@ class CollectorService:
     def _discover(
         self,
         root: Path,
-        max_files: int | None,
         *,
         include_paths: list[str] | None = None,
         exclude_paths: list[str] | None = None,
     ) -> Iterator[DiscoveredFile]:
-        root = root.resolve()
-        if not root.is_dir():
-            raise ValueError(f"collector root is not a directory: {root}")
-        emitted = 0
-        for path in sorted(root.rglob("*")):
-            if not path.is_file():
-                continue
-            relative = path.relative_to(root).as_posix()
-            if include_paths and not any(fnmatch.fnmatchcase(relative, pattern) for pattern in include_paths):
-                continue
-            if exclude_paths and any(fnmatch.fnmatchcase(relative, pattern) for pattern in exclude_paths):
-                continue
-            stat = path.stat()
-            yield DiscoveredFile(str(path), relative, stat.st_size, datetime.fromtimestamp(stat.st_mtime, timezone.utc))
-            emitted += 1
-            if max_files is not None and emitted >= max_files:
-                return
+        return discover_files(root, include_paths=include_paths, exclude_paths=exclude_paths)
 
     def _skip_reason(self, item: DiscoveredFile) -> str | None:
-        parts = set(Path(item.relative_path).parts)
-        if parts & _DENIED_PARTS:
-            return "generated_file" if parts & {"dist", "build", "target", ".next"} else "vendor_file"
-        suffix = Path(item.relative_path).suffix.lower()
-        if suffix in _DENIED_SUFFIXES or Path(item.relative_path).name.startswith(".env"):
-            return "unsupported_extension"
-        if item.size_bytes == 0:
-            return "empty"
-        if item.size_bytes > self.settings.max_document_bytes:
-            return "oversized"
-        if suffix and suffix not in self.settings.supported_extensions_set:
-            return "unsupported_extension"
-        try:
-            sample = Path(item.absolute_path).read_bytes()[:4096]
-        except OSError:
-            return "unknown"
-        if b"\x00" in sample:
-            return "binary"
-        return None
+        return skip_reason(item, self.settings)
+
+
+def _is_transient(exc: Exception) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _TRANSIENT_STATUS_CODES
+    return isinstance(exc, httpx.TransportError)
 
 
 def _git_value(root: Path, args: list[str]) -> str | None:

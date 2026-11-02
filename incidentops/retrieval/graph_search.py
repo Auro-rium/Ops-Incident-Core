@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from incidentops.db.models import Chunk, EvidenceRelation
+from incidentops.retrieval.lexical_search import apply_chunk_filters
 
 
 async def graph_search(
@@ -18,6 +19,7 @@ async def graph_search(
     query_info: dict[str, Any],
     *,
     top_k: int,
+    filters: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Return chunks connected to exact graph keys mentioned by a query."""
     terms = _terms(query_info)
@@ -38,6 +40,8 @@ async def graph_search(
         .where(EvidenceRelation.project_id == project_id, or_(*predicates))
         .limit(max(top_k * 4, top_k))
     )
+    if filters:
+        stmt = apply_chunk_filters(stmt, filters)
     rows = await db.execute(stmt)
     candidates: dict[uuid.UUID, dict[str, Any]] = {}
     for relation, chunk in rows.all():

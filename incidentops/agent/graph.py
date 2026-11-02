@@ -8,6 +8,7 @@ from incidentops.agent.nodes import (
     analyze_deploy_diff_node,
     analyze_logs_node,
     classify_task_node,
+    compose_answer_node,
     draft_incident_report_node,
     draft_issue_node,
     extract_entities_node,
@@ -46,12 +47,23 @@ NODE_ORDER: list[tuple[str, AgentNode]] = [
     ("find_previous_incidents", find_previous_incidents_node),
     ("generate_hypotheses", generate_hypotheses_node),
     ("select_root_cause", select_root_cause_node),
+    ("compose_answer", compose_answer_node),
     ("draft_incident_report", draft_incident_report_node),
     ("draft_issue", draft_issue_node),
     ("risk_gate", risk_gate_node),
     ("wait_for_human_approval", wait_for_human_approval_node),
     ("finalize_answer", finalize_answer_node),
 ]
+
+RISK_GATE_NODE = "risk_gate"
+APPROVAL_NODE = "wait_for_human_approval"
+FINALIZE_NODE = "finalize_answer"
+
+
+def route_after_risk_gate(state: InvestigationState | InvestigationGraphState) -> str:
+    """Only runs needing approval visit the approval node; others go straight to finalize."""
+    pending = state.get("pending_approval") if isinstance(state, dict) else state.pending_approval
+    return APPROVAL_NODE if pending else FINALIZE_NODE
 
 
 def build_agent_graph(node_runner: NodeRunner | None = None):
@@ -73,6 +85,13 @@ def build_agent_graph(node_runner: NodeRunner | None = None):
 
     graph.add_edge(START, NODE_ORDER[0][0])
     for (current_name, _), (next_name, _) in zip(NODE_ORDER, NODE_ORDER[1:], strict=False):
+        if current_name == RISK_GATE_NODE:
+            graph.add_conditional_edges(
+                RISK_GATE_NODE,
+                route_after_risk_gate,
+                {APPROVAL_NODE: APPROVAL_NODE, FINALIZE_NODE: FINALIZE_NODE},
+            )
+            continue
         graph.add_edge(current_name, next_name)
     graph.add_edge(NODE_ORDER[-1][0], END)
 
@@ -99,6 +118,8 @@ async def run_agent_graph(
 
     state = initial_state
     for node_name, node in NODE_ORDER:
+        if node_name == APPROVAL_NODE and route_after_risk_gate(state) != APPROVAL_NODE:
+            continue
         if node_runner is not None:
             state = await node_runner(node_name, node, state)
         else:

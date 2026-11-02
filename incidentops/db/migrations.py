@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -12,6 +13,8 @@ from incidentops.db.base import Base
 import incidentops.db.models  # noqa: F401 - register SQLAlchemy models for metadata checks
 from incidentops.db.session import _get_session_factory
 from incidentops.retrieval.vector_store import QdrantVectorStore
+
+logger = logging.getLogger("incidentops.db.migrations")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
@@ -59,7 +62,7 @@ def build_readiness_payload(
     existing_columns: Mapping[str, set[str]] | None = None,
     current_revision: str | None,
     head_revision: str | None,
-    database_error: str | None = None,
+    vector_store_skipped: bool = False,
 ) -> dict[str, Any]:
     missing_tables = [table for table in required_tables() if table not in existing_tables]
     missing_columns: dict[str, list[str]] = {}
@@ -92,31 +95,39 @@ def build_readiness_payload(
             and migration_status == "ok"
         ),
         "database": "ok" if database_ok else "error",
-        "vector_store": "ok" if vector_store_ok else "unavailable",
+        "vector_store": "skipped" if vector_store_skipped else "ok" if vector_store_ok else "unavailable",
         "required_tables": "ok" if not missing_tables else missing_tables,
         "required_columns": "ok" if not missing_columns else missing_columns,
         "migration": migration_status,
         "current_revision": current_revision,
         "head_revision": head_revision,
     }
-    if database_error:
-        payload["database_error"] = database_error
     return payload
 
 
-async def check_database_ready(db: AsyncSession | None = None) -> dict[str, Any]:
+async def check_database_ready(
+    db: AsyncSession | None = None, *, skip_vector: bool = False
+) -> dict[str, Any]:
+    """Return a detailed readiness payload.
+
+    ``skip_vector`` lets the migration job verify the schema while Qdrant is down.
+    Database exception text is logged, never returned, because ``/ready`` is public.
+    """
     if db is None:
         factory = _get_session_factory()
         async with factory() as session:
-            return await _check_database_ready_with_session(session)
-    return await _check_database_ready_with_session(db)
+            return await _check_database_ready_with_session(session, skip_vector=skip_vector)
+    return await _check_database_ready_with_session(db, skip_vector=skip_vector)
 
 
-async def _check_database_ready_with_session(db: AsyncSession) -> dict[str, Any]:
+async def _check_database_ready_with_session(
+    db: AsyncSession, *, skip_vector: bool = False
+) -> dict[str, Any]:
     head_revision = get_head_revision()
     try:
         await db.execute(text("SELECT 1"))
-    except Exception as exc:
+    except Exception:
+        logger.exception("Database readiness check failed")
         await db.rollback()
         return build_readiness_payload(
             database_ok=False,
@@ -124,10 +135,9 @@ async def _check_database_ready_with_session(db: AsyncSession) -> dict[str, Any]
             existing_tables=set(),
             current_revision=None,
             head_revision=head_revision,
-            database_error=f"{exc.__class__.__name__}: {exc}",
         )
 
-    vector_store_ok = await QdrantVectorStore().health()
+    vector_store_ok = True if skip_vector else await QdrantVectorStore().health()
     table_rows = await db.execute(
         text(
             "SELECT table_name FROM information_schema.tables "
@@ -157,4 +167,5 @@ async def _check_database_ready_with_session(db: AsyncSession) -> dict[str, Any]
         existing_columns=existing_columns,
         current_revision=current_revision,
         head_revision=head_revision,
+        vector_store_skipped=skip_vector,
     )

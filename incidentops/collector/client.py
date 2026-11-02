@@ -69,6 +69,12 @@ class CoreCollectorClient:
     def finish_sync(self, source_id: str, sync_id: str, collector_id: str, status: str, diagnostics: dict[str, Any]) -> None:
         response = self._client.post(
             f"/v1/sources/{source_id}/syncs/{sync_id}/finish",
-            json={"collector_id": collector_id, "status": status, "diagnostics": diagnostics},
+            json={
+                "collector_id": collector_id,
+                "status": status,
+                "diagnostics": diagnostics,
+                # Core prunes unseen documents only on this flag; anything less than a full walk must send False.
+                "complete": diagnostics.get("complete") is True,
+            },
         )
         response.raise_for_status()

@@ -22,11 +22,10 @@ async def get_capabilities(settings: Settings = Depends(get_settings_dep)) -> Ca
             "search": True,
             "investigate": True,
             "runs": True,
-            "mcp": True,
+            "mcp": settings.mcp_enabled,
             "azure_openai_required": settings.is_production_like and settings.require_azure_openai,
         },
         limits={
-            "max_batch_size": settings.max_batch_bytes,
             "max_documents_per_batch": settings.max_documents_per_batch,
             "max_document_bytes": settings.max_document_bytes,
             "max_batch_bytes": settings.max_batch_bytes,

@@ -34,6 +34,7 @@ async def bootstrap_admin(
     update_password: bool = False,
 ) -> str:
     settings = get_settings()
+    email = email.strip().lower()
     if settings.is_production_like and password in {"incidentops", "password", "admin", "change-me"}:
         raise ValueError("Refusing weak/default bootstrap password in production-like environment")
     if settings.is_production_like and len(password) < 12:
@@ -41,7 +42,7 @@ async def bootstrap_admin(
 
     factory = _get_session_factory()
     async with factory() as db:
-        result = await db.execute(select(User).where(func.lower(User.email) == email.lower()))
+        result = await db.execute(select(User).where(func.lower(User.email) == email))
         user = result.scalar_one_or_none()
         if user:
             if update_password:

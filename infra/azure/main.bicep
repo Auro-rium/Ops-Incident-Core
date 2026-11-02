@@ -55,17 +55,17 @@ param collectorRepoUrl string = ''
 @description('Allowed browser origins for Core CORS.')
 param corsOrigins string = 'https://CHANGE-ME'
 
-@description('Azure OpenAI / Foundry endpoint. Required for production deployment.')
+@description('Azure OpenAI / Foundry endpoint. Required when cloudProvider is azure.')
 param azureOpenAIEndpoint string = ''
 
 @secure()
-@description('Azure OpenAI / Foundry key. Required for production deployment.')
+@description('Azure OpenAI / Foundry key. Required when cloudProvider is azure.')
 param azureOpenAIApiKey string = ''
 
 @description('Optional Azure OpenAI API version.')
 param azureOpenAIApiVersion string = '2024-10-21'
 
-@description('Azure OpenAI / Foundry chat deployment name. Required for production deployment.')
+@description('Azure OpenAI / Foundry chat deployment name. Required when cloudProvider is azure.')
 param azureOpenAIChatDeployment string = ''
 
 @description('Optional Azure OpenAI / Foundry embedding deployment name. Required only when embeddingModel is azure-openai.')
@@ -117,6 +117,20 @@ param vectorIndexVersion string = 'nemotron-3-embed-1b-2048'
 @description('Core access token used by the MCP server to call Core APIs. Set after bootstrap or during redeploy.')
 param incidentopsMcpToken string = ''
 
+@secure()
+@description('Bearer token MCP clients must send to the MCP server. The MCP app stays scaled to zero without it.')
+param mcpInboundToken string = ''
+
+@secure()
+@description('Optional bearer token that lets Prometheus scrape /metrics without a user JWT.')
+param metricsToken string = ''
+
+@description('Comma-separated CIDRs whose X-Forwarded-For header is trusted. Container Apps ingress reaches the app from a private range.')
+param trustedProxies string = '10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10'
+
+@description('Put the Container Apps environment in a VNet and reach Postgres, Redis and Key Vault over private endpoints. Adds Azure cost. A managed environment cannot join a VNet after creation, so use this on a fresh resource group.')
+param enablePrivateNetworking bool = false
+
 var suffix = uniqueString(resourceGroup().id, namePrefix, environmentName)
 var safePrefix = toLower(replace(namePrefix, '-', ''))
 var effectiveAcrName = empty(acrName) ? take('${safePrefix}${suffix}', 50) : acrName
@@ -127,7 +141,7 @@ var vaultName = take('${safePrefix}-${environmentName}-${suffix}', 24)
 var postgresName = take('${safePrefix}-${environmentName}-${suffix}', 63)
 var redisName = take('${safePrefix}-${environmentName}-${suffix}', 63)
 var databaseName = 'incidentops'
-var databaseUrl = 'postgresql+asyncpg://${postgresAdminUser}:${postgresAdminPassword}@${postgresServer.properties.fullyQualifiedDomainName}:5432/${databaseName}?ssl=require'
+var databaseUrl = 'postgresql+asyncpg://${uriComponent(postgresAdminUser)}:${uriComponent(postgresAdminPassword)}@${postgresServer.properties.fullyQualifiedDomainName}:5432/${databaseName}?ssl=require'
 var coreApiImage = '${containerRegistry.properties.loginServer}/incidentops-core:${coreImageTag}'
 var coreWorkerImage = '${containerRegistry.properties.loginServer}/incidentops-core:${coreImageTag}'
 var coreMcpImage = '${containerRegistry.properties.loginServer}/incidentops-core:${coreImageTag}'
@@ -139,6 +153,10 @@ var mcpContainerAppName = '${namePrefix}-mcp'
 var collectorContainerAppName = '${namePrefix}-collector'
 var frontendContainerAppName = '${namePrefix}-frontend'
 var mcpProbeJobName = '${namePrefix}-mcp-probe-job'
+var publicNetworkAccess = enablePrivateNetworking ? 'Disabled' : 'Enabled'
+var vnetName = '${namePrefix}-${environmentName}-vnet'
+var infrastructureSubnetName = 'container-apps'
+var privateEndpointSubnetName = 'private-endpoints'
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: logName
@@ -178,7 +196,7 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     }
     enableRbacAuthorization: true
     enabledForTemplateDeployment: true
-    publicNetworkAccess: 'Enabled'
+    publicNetworkAccess: publicNetworkAccess
     softDeleteRetentionInDays: 7
   }
 }
@@ -205,7 +223,7 @@ resource postgresServer 'Microsoft.DBforPostgreSQL/flexibleServers@2023-12-01-pr
       mode: 'Disabled'
     }
     network: {
-      publicNetworkAccess: 'Enabled'
+      publicNetworkAccess: publicNetworkAccess
     }
   }
 }
@@ -216,7 +234,7 @@ resource postgresDatabase 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2
   properties: {}
 }
 
-resource postgresAllowAzureServices 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2023-12-01-preview' = {
+resource postgresAllowAzureServices 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2023-12-01-preview' = if (!enablePrivateNetworking) {
   parent: postgresServer
   name: 'allow-azure-services'
   properties: {
@@ -235,7 +253,7 @@ resource redisCache 'Microsoft.Cache/redisEnterprise@2025-07-01' = {
     encryption: {}
     minimumTlsVersion: '1.2'
     highAvailability: 'Disabled'
-    publicNetworkAccess: 'Enabled'
+    publicNetworkAccess: publicNetworkAccess
   }
 }
 
@@ -340,10 +358,147 @@ resource mcpTokenSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   }
 }
 
+resource mcpInboundTokenSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: keyVault
+  name: 'MCP-INBOUND-TOKEN'
+  properties: {
+    value: empty(mcpInboundToken) ? 'disabled' : mcpInboundToken
+  }
+}
+
+resource metricsTokenSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: keyVault
+  name: 'METRICS-TOKEN'
+  properties: {
+    value: empty(metricsToken) ? 'disabled' : metricsToken
+  }
+}
+
+// Opt-in private networking. ACR stays public: private endpoints need its Premium SKU.
+var privateLinks = [
+  {
+    key: 'postgres'
+    zone: 'privatelink.postgres.database.azure.com'
+    groupId: 'postgresqlServer'
+    serviceId: postgresServer.id
+  }
+  {
+    key: 'redis'
+    zone: 'privatelink.redis.azure.net'
+    groupId: 'redisEnterprise'
+    serviceId: redisCache.id
+  }
+  {
+    key: 'keyvault'
+    zone: 'privatelink.vaultcore.azure.net'
+    groupId: 'vault'
+    serviceId: keyVault.id
+  }
+]
+
+resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = if (enablePrivateNetworking) {
+  name: vnetName
+  location: location
+  properties: {
+    addressSpace: {
+      addressPrefixes: [
+        '10.40.0.0/16'
+      ]
+    }
+    subnets: [
+      {
+        // A consumption-only environment needs an undelegated /23.
+        name: infrastructureSubnetName
+        properties: {
+          addressPrefix: '10.40.0.0/23'
+        }
+      }
+      {
+        name: privateEndpointSubnetName
+        properties: {
+          addressPrefix: '10.40.2.0/24'
+        }
+      }
+    ]
+  }
+}
+
+resource privateDnsZones 'Microsoft.Network/privateDnsZones@2020-06-01' = [for link in privateLinks: if (enablePrivateNetworking) {
+  name: link.zone
+  location: 'global'
+}]
+
+resource privateDnsVnetLinks 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = [for (link, i) in privateLinks: if (enablePrivateNetworking) {
+  parent: privateDnsZones[i]
+  name: '${vnetName}-link'
+  location: 'global'
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: resourceId('Microsoft.Network/virtualNetworks', vnetName)
+    }
+  }
+  dependsOn: [
+    vnet
+  ]
+}]
+
+resource privateEndpoints 'Microsoft.Network/privateEndpoints@2023-11-01' = [for link in privateLinks: if (enablePrivateNetworking) {
+  name: '${namePrefix}-${environmentName}-${link.key}-pe'
+  location: location
+  properties: {
+    subnet: {
+      id: resourceId('Microsoft.Network/virtualNetworks/subnets', vnetName, privateEndpointSubnetName)
+    }
+    privateLinkServiceConnections: [
+      {
+        name: link.key
+        properties: {
+          privateLinkServiceId: link.serviceId
+          groupIds: [
+            link.groupId
+          ]
+        }
+      }
+    ]
+  }
+  dependsOn: [
+    vnet
+    postgresDatabase
+    redisDatabase
+  ]
+}]
+
+resource privateDnsZoneGroups 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = [for (link, i) in privateLinks: if (enablePrivateNetworking) {
+  parent: privateEndpoints[i]
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: link.key
+        properties: {
+          privateDnsZoneId: resourceId('Microsoft.Network/privateDnsZones', link.zone)
+        }
+      }
+    ]
+  }
+  dependsOn: [
+    privateDnsVnetLinks
+  ]
+}]
+
 resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: appEnvName
   location: location
+  // Apps resolve Key Vault secrets at startup, so private DNS must be in place first.
+  dependsOn: [
+    privateDnsZoneGroups
+  ]
   properties: {
+    vnetConfiguration: enablePrivateNetworking ? {
+      infrastructureSubnetId: resourceId('Microsoft.Network/virtualNetworks/subnets', vnetName, infrastructureSubnetName)
+      internal: false
+    } : null
     appLogsConfiguration: {
       destination: 'log-analytics'
       logAnalyticsConfiguration: {
@@ -518,15 +673,19 @@ var sharedCoreEnv = [
   }
   {
     name: 'REQUIRE_AZURE_OPENAI'
-    value: 'false'
+    value: cloudProvider == 'azure' ? 'true' : 'false'
   }
   {
     name: 'DATABASE_URL'
     secretRef: 'database-url'
   }
   {
+    name: 'TRUSTED_PROXIES'
+    value: trustedProxies
+  }
+  {
     name: 'REDIS_HOST'
-    value: '${redisName}.${location}.redis.azure.net'
+    value: redisCache.properties.hostName
   }
   {
     name: 'REDIS_PORT'
@@ -578,6 +737,11 @@ var mcpSecrets = concat(coreSecrets, [
   {
     name: 'incidentops-mcp-token'
     keyVaultUrl: mcpTokenSecret.properties.secretUri
+    identity: appIdentity.id
+  }
+  {
+    name: 'incidentops-mcp-inbound-token'
+    keyVaultUrl: mcpInboundTokenSecret.properties.secretUri
     identity: appIdentity.id
   }
 ])
@@ -649,7 +813,13 @@ resource coreApi 'Microsoft.App/containerApps@2024-03-01' = {
           identity: appIdentity.id
         }
       ]
-      secrets: coreSecrets
+      secrets: concat(coreSecrets, [
+        {
+          name: 'metrics-token'
+          keyVaultUrl: metricsTokenSecret.properties.secretUri
+          identity: appIdentity.id
+        }
+      ])
       ingress: {
         external: true
         targetPort: 8000
@@ -669,9 +839,14 @@ resource coreApi 'Microsoft.App/containerApps@2024-03-01' = {
           command: [
             'sh'
             '-c'
-            'python scripts/check_migrations.py && uvicorn apps.api.main:app --host 0.0.0.0 --port 8000'
+            'sh scripts/wait_for_migrations.sh && exec uvicorn apps.api.main:app --host 0.0.0.0 --port 8000'
           ]
-          env: sharedCoreEnv
+          env: concat(sharedCoreEnv, [
+            {
+              name: 'METRICS_TOKEN'
+              secretRef: 'metrics-token'
+            }
+          ])
           resources: {
             cpu: json('0.5')
             memory: '1Gi'
@@ -766,7 +941,7 @@ resource coreMcp 'Microsoft.App/containerApps@2024-03-01' = {
     }
     template: {
       scale: {
-        minReplicas: empty(incidentopsMcpToken) ? 0 : 1
+        minReplicas: empty(incidentopsMcpToken) || empty(mcpInboundToken) ? 0 : 1
         maxReplicas: 1
       }
       containers: [
@@ -802,6 +977,10 @@ resource coreMcp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               name: 'MCP_TOKEN'
               secretRef: 'incidentops-mcp-token'
+            }
+            {
+              name: 'MCP_INBOUND_TOKEN'
+              secretRef: 'incidentops-mcp-inbound-token'
             }
           ])
           resources: {
@@ -998,6 +1177,12 @@ resource mcpProbeJob 'Microsoft.App/jobs@2024-03-01' = {
           keyVaultUrl: collectorTokenSecret.properties.secretUri
           identity: appIdentity.id
         }
+        {
+          // Declared here so redeploys keep the secret azure_mcp_smoke.sh references.
+          name: 'incidentops-mcp-inbound-token'
+          keyVaultUrl: mcpInboundTokenSecret.properties.secretUri
+          identity: appIdentity.id
+        }
       ]
     }
     template: {
@@ -1056,7 +1241,7 @@ resource migrationJob 'Microsoft.App/jobs@2024-03-01' = {
           command: [
             'sh'
             '-c'
-            'alembic upgrade head && python scripts/check_migrations.py'
+            'alembic upgrade head && python scripts/check_migrations.py --skip-vector'
           ]
           env: sharedCoreEnv
           resources: {

@@ -11,12 +11,6 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
-class HealthResponse(BaseModel):
-    status: str
-    database: str
-    vector_index: str
-
-
 class CreateProjectRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=256)
     demo_mode: bool = False
@@ -67,6 +61,7 @@ class SourceCoverageResponse(BaseModel):
 
 class IngestResponse(BaseModel):
     project_id: str
+    status: str = "success"
     documents_ingested: int
     total_files_seen: int
     files_ingested: int
@@ -144,6 +139,8 @@ class SyncStartRequest(BaseModel):
 
 class SyncFinishRequest(BaseModel):
     status: str = Field(..., min_length=1, max_length=64)
+    # True only if this sync discovered the whole source; enables stale-document removal.
+    complete: bool = False
     diagnostics: dict[str, Any] = Field(default_factory=dict)
     coverage: dict[str, Any] = Field(default_factory=dict)
 
@@ -403,6 +400,7 @@ class EvidenceItem(BaseModel):
     score: float
     text_preview: str
     why_retrieved: list[str] = Field(default_factory=list)
+    prompt_injection_flagged: bool = False
     citation: CitationInfo
 
 
@@ -417,6 +415,7 @@ class AnswerResponse(BaseModel):
     llm_latency_ms: int | None = None
     latency_ms: int
     warnings: list[str] = Field(default_factory=list)
+    warning: str | None = None
 
 
 class InvestigationRequest(BaseModel):
@@ -540,6 +539,8 @@ class EvalRunRequest(BaseModel):
     project_id: UUID
     top_k: int = Field(default=10, ge=1, le=50)
     cases_path: str | None = Field(default=None, min_length=1, max_length=4096)
+    # Inline alternative to cases_path; bounded by MAX_EVAL_CASES_BYTES.
+    cases: list[dict[str, Any]] | None = Field(default=None, min_length=1)
 
 
 class EvalRunResponse(BaseModel):

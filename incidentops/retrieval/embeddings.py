@@ -162,45 +162,25 @@ def _azure_embed(texts: list[str]) -> list[list[float]]:
     # parallel so concurrency improves throughput without burst 429s.
     with _azure_embedding_lock:
         with httpx.Client(timeout=float(settings.llm_timeout_seconds)) as client:
-            for attempt in range(settings.embedding_request_max_retries + 1):
-                _respect_embedding_min_interval(settings)
-                try:
-                    response = client.post(
-                        url,
-                        params={"api-version": settings.azure_openai_api_version},
-                        headers=headers,
-                        json=payload,
-                    )
-                except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                    if attempt >= settings.embedding_request_max_retries:
-                        raise
-                    delay = _embedding_retry_delay(None, attempt, settings)
-                    logger.warning(
-                        "Azure embedding request failed with %s; retrying in %.2fs (attempt %d/%d)",
-                        exc.__class__.__name__,
-                        delay,
-                        attempt + 1,
-                        settings.embedding_request_max_retries,
-                    )
-                    time.sleep(delay)
-                    continue
-                if response.status_code in _RETRYABLE_EMBEDDING_STATUS_CODES and attempt < settings.embedding_request_max_retries:
-                    delay = _embedding_retry_delay(response, attempt, settings)
-                    _extend_azure_backoff(delay)
-                    logger.warning(
-                        "Azure embedding request returned HTTP %d; retrying in %.2fs (attempt %d/%d)",
-                        response.status_code,
-                        delay,
-                        attempt + 1,
-                        settings.embedding_request_max_retries,
-                    )
-                    time.sleep(delay)
-                    continue
-                response.raise_for_status()
-                break
+            response = _post_with_retries(
+                client,
+                settings,
+                "Azure",
+                lambda: client.post(
+                    url,
+                    params={"api-version": settings.azure_openai_api_version},
+                    headers=headers,
+                    json=payload,
+                ),
+                before_attempt=lambda: _respect_embedding_min_interval(settings),
+                on_retryable_status=_extend_azure_backoff,
+            )
     data = response.json()["data"]
     ordered = sorted(data, key=lambda item: item.get("index", 0))
     embeddings = [item["embedding"] for item in ordered]
+    if len(embeddings) != len(texts):
+        raise RuntimeError("Azure embedding backend returned an unexpected result count")
+    _validate_dimensions(embeddings, settings.embedding_dim, "Azure")
     for embedding in embeddings:
         norm = math.sqrt(sum(float(value) * float(value) for value in embedding)) or 1.0
         for index, value in enumerate(embedding):
@@ -222,26 +202,17 @@ def _huggingface_embed(texts: list[str]) -> list[list[float]]:
     }
     payload = {"inputs": texts, "normalize": True, "truncate": True}
     with httpx.Client(timeout=float(settings.llm_timeout_seconds)) as client:
-        for attempt in range(settings.embedding_request_max_retries + 1):
-            try:
-                response = client.post(url, headers=headers, json=payload)
-            except (httpx.TimeoutException, httpx.NetworkError):
-                if attempt >= settings.embedding_request_max_retries:
-                    raise
-                time.sleep(_embedding_retry_delay(None, attempt, settings))
-                continue
-            if response.status_code in _RETRYABLE_EMBEDDING_STATUS_CODES and attempt < settings.embedding_request_max_retries:
-                delay = _embedding_retry_delay(response, attempt, settings)
-                logger.warning("Hugging Face embedding request returned HTTP %d; retrying in %.2fs", response.status_code, delay)
-                time.sleep(delay)
-                continue
-            response.raise_for_status()
-            raw = response.json()
-            vectors = _coerce_huggingface_vectors(raw, len(texts))
-            if len(vectors) != len(texts):
-                raise RuntimeError("Hugging Face embedding backend returned an unexpected result count")
-            return [[float(value) for value in vector] for vector in vectors]
-    raise RuntimeError("Hugging Face embedding request exhausted retries")
+        response = _post_with_retries(
+            client,
+            settings,
+            "Hugging Face",
+            lambda: client.post(url, headers=headers, json=payload),
+        )
+    vectors = _coerce_huggingface_vectors(response.json(), len(texts))
+    if len(vectors) != len(texts):
+        raise RuntimeError("Hugging Face embedding backend returned an unexpected result count")
+    _validate_dimensions(vectors, settings.embedding_dim, "Hugging Face")
+    return [[float(value) for value in vector] for vector in vectors]
 
 
 def _nvidia_embed(texts: list[str], input_type: str) -> list[list[float]]:
@@ -260,8 +231,12 @@ def _nvidia_embed(texts: list[str], input_type: str) -> list[list[float]]:
         "Content-Type": "application/json",
     }
     with httpx.Client(timeout=float(settings.llm_timeout_seconds)) as client:
-        response = client.post(settings.nvidia_embedding_endpoint, headers=headers, json=payload)
-        response.raise_for_status()
+        response = _post_with_retries(
+            client,
+            settings,
+            "NVIDIA",
+            lambda: client.post(settings.nvidia_embedding_endpoint, headers=headers, json=payload),
+        )
     data = response.json()
     rows = data.get("data") if isinstance(data, dict) else None
     if not isinstance(rows, list) or len(rows) != len(texts):
@@ -270,8 +245,7 @@ def _nvidia_embed(texts: list[str], input_type: str) -> list[list[float]]:
     vectors = [item.get("embedding") for item in rows]
     if any(not isinstance(vector, list) for vector in vectors):
         raise RuntimeError("NVIDIA embedding backend returned an invalid vector")
-    if any(len(vector) != settings.embedding_dim for vector in vectors):
-        raise RuntimeError("NVIDIA embedding dimension does not match the configured vector index")
+    _validate_dimensions(vectors, settings.embedding_dim, "NVIDIA")
     return [[float(value) for value in vector] for vector in vectors]
 
 
@@ -334,12 +308,16 @@ def embed_texts(
     try:
         model = _load_model(chosen_model)
         embeddings = model.encode(texts, show_progress_bar=False, normalize_embeddings=True)
-        return [embedding.tolist() for embedding in embeddings]
+        vectors = [embedding.tolist() for embedding in embeddings]
     except Exception as exc:
         if settings.is_production_like:
             raise
         logger.warning("Falling back to local hash embeddings after model load failure: %s", exc)
         return [_hash_embed(text, settings.embedding_dim) for text in texts]
+    # A dimension mismatch is a configuration error, not a model-load failure:
+    # never mask it with hash vectors that would silently poison the index.
+    _validate_dimensions(vectors, settings.embedding_dim, "sentence-transformers")
+    return vectors
 
 
 async def embed_texts_async(
@@ -354,13 +332,16 @@ async def embed_texts_async(
     chosen_model = model_name or settings.embedding_model
     if chosen_model.startswith("azure-ml"):
         cached: list[list[float] | None] = await asyncio.gather(
-            *(get_embedding(text) for text in texts)
+            *(get_embedding(text, model=chosen_model, input_type=input_type) for text in texts)
         )
         missing_indexes = [index for index, vector in enumerate(cached) if vector is None]
         if missing_indexes:
             generated = await remote_embed([texts[index] for index in missing_indexes])
             await asyncio.gather(
-                *(set_embedding(texts[index], vector) for index, vector in zip(missing_indexes, generated))
+                *(
+                    set_embedding(texts[index], vector, model=chosen_model, input_type=input_type)
+                    for index, vector in zip(missing_indexes, generated)
+                )
             )
             for index, vector in zip(missing_indexes, generated):
                 cached[index] = vector
@@ -374,13 +355,67 @@ async def embed_query_async(query: str, model_name: str | None = None) -> list[f
     if chosen_model.startswith(("local-hash", "azure-ml")):
         vectors = await embed_texts_async([query], model_name=chosen_model, input_type="query")
     else:
-        cached = await get_embedding(query)
+        cached = await get_embedding(query, model=chosen_model, input_type="query")
         if cached is not None:
             return cached
         vectors = await embed_texts_async([query], model_name=chosen_model, input_type="query")
         if vectors:
-            await set_embedding(query, vectors[0])
+            await set_embedding(query, vectors[0], model=chosen_model, input_type="query")
     return vectors[0] if vectors else []
+
+
+def _post_with_retries(
+    client: httpx.Client,
+    settings,
+    provider: str,
+    send,
+    *,
+    before_attempt=None,
+    on_retryable_status=None,
+) -> httpx.Response:
+    """Send an embedding request with bounded retry/backoff on transient failures."""
+    max_retries = settings.embedding_request_max_retries
+    for attempt in range(max_retries + 1):
+        if before_attempt is not None:
+            before_attempt()
+        try:
+            response = send()
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            if attempt >= max_retries:
+                raise
+            delay = _embedding_retry_delay(None, attempt, settings)
+            logger.warning(
+                "%s embedding request failed with %s; retrying in %.2fs (attempt %d/%d)",
+                provider,
+                exc.__class__.__name__,
+                delay,
+                attempt + 1,
+                max_retries,
+            )
+            time.sleep(delay)
+            continue
+        if response.status_code in _RETRYABLE_EMBEDDING_STATUS_CODES and attempt < max_retries:
+            delay = _embedding_retry_delay(response, attempt, settings)
+            if on_retryable_status is not None:
+                on_retryable_status(delay)
+            logger.warning(
+                "%s embedding request returned HTTP %d; retrying in %.2fs (attempt %d/%d)",
+                provider,
+                response.status_code,
+                delay,
+                attempt + 1,
+                max_retries,
+            )
+            time.sleep(delay)
+            continue
+        response.raise_for_status()
+        return response
+    raise RuntimeError(f"{provider} embedding request exhausted retries")
+
+
+def _validate_dimensions(vectors: list, expected: int, provider: str) -> None:
+    if any(len(vector) != expected for vector in vectors):
+        raise RuntimeError(f"{provider} embedding dimension does not match the configured vector index")
 
 
 def _respect_embedding_min_interval(settings) -> None:

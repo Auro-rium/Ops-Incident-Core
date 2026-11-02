@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.api.deps import check_rate_limit, get_current_user, get_db, get_settings_dep, require_user
+from apps.api.deps import check_rate_limit, get_db, get_settings_dep, require_user
 from incidentops.config.settings import Settings
 from incidentops.db.models import (
     AgentRun,
@@ -57,21 +57,19 @@ async def create_project(
     request: Request,
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
-    user=Depends(get_current_user),
+    user=Depends(require_user),
 ):
-    if settings.is_production_like and user is None:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    # Every project gets its creator as admin, so anonymous creation is never allowed.
     if settings.is_production_like and body.demo_mode:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="demo_mode projects are disabled in production")
     existing = await db.execute(select(Project).where(Project.name == body.name))
     if existing.scalar_one_or_none():
-        raise HTTPException(status.HTTP_409_CONFLICT, detail=f"Project '{body.name}' already exists")
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="Project name is not available")
     project = Project(name=body.name, demo_mode=body.demo_mode)
     db.add(project)
     await db.flush()
-    if user:
-        db.add(ProjectMember(project_id=project.id, user_id=user.id, role=ProjectRole.admin))
-        await db.flush()
+    db.add(ProjectMember(project_id=project.id, user_id=user.id, role=ProjectRole.admin))
+    await db.flush()
     await record_audit_event(
         db,
         action="project_created",
@@ -159,7 +157,7 @@ async def delete_project(
     retrieval_run_ids = select(RetrievalRun.id).where(RetrievalRun.project_id == project_id)
 
     try:
-        await QdrantVectorStore(settings).delete_by_filter(project_id)
+        await QdrantVectorStore(settings).delete_by_filter(project_id, all_index_versions=True)
     except VectorStoreError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Vector store deletion failed") from exc
 
@@ -206,17 +204,16 @@ async def ingest(
 ):
     if not settings.local_ingest_enabled or settings.is_production_like:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Local path ingest is disabled")
-    if user:
-        await check_rate_limit(
-            db,
-            settings,
-            f"ingest:{user.id}",
-            settings.project_ingestion_limit,
-            3600,
-            user=user,
-            project_id=project_id,
-            action="ingest",
-        )
+    await check_rate_limit(
+        db,
+        settings,
+        f"ingest:{user.id}",
+        settings.project_ingestion_limit,
+        settings.ingest_rate_limit_window_seconds,
+        user=user,
+        project_id=project_id,
+        action="ingest",
+    )
     result = await db.execute(select(Project).where(Project.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
@@ -269,29 +266,13 @@ async def ingest(
     await record_audit_event(
         db,
         action="local_ingest_finished",
-        status="success",
+        status=stats["status"],
         project_id=project_id,
         user=user,
         resource_type="project",
         resource_id=project_id,
         request=request,
         metadata={
-            "documents_ingested": stats["documents_ingested"],
-            "chunks_created": stats["chunks_created"],
-            "files_skipped": stats["files_skipped"],
-        },
-    )
-    await record_audit_event(
-        db,
-        action="documents_batch_ingested",
-        status="success",
-        project_id=project_id,
-        user=user,
-        resource_type="project",
-        resource_id=project_id,
-        request=request,
-        metadata={
-            "mode": "local_path",
             "documents_ingested": stats["documents_ingested"],
             "chunks_created": stats["chunks_created"],
             "files_skipped": stats["files_skipped"],
@@ -299,6 +280,7 @@ async def ingest(
     )
     return IngestResponse(
         project_id=stats["project_id"],
+        status=stats["status"],
         documents_ingested=stats["documents_ingested"],
         total_files_seen=stats["total_files_seen"],
         files_ingested=stats["files_ingested"],

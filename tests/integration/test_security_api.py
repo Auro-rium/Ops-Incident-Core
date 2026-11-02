@@ -272,7 +272,7 @@ def test_investigator_cannot_approve_but_approver_can():
     run = client.post(
         "/v1/runs",
         headers=admin_headers,
-        json={"project_id": project_id, "query": "What changed?", "top_k": 1, "create_issue_draft": False},
+        json={"project_id": project_id, "query": "What changed?", "top_k": 1, "create_issue_draft": True},
     )
     assert run.status_code == 200
     run_id = run.json()["run_id"]

@@ -12,7 +12,7 @@ from incidentops.ingestion.chunking.metadata import (
     extract_endpoints,
     extract_service_from_path,
 )
-from incidentops.security.sanitizer import redact_secrets
+from incidentops.security.secret_redaction import redact_secrets
 
 
 # ── Token counting ────────────────────────────

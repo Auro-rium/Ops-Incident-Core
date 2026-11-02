@@ -142,11 +142,16 @@ _RUNBOOK_TERMS = {
 _ROOT_CAUSE_TERMS = {
     "why did",
     "root cause",
+    "caused by",
+    "cause of",
+}
+# "investigate" is common in repo-lookup phrasing ("which files are relevant to
+# investigating X"), so it signals an incident only alongside runtime, deploy,
+# or incident-history evidence words.
+_INVESTIGATE_TERMS = {
     "relevant to investigating",
     "investigating",
     "investigate",
-    "caused by",
-    "cause of",
 }
 _TOKEN_RE = re.compile(r"[a-z0-9_./-]+")
 _QUERY_STOPWORDS = {
@@ -239,7 +244,10 @@ def classify_query_intent(query: str) -> QueryIntent:
             query_terms=query_terms,
             explanation="query asks where behavior, modules, or symbols are implemented",
         )
-    if _contains_any(lower, _ROOT_CAUSE_TERMS):
+    if _contains_any(lower, _ROOT_CAUSE_TERMS) or (
+        _contains_any(lower, _INVESTIGATE_TERMS)
+        and _contains_any(lower, _RUNTIME_TERMS | _DEPLOY_TERMS | _INCIDENT_HISTORY_TERMS)
+    ):
         return QueryIntent(
             intent=INTENT_RUNTIME_INCIDENT,
             secondary_intents=[

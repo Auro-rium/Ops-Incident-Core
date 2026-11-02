@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.api.deps import check_rate_limit, enforce_query_limits, ensure_project_access, get_current_user, get_db, get_settings_dep
+from apps.api.deps import check_rate_limit, enforce_query_limits, ensure_project_access, get_current_user, get_db, get_settings_dep, rate_limit_key
 from incidentops.config.settings import Settings
 from incidentops.observability.metrics import incr, observe_latency
 from incidentops.operations.service import record_operational_event
 from incidentops.retrieval.citation_builder import build_citations
-from incidentops.retrieval.evidence_packer import pack_evidence
+from incidentops.retrieval.evidence_packer import evidence_preview, pack_evidence
 from incidentops.retrieval.hybrid_search import hybrid_search, hybrid_search_with_debug
 from incidentops.retrieval.query_intent import classify_query_intent
 from incidentops.retrieval.reranker import rerank_with_debug_async
@@ -22,22 +22,22 @@ router = APIRouter(prefix="/v1", tags=["Search"])
 @router.post("/search", response_model=SearchResponse)
 async def search(
     body: SearchRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
     user=Depends(get_current_user),
 ):
     enforce_query_limits(body.query, body.top_k, settings)
-    if user:
-        await check_rate_limit(
-            db,
-            settings,
-            f"search:{user.id}",
-            settings.user_request_limit,
-            settings.rate_limit_window_seconds,
-            user=user,
-            project_id=body.project_id,
-            action="search",
-        )
+    await check_rate_limit(
+        db,
+        settings,
+        rate_limit_key(user, request, "search"),
+        settings.user_request_limit,
+        settings.rate_limit_window_seconds,
+        user=user,
+        project_id=body.project_id,
+        action="search",
+    )
     await ensure_project_access(db, body.project_id, user, settings)
     start = time.time()
     query_intent = classify_query_intent(body.query)
@@ -69,21 +69,7 @@ async def search(
         incr("zero_result_total")
     observe_latency("search", latency_ms)
     observe_latency("search_latency", latency_ms)
-    hits = [
-        SearchHit(
-            chunk_id=item["chunk_id"],
-            rank=i + 1,
-            source_type=item["source_type"],
-            document_path=item.get("document_path", ""),
-            service_name=item.get("service_name"),
-            deploy_hash=item.get("deploy_hash"),
-            endpoint=item.get("endpoint"),
-            score=round(item.get("score", 0), 4),
-            text_preview=item["text"][:300],
-            citation=CitationInfo(**item["citation"]),
-        )
-        for i, item in enumerate(evidence)
-    ]
+    hits = _to_search_hits(evidence)
     debug = None
     if body.debug:
         debug = retrieval_debug or {}
@@ -117,6 +103,24 @@ async def search(
         evidence_mix=evidence_mix,
         debug=debug,
     )
+
+
+def _to_search_hits(evidence: list[dict]) -> list[SearchHit]:
+    return [
+        SearchHit(
+            chunk_id=item["chunk_id"],
+            rank=i + 1,
+            source_type=item["source_type"],
+            document_path=item.get("document_path", ""),
+            service_name=item.get("service_name"),
+            deploy_hash=item.get("deploy_hash"),
+            endpoint=item.get("endpoint"),
+            score=round(item.get("score", 0), 4),
+            text_preview=evidence_preview(item),
+            citation=CitationInfo(**item["citation"]),
+        )
+        for i, item in enumerate(evidence)
+    ]
 
 
 def _count_values(values) -> dict[str, int]:
