@@ -1,0 +1,209 @@
+name: End-to-end
+
+# Free full-stack verification. It holds no cloud credentials and cannot deploy.
+on:
+  pull_request:
+    branches: [core]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_ENV: local
+  DB_CREATE_ALL: "false"
+  DB_REQUIRE_MIGRATIONS: "true"
+  DATABASE_URL: postgresql+asyncpg://incidentops:incidentops@127.0.0.1:5432/incidentops
+  REDIS_URL: redis://127.0.0.1:6379/0
+  RETRIEVAL_BACKEND: qdrant
+  QDRANT_URL: http://127.0.0.1:6333
+  QDRANT_COLLECTION: incidentops_chunks_e2e
+  VECTOR_INDEX_VERSION: current
+  EMBEDDING_MODEL: local-hash-v1
+  JWT_SECRET: incidentops-local-jwt-secret-change-me
+  ALLOW_LOCAL_SEED_ADMIN: "true"
+  DEMO_MODE_PUBLIC: "false"
+  ALLOW_DEMO_PROJECT_BYPASS: "true"
+  USER_REQUEST_LIMIT: 1000
+  LOGIN_EMAIL_REQUEST_LIMIT: 1000
+  PROJECT_INGESTION_LIMIT: 1000
+  METRICS_BACKEND: memory
+  METRICS_PUBLIC: "false"
+  LOCAL_INGEST_ENABLED: "true"
+  LOCAL_INGEST_ALLOWED_ROOTS: ${{ github.workspace }},/tmp
+  EVAL_CASES_ALLOWED_ROOTS: ${{ github.workspace }},/tmp
+  API_BASE_URL: http://127.0.0.1:8000
+
+jobs:
+  tests:
+    name: Unit and integration (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: inline
+            worker_mode: inline
+            job_queue_backend: inline
+            rate_limit_backend: memory
+            deselect: ""
+          - mode: queue
+            worker_mode: queue
+            job_queue_backend: redis
+            rate_limit_backend: redis
+            # These assert the synchronous inline response.
+            deselect: >-
+              --deselect tests/integration/test_api.py::TestEvalEndpoint::test_eval_accepts_custom_cases_path
+              --deselect tests/integration/test_operations_api.py::test_observer_and_logging_runs_are_project_scoped_and_idempotent
+              --deselect tests/integration/test_security_api.py::test_investigator_cannot_approve_but_approver_can
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: incidentops
+          POSTGRES_PASSWORD: incidentops
+          POSTGRES_DB: incidentops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U incidentops"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+      qdrant:
+        image: qdrant/qdrant:v1.12.4
+        ports:
+          - 6333:6333
+    env:
+      WORKER_MODE: ${{ matrix.worker_mode }}
+      JOB_QUEUE_BACKEND: ${{ matrix.job_queue_backend }}
+      RATE_LIMIT_BACKEND: ${{ matrix.rate_limit_backend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv lock --check
+      - run: uv run --extra dev ruff check .
+      - name: Migrate up, down and up
+        run: |
+          uv run --extra dev alembic upgrade head
+          uv run --extra dev alembic downgrade -1
+          uv run --extra dev alembic upgrade head
+          uv run --extra dev python scripts/check_migrations.py
+      - run: uv run --extra dev python -m incidentops.security.bootstrap_admin --email admin@incidentops.local --password incidentops
+      - name: Start API
+        run: |
+          nohup uv run --extra dev uvicorn apps.api.main:app --host 127.0.0.1 --port 8000 > api.log 2>&1 &
+          curl -fsS --retry 60 --retry-delay 1 --retry-connrefused http://127.0.0.1:8000/health
+      - name: Start worker
+        if: matrix.mode == 'queue'
+        run: nohup uv run --extra dev python -m incidentops.worker > worker.log 2>&1 &
+      - name: Run tests
+        env:
+          PYTEST_DESELECT: ${{ matrix.deselect }}
+        # Word splitting on PYTEST_DESELECT is intended: it holds pytest flags.
+        run: uv run --extra dev python -m pytest tests/unit tests/integration -q $PYTEST_DESELECT
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs-tests-${{ matrix.mode }}
+          path: "*.log"
+          if-no-files-found: ignore
+
+  e2e:
+    name: Full stack (queue, async indexing)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: incidentops
+          POSTGRES_PASSWORD: incidentops
+          POSTGRES_DB: incidentops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U incidentops"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+      qdrant:
+        image: qdrant/qdrant:v1.12.4
+        ports:
+          - 6333:6333
+    env:
+      WORKER_MODE: queue
+      JOB_QUEUE_BACKEND: redis
+      RATE_LIMIT_BACKEND: redis
+      RAG_ASYNC_INDEXING: "true"
+      INDEX_JOB_TIMEOUT_SECONDS: 5
+      E2E_LOG_DIR: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run --extra dev alembic upgrade head
+      - run: uv run --extra dev python -m incidentops.security.bootstrap_admin --email admin@incidentops.local --password incidentops
+      - name: Start API
+        run: |
+          nohup uv run --extra dev uvicorn apps.api.main:app --host 127.0.0.1 --port 8000 > api.log 2>&1 &
+          curl -fsS --retry 60 --retry-delay 1 --retry-connrefused http://127.0.0.1:8000/health
+      - name: Run end-to-end checks
+        run: uv run --extra dev python scripts/e2e_check.py
+      - name: Start worker for the smoke test
+        run: nohup uv run --extra dev python -m incidentops.worker > smoke-worker.log 2>&1 &
+      - name: Run smoke test
+        run: >-
+          uv run --extra dev python scripts/smoke_prod.py
+          --base-url http://127.0.0.1:8000
+          --email admin@incidentops.local
+          --password incidentops
+          --query "Why did checkout latency spike after the deploy?"
+          --data-path tests/fixtures/basic_incident
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs-e2e
+          path: "*.log"
+          if-no-files-found: ignore
+
+  image:
+    name: Core image builds and imports
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f docker/core.Dockerfile -t incidentops-core:e2e .
+      - run: docker run --rm -e JWT_SECRET=image-check incidentops-core:e2e python -c "import apps.api.main"
+
+  frontend:
+    name: Frontend build and typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - working-directory: apps/web
+        run: npm ci
+      - working-directory: apps/web
+        run: npm run typecheck
+      - working-directory: apps/web
+        run: npm run build
