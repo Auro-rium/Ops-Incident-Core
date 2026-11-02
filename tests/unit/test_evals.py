@@ -104,6 +104,21 @@ async def test_eval_run_is_idempotent_and_uses_pass_thresholds(monkeypatch):
     assert summary["model_call_count"] == 1
 
 
+@pytest.mark.asyncio
+async def test_case_error_in_summary_does_not_leak_exception_text(monkeypatch):
+    async def failing_investigate(*_args, **_kwargs):
+        raise RuntimeError("postgres://user:hunter2@db failed")
+
+    monkeypatch.setattr(runner, "investigate", failing_investigate)
+    run = EvalRun(id=uuid.uuid4(), project_id=uuid.uuid4(), status=EvalStatus.queued, summary_json={})
+
+    await runner.execute_eval_run(FakeSession(), run, cases=[{"id": "c1", "question": "q"}], settings=Settings())
+
+    assert "hunter2" not in json.dumps(run.summary_json, default=str)
+    assert run.summary_json["results"][0]["error"] == "runtimeerror"
+    assert run.summary_json["passed_cases"] == 0
+
+
 def test_inline_cases_validation_enforces_size_and_shape():
     settings = Settings(max_eval_cases_bytes=200)
     assert evals_route._validate_inline_cases([{"question": "why?"}], settings) == [{"question": "why?"}]

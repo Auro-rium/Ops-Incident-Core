@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from incidentops.config.settings import Settings
+from incidentops.db.models import AgentRun, RunStatus
 from incidentops.worker import main as worker_main
 from incidentops.worker.queue import FAILED_QUEUE_KEY, InlineQueue, RedisQueue
 from incidentops.worker.schemas import Job
@@ -286,4 +289,52 @@ async def test_workflow_retries_only_transient_errors(monkeypatch):
     queue = RecordingQueue()
     await worker_main._process_job(job, queue, Settings(worker_job_max_retries=3))
     assert queue.calls[0][0] == "retry"
+
+
+def _workflow_failure_session(monkeypatch, run):
+    commit = AsyncMock()
+    statements: list = []
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def execute(self, statement):
+            statements.append(statement)
+            return SimpleNamespace(scalar_one_or_none=lambda: run)
+
+        commit = staticmethod(lambda: commit())
+
+    monkeypatch.setattr("incidentops.db.session._get_session_factory", lambda: Session)
+    monkeypatch.setattr("incidentops.agent.events.append_run_event", AsyncMock())
+    return commit, statements
+
+
+@pytest.mark.asyncio
+async def test_mark_workflow_failure_fails_running_run_under_lock(monkeypatch):
+    run = AgentRun(id=uuid.uuid4(), project_id=uuid.uuid4(), user_query="q", status=RunStatus.running, pending_approval=True)
+    commit, statements = _workflow_failure_session(monkeypatch, run)
+
+    await worker_main._mark_workflow_failure({"run_id": str(run.id)}, "job_timeout")
+
+    assert run.status == RunStatus.failed
+    assert run.error == "job_timeout"
+    assert run.pending_approval is False
+    assert statements[0]._for_update_arg is not None
+    commit.assert_awaited_once()
+
+
+@pytest.mark.parametrize("status", [RunStatus.awaiting_approval, RunStatus.completed, RunStatus.rejected])
+@pytest.mark.asyncio
+async def test_mark_workflow_failure_leaves_settled_run_alone(monkeypatch, status):
+    run = AgentRun(id=uuid.uuid4(), project_id=uuid.uuid4(), user_query="q", status=status)
+    commit, _statements = _workflow_failure_session(monkeypatch, run)
+
+    await worker_main._mark_workflow_failure({"run_id": str(run.id)}, "job_timeout")
+
+    assert run.status == status
+    commit.assert_not_awaited()
 

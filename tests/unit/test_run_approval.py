@@ -185,3 +185,117 @@ async def test_event_stream_stops_at_time_cap():
     ]
     assert factory.calls == 1
     assert chunks[-1].startswith("event: end")
+
+
+@pytest.mark.asyncio
+async def test_event_stream_ends_when_run_awaits_approval():
+    factory = _Factory([(RunStatus.awaiting_approval, [_event(1)])])
+    chunks = [
+        chunk
+        async for chunk in runs_route._stream_run_events(uuid.uuid4(), factory, poll_interval=0, max_seconds=60)
+    ]
+    assert factory.calls == 1
+    assert chunks[-1].startswith("event: end")
+    assert '"awaiting_approval"' in chunks[-1]
+
+
+@pytest.mark.asyncio
+async def test_resume_rereads_locked_run_instead_of_stale_identity_map_copy():
+    run = _run(RunStatus.awaiting_approval)
+    db = FakeSession([FakeResult(run), FakeResult(None)])
+    with pytest.raises(agent_service.ApprovalConflictError):
+        await agent_service.resume_after_approval(db, run, approved=True, rationale=None, resolved_by_user_id=None)
+    assert db.statements[0].get_execution_options().get("populate_existing") is True
+
+
+@pytest.mark.asyncio
+async def test_resume_replaces_final_answer_so_jsonb_change_is_persisted():
+    run = _run(RunStatus.awaiting_approval)
+    original = {"question": "q"}
+    run.final_answer_json = original
+    approval = Approval(run_id=run.id, action_type="create_github_issue", status=ApprovalStatus.pending)
+    db = FakeSession([FakeResult(run), FakeResult(approval), FakeResult([])])
+
+    result = await agent_service.resume_after_approval(db, run, approved=True, rationale="ok", resolved_by_user_id=None)
+
+    assert result.final_answer_json is not original
+    assert result.final_answer_json["approval"] == {"status": "approved", "rationale": "ok"}
+    assert approval.rationale == "ok"
+
+
+@pytest.mark.asyncio
+async def test_reject_route_maps_conflict_to_409_and_checks_access(monkeypatch):
+    run = _run(RunStatus.rejected)
+    access_calls: list = []
+    resume_kwargs: list = []
+    resolver = uuid.uuid4()
+
+    async def fake_access(_db, project_id, _user, _settings, minimum_role):
+        access_calls.append((project_id, minimum_role))
+
+    async def fake_resume(*_args, **kwargs):
+        resume_kwargs.append(kwargs)
+        raise agent_service.ApprovalConflictError("run is not awaiting approval")
+
+    monkeypatch.setattr(runs_route, "ensure_project_access", fake_access)
+    monkeypatch.setattr(runs_route, "resume_after_approval", fake_resume)
+    db = FakeSession([FakeResult(run)])
+
+    with pytest.raises(HTTPException) as exc_info:
+        await runs_route.reject_run(
+            run.id, SimpleNamespace(rationale="no"), None, db=db, settings=Settings(), user=SimpleNamespace(id=resolver)
+        )
+
+    assert exc_info.value.status_code == 409
+    assert access_calls == [(run.project_id, ProjectRole.approver)]
+    assert resume_kwargs[0]["approved"] is False
+    assert resume_kwargs[0]["resolved_by_user_id"] == resolver
+
+
+@pytest.mark.asyncio
+async def test_stream_route_releases_request_connection_before_streaming(monkeypatch):
+    run = _run(RunStatus.running)
+    commits: list = []
+
+    class CommittingSession(FakeSession):
+        async def commit(self):
+            commits.append(True)
+
+    async def fake_access(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(runs_route, "ensure_project_access", fake_access)
+    monkeypatch.setattr(runs_route, "_get_session_factory", lambda: _Factory([]))
+    db = CommittingSession([FakeResult(run)])
+
+    response = await runs_route.get_run_events(run.id, stream=True, db=db, settings=Settings(), user=None)
+
+    assert response.media_type == "text/event-stream"
+    # FastAPI keeps yield dependencies open until the stream ends.
+    assert commits == [True]
+    assert len(db.statements) == 1
+
+
+def test_workflow_run_error_does_not_leak_exception_text():
+    error = agent_service._safe_error(RuntimeError("postgres://user:hunter2@db failed"))
+    assert "hunter2" not in error
+    assert error == "runtimeerror"
+
+
+def test_node_failure_error_names_node_without_exception_text():
+    error = agent_service._safe_error(agent_service.NodeExecutionError("analyze_logs", ValueError("hunter2")))
+    assert error == "node_failed:analyze_logs:valueerror"
+
+
+@pytest.mark.asyncio
+async def test_node_runner_raises_safe_error_after_exhausting_attempts():
+    def failing_node(_state):
+        raise ValueError("hunter2")
+
+    with pytest.raises(agent_service.NodeExecutionError) as exc_info:
+        await agent_service.execute_node_with_observability(
+            FakeSession([]), uuid.uuid4(), "analyze_logs", failing_node, SimpleNamespace(), Settings(workflow_max_retries=0)
+        )
+
+    assert "hunter2" not in str(exc_info.value)
+    assert exc_info.value.node_name == "analyze_logs"

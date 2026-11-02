@@ -322,7 +322,7 @@ def _llm_usage(investigation) -> dict:
 
 
 def _safe_error(exc: Exception) -> str:
-    return str(exc).replace("\n", " ")[:1000]
+    return exc.__class__.__name__.lower()[:64]
 
 
 async def run_eval_http(
