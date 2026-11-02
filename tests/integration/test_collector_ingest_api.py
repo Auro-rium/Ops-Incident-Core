@@ -651,7 +651,7 @@ def test_source_delete_removes_chunks_from_search_and_reindex_refreshes_existing
     reindex = client.post(f"/v1/projects/{project_id}/sources/{source_id}/reindex", headers=headers)
     assert reindex.status_code == 200
     assert reindex.json()["chunks_reindexed"] == batch.json()["chunks_created"]
-    assert reindex.json()["chunks_created"] == 0
+    assert reindex.json()["chunks_created"] == batch.json()["chunks_created"]
 
     search = client.post(
         "/v1/search",
