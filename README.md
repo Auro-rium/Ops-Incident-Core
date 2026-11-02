@@ -7,8 +7,8 @@ results with citations and missing-evidence warnings.
 
 > Version context: This repository is the active V2 rewrite. The current cloud
 > proof path is Azure Container Apps plus Azure PostgreSQL/Redis, Key Vault,
-> Log Analytics, Azure OpenAI, and an explicitly external managed Qdrant
-> cluster. The Vercel browser console is deployed separately.
+> Log Analytics, NVIDIA NIM-compatible models, and an explicitly external managed
+> Qdrant cluster. The Vercel browser console is separate and currently paused.
 
 ## Product Boundary
 
@@ -173,7 +173,8 @@ tables/columns, and the Alembic revision.
 
 Approving or rejecting a run records the decision and marks its IssueDraft
 approved or rejected. **It makes no GitHub API call and files no issue**; the
-draft stays in Core for a person to act on.
+draft stays in Core for a person to act on. Resolving a run that is not awaiting
+approval returns 409.
 
 Evaluations are scored by threshold. A case passes only when it ran without
 error, its evidence recall meets the minimum, and its forbidden-term hits stay
@@ -296,9 +297,9 @@ Known limits of the current behaviour:
 - `MCP_INBOUND_TOKEN` is one shared static bearer token: it does not identify the
   caller, and outbound calls to Core use the service `MCP_TOKEN`, so Core sees the
   MCP service rather than the end user. The stdio transport has no inbound auth.
-- Reindex re-embeds stored chunks, so on the production configuration it calls
-  the paid NVIDIA embeddings API. It does not re-read the source; picking up parser
-  changes or source edits needs a Collector sync.
+- Reindex re-embeds from content Core already stores, so on the production
+  configuration it calls the paid NVIDIA embeddings API. It does not re-read the
+  source; picking up source edits needs a Collector sync.
 - Prompt-injection handling only flags, demotes, and labels. Flagged text can
   still reach the model and direct answers, and detection is pattern-based.
 - Evals measure retrieval against golden cases with default thresholds. They do

@@ -286,7 +286,7 @@ optional but defaults to disabled; `apps/web` is deployed on Vercel.
 
 The verified Azure resource group is `incidentops-demo-swc-rg` in
 `swedencentral`. The deployed Core API, worker, Collector, private MCP, Azure
-database/Redis dependencies, and Azure OpenAI chat/embedding configuration are
+database/Redis dependencies, and NVIDIA chat/embedding configuration are
 managed by the manual GitHub Actions workflow. Health/readiness and the normal
 Azure smoke path have passed. The private MCP smoke is opt-in because the MCP
 ingress is intentionally not public.
@@ -318,9 +318,10 @@ test/development only.
 3. Unchanged document hashes are skipped.
 4. Changed documents replace prior chunks without duplicates.
 5. Purge removes source/project evidence and retains only safe audit metadata.
-6. Reindex re-embeds the chunks Core already holds and republishes their vectors.
-   It does not re-read the source; a source reparse requires Collector
-   reingestion. On the production configuration it calls paid embeddings.
+6. Reindex re-embeds from content Core already stores and republishes the vectors:
+   inline for existing chunks, or through index jobs built from stored payloads
+   when async indexing is on. It does not re-read the source; source edits require
+   Collector reingestion. On the production configuration it calls paid embeddings.
 7. Production-like startup rejects create_all, local ingest, wildcard CORS,
    memory-only rate limits, inline workers, and local model fallback.
 8. Missing logs/deploys/incidents produce warnings rather than invented RCA.
@@ -330,7 +331,7 @@ test/development only.
    recorded in sync diagnostics, and orphaned points are dropped at read time.
 10. Approval changes Core state only: it resolves the Approval, marks the
     IssueDraft approved or rejected, and finishes the run. No GitHub API call is
-    made.
+    made. Resolving a run that is not awaiting approval returns 409.
 11. HTTP MCP transports do not serve requests without a valid inbound bearer
     token.
 
