@@ -181,7 +181,12 @@ class CollectorService:
 
     @staticmethod
     def _with_retries(summary: CollectorSummary, call: Callable[[], T]) -> T:
-        """Retry transient Core failures. Re-sending is safe: Core skips unchanged content hashes."""
+        """Retry transient Core failures.
+
+        Core skips content hashes it has already indexed, so a re-sent batch does
+        not re-index them. With async indexing, a batch whose first attempt landed
+        but is still queued can be queued and counted again.
+        """
         retries = 0
         while True:
             try:

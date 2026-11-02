@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from incidentops.collector.service import CollectorService
 from incidentops.config.settings import Settings
 from incidentops.db.models import Source, SourceSync
 from incidentops.ingestion import pipeline
@@ -45,6 +46,26 @@ def test_collector_skip_rules_apply_to_local_ingest(tmp_path, relative, reason):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("TOKEN=value\n", encoding="utf-8")
     assert _reasons(_read(tmp_path))[relative] == reason
+
+
+@pytest.mark.parametrize(
+    "name",
+    [".netrc", ".git-credentials", ".npmrc", ".pgpass", ".htpasswd", ".golangci.yml", "credentials", "id_rsa", "id_ed25519"],
+)
+def test_credential_files_are_never_read(tmp_path, name):
+    # None of these formats match a redaction pattern, so skipping is the only protection.
+    (tmp_path / name).write_text("machine host login user password hunter2\n", encoding="utf-8")
+    result = _read(tmp_path)
+    assert result.documents == []
+    assert _reasons(result) == {name: "unsupported_extension"}
+    inspected = CollectorService(Settings()).inspect(tmp_path)
+    assert inspected.skipped_reasons == {"unsupported_extension": 1}
+
+
+def test_files_inside_dot_directories_keep_their_own_rules(tmp_path):
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github" / "deploy.yml").write_text("on: push\n", encoding="utf-8")
+    assert _paths(_read(tmp_path)) == {".github/deploy.yml"}
 
 
 def test_suffixless_text_files_are_ingested_like_the_collector(tmp_path):

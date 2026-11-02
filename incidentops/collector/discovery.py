@@ -17,6 +17,7 @@ from .taxonomy import classify
 
 _DENIED_PARTS = {".git", ".venv", "venv", "node_modules", "__pycache__", "dist", "build", "target", ".next", ".pytest_cache"}
 _DENIED_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".sqlite", ".db", ".zip", ".gz", ".png", ".jpg", ".jpeg", ".pdf"}
+_CREDENTIAL_FILE_NAMES = {"credentials", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
 
 
 def discover_files(
@@ -44,8 +45,10 @@ def skip_reason(item: DiscoveredFile, settings: Settings, *, max_bytes: int | No
     parts = set(Path(item.relative_path).parts)
     if parts & _DENIED_PARTS:
         return "generated_file" if parts & {"dist", "build", "target", ".next"} else "vendor_file"
+    name = Path(item.relative_path).name
     suffix = Path(item.relative_path).suffix.lower()
-    if suffix in _DENIED_SUFFIXES or Path(item.relative_path).name.startswith(".env"):
+    # Dotfiles (.netrc, .npmrc, .git-credentials) hold secrets no redaction pattern recognizes.
+    if suffix in _DENIED_SUFFIXES or name.startswith(".") or name.lower() in _CREDENTIAL_FILE_NAMES:
         return "unsupported_extension"
     if item.size_bytes == 0:
         return "empty"
