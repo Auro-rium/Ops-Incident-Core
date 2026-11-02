@@ -337,43 +337,35 @@ async def _run_eval_if_possible(
     deadline: float,
     warnings: list[str],
 ) -> dict | None:
-    cases_path = _write_tiny_eval_case(query)
-    try:
-        response = await client.post(
-            "/v1/evals/run",
-            headers=headers,
-            json={"project_id": project_id, "cases_path": str(cases_path), "top_k": 3},
-        )
-        if not response.is_success:
-            warnings.append(f"eval skipped/failed: {response.status_code} {response.text[:200]}")
-            return None
-        payload = response.json()
-        while payload.get("status") in {"queued", "running"} and time.time() < deadline:
-            await asyncio.sleep(2)
-            followup = await client.get(f"/v1/evals/{payload['eval_run_id']}", headers=headers)
-            if followup.status_code == 404:
-                continue
-            followup.raise_for_status()
-            payload = followup.json()
-        return payload
-    finally:
-        try:
-            cases_path.unlink()
-        except OSError:
-            pass
+    # Cases go inline: production disables server-side case paths, and the API
+    # may not share a filesystem with this script.
+    response = await client.post(
+        "/v1/evals/run",
+        headers=headers,
+        json={"project_id": project_id, "cases": [_tiny_eval_case(query)], "top_k": 3},
+    )
+    if not response.is_success:
+        warnings.append(f"eval skipped/failed: {response.status_code} {response.text[:200]}")
+        return None
+    payload = response.json()
+    while payload.get("status") in {"queued", "running"} and time.time() < deadline:
+        await asyncio.sleep(2)
+        followup = await client.get(f"/v1/evals/{payload['eval_run_id']}", headers=headers)
+        if followup.status_code == 404:
+            continue
+        followup.raise_for_status()
+        payload = followup.json()
+    return payload
 
 
-def _write_tiny_eval_case(query: str) -> Path:
-    path = Path.cwd() / f".incidentops-smoke-eval-{os.urandom(4).hex()}.jsonl"
-    case = {
+def _tiny_eval_case(query: str) -> dict:
+    return {
         "id": "smoke_case",
         "question": query,
         "expected_documents": ["logs/service.log"],
         "expected_terms": ["timeout", "deploy"],
         "forbidden_terms": ["database outage"],
     }
-    path.write_text(json.dumps(case) + "\n", encoding="utf-8")
-    return path
 
 
 def _tiny_documents(query: str) -> list[dict]:

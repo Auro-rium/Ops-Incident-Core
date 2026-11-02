@@ -3,7 +3,15 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.api.deps import check_rate_limit, enforce_query_limits, ensure_project_access, get_current_user, get_db, get_settings_dep
+from apps.api.deps import (
+    check_rate_limit,
+    enforce_query_limits,
+    ensure_project_access,
+    get_current_user,
+    get_db,
+    get_settings_dep,
+    rate_limit_key,
+)
 from incidentops.config.settings import Settings
 from incidentops.db.models import ProjectRole
 from incidentops.investigation.service import investigate as run_investigation
@@ -33,17 +41,16 @@ async def investigate(
     user=Depends(get_current_user),
 ):
     enforce_query_limits(body.query, body.top_k, settings)
-    if user:
-        await check_rate_limit(
-            db,
-            settings,
-            f"investigate:{user.id}",
-            settings.user_request_limit,
-            settings.rate_limit_window_seconds,
-            user=user,
-            project_id=body.project_id,
-            action="investigate",
-        )
+    await check_rate_limit(
+        db,
+        settings,
+        rate_limit_key(user, request, "investigate"),
+        settings.user_request_limit,
+        settings.rate_limit_window_seconds,
+        user=user,
+        project_id=body.project_id,
+        action="investigate",
+    )
     await ensure_project_access(db, body.project_id, user, settings, minimum_role=ProjectRole.investigator)
     investigation, latency_ms = await run_investigation(
         db,
@@ -59,7 +66,8 @@ async def investigate(
         status="success",
         project_id=body.project_id,
         user=user,
-        resource_type="investigation",
+        # Investigations are not persisted, so the project is the only real id.
+        resource_type="project",
         resource_id=body.project_id,
         request=request,
         metadata={"task_type": investigation.task_type, "top_k": body.top_k},
