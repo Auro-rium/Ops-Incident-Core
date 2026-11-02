@@ -17,7 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from incidentops.config.settings import get_settings
 from incidentops.db.models import Chunk, Document, EvidenceRelation, IndexJob, RetrievalResult, SourceSync
 from incidentops.ingestion.chunking.chunker import count_tokens, split_text_by_tokens
-from incidentops.ingestion.chunking.metadata import classify_doc_type, classify_source_type, extract_service_from_path
+from incidentops.ingestion.chunking.metadata import (
+    classify_doc_type,
+    classify_source_type,
+    extract_service_from_path,
+    is_deploy_json_path,
+)
 from incidentops.ingestion.diagnostics import build_source_coverage
 from incidentops.ingestion.failure_taxonomy import (
     FAILURE_CHUNK_LIMIT_EXCEEDED,
@@ -670,7 +675,7 @@ def _parse_normalized_document(
     if source_type == "deploy" and suffix == ".json":
         chunks = parse_deploy_history(document.content, document.path)
         return chunks, None if chunks else "invalid or unsupported deploy JSON structure"
-    if suffix == ".json" and any(token in lower_path for token in ("deploy", "release", "commit")):
+    if is_deploy_json_path(document.path):
         chunks = parse_deploy_history(document.content, document.path)
         return chunks, None if chunks else "invalid or unsupported deploy JSON structure"
     if suffix == ".py":

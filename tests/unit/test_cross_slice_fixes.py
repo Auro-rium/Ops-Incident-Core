@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import json
 import uuid
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import HTTPException
 
 from apps.api.routes import runs as runs_route
 from incidentops.agent import nodes
 from incidentops.agent.state import InvestigationState, state_from_graph_dict, state_to_graph_dict
+from incidentops.collector.client import CoreCollectorClient
 from incidentops.config.settings import Settings
 from incidentops.db.models import ProjectRole
 from incidentops.ingestion.diagnostics import inspect_folder
+from incidentops.ingestion.indexer import _parse_normalized_document
 from incidentops.schemas.api import IngestResponse
 
 
@@ -95,3 +99,30 @@ def test_inspect_folder_applies_shared_discovery_rules(tmp_path):
 
 def test_ingest_response_exposes_sync_status():
     assert "status" in IngestResponse.model_fields
+
+
+@pytest.mark.parametrize(
+    ("diagnostics", "expected"),
+    [({"complete": True}, True), ({"complete": False}, False), ({}, False)],
+)
+def test_collector_sends_top_level_complete_from_diagnostics(diagnostics, expected):
+    sent: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={})
+
+    client = CoreCollectorClient("http://core", "token")
+    client._client = httpx.Client(base_url="http://core", transport=httpx.MockTransport(handler))
+
+    client.finish_sync("source", "sync", "collector", "success", diagnostics)
+
+    assert sent[0]["complete"] is expected
+
+
+def test_json_named_like_a_deploy_only_by_substring_is_not_parsed_as_deploy_history():
+    document = SimpleNamespace(path="docs/committee.json", content='{"members": ["a"]}', source_type="config")
+
+    _chunks, error = _parse_normalized_document(document, service_name=None)
+
+    assert error is None

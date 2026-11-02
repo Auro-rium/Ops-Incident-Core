@@ -157,7 +157,7 @@ async def delete_project(
     retrieval_run_ids = select(RetrievalRun.id).where(RetrievalRun.project_id == project_id)
 
     try:
-        await QdrantVectorStore(settings).delete_by_filter(project_id)
+        await QdrantVectorStore(settings).delete_by_filter(project_id, all_index_versions=True)
     except VectorStoreError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Vector store deletion failed") from exc
 
