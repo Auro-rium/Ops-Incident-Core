@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.api.deps import check_rate_limit, enforce_query_limits, ensure_project_access, get_current_user, get_db, get_settings_dep
+from apps.api.deps import check_rate_limit, enforce_query_limits, ensure_project_access, get_current_user, get_db, get_settings_dep, rate_limit_key
 from incidentops.config.settings import Settings
 from incidentops.db.models import ProjectRole
 from incidentops.llm.prompts import build_answer_prompt
@@ -43,22 +43,22 @@ router = APIRouter(prefix="/v1", tags=["Answer"])
 @router.post("/answer", response_model=AnswerResponse)
 async def answer(
     body: AnswerRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
     user=Depends(get_current_user),
 ):
     enforce_query_limits(body.query, body.top_k, settings)
-    if user:
-        await check_rate_limit(
-            db,
-            settings,
-            f"answer:{user.id}",
-            settings.user_request_limit,
-            settings.rate_limit_window_seconds,
-            user=user,
-            project_id=body.project_id,
-            action="answer",
-        )
+    await check_rate_limit(
+        db,
+        settings,
+        rate_limit_key(user, request, "answer"),
+        settings.user_request_limit,
+        settings.rate_limit_window_seconds,
+        user=user,
+        project_id=body.project_id,
+        action="answer",
+    )
     await ensure_project_access(db, body.project_id, user, settings, minimum_role=ProjectRole.investigator)
     start = time.time()
     query_intent = classify_query_intent(body.query)

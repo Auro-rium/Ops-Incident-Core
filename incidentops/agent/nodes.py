@@ -26,7 +26,7 @@ def classify_task_node(state):
 
 
 def extract_entities_node(state):
-    entities = extract_entities(state.user_query)
+    entities = extract_entities(state.user_query, state.known_services)
     state.entities = {
         "service_name": entities.service_name,
         "endpoint": entities.endpoint,
@@ -47,7 +47,7 @@ def resolve_scope_node(state):
     if state.entities:
         entities = InvestigationEntities(**{key: state.entities.get(key) for key in _ENTITY_FIELDS})
     else:
-        entities = extract_entities(state.user_query)
+        entities = extract_entities(state.user_query, state.known_services)
     state.retrieval_plan = resolve_scope(entities)
     return state
 

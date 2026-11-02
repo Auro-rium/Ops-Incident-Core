@@ -27,6 +27,7 @@ from incidentops.db.models import (
 )
 from incidentops.observability.metrics import incr, observe_latency
 from incidentops.observability.tracing import traced
+from incidentops.retrieval.hybrid_search import known_service_names
 
 logger = logging.getLogger("incidentops.agent.service")
 
@@ -70,6 +71,7 @@ async def execute_run(
         user_query=run.user_query,
         status="running",
         create_issue_draft=create_issue_draft,
+        known_services=sorted(await known_service_names(db, run.project_id)),
     )
     run.status = RunStatus.running
     run.error = None

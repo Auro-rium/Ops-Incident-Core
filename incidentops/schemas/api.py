@@ -61,6 +61,7 @@ class SourceCoverageResponse(BaseModel):
 
 class IngestResponse(BaseModel):
     project_id: str
+    status: str = "success"
     documents_ingested: int
     total_files_seen: int
     files_ingested: int

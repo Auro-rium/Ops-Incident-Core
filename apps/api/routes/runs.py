@@ -288,6 +288,8 @@ async def _decide_run(run_id, body, request, db, settings, user, *, approved: bo
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     await ensure_project_access(db, run.project_id, user, settings, minimum_role=ProjectRole.approver)
+    # ensure_project_access returns early on a demo bypass; approval always needs the role.
+    await require_project_role(db, run.project_id, user.id, ProjectRole.approver)
     try:
         run = await resume_after_approval(
             db, run, approved=approved, rationale=body.rationale, resolved_by_user_id=user.id

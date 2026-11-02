@@ -266,7 +266,7 @@ async def ingest(
     await record_audit_event(
         db,
         action="local_ingest_finished",
-        status="success",
+        status=stats["status"],
         project_id=project_id,
         user=user,
         resource_type="project",
@@ -280,6 +280,7 @@ async def ingest(
     )
     return IngestResponse(
         project_id=stats["project_id"],
+        status=stats["status"],
         documents_ingested=stats["documents_ingested"],
         total_files_seen=stats["total_files_seen"],
         files_ingested=stats["files_ingested"],

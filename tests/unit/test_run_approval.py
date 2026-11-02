@@ -23,6 +23,10 @@ from incidentops.db.models import (
 )
 
 
+async def _role_granted(*_args, **_kwargs):
+    return ProjectRole.approver
+
+
 class FakeResult:
     def __init__(self, value) -> None:
         self._value = value
@@ -117,6 +121,7 @@ async def test_approve_route_maps_conflict_to_409_and_checks_access(monkeypatch)
         raise agent_service.ApprovalConflictError("run is not awaiting approval")
 
     monkeypatch.setattr(runs_route, "ensure_project_access", fake_access)
+    monkeypatch.setattr(runs_route, "require_project_role", _role_granted)
     monkeypatch.setattr(runs_route, "resume_after_approval", fake_resume)
     db = FakeSession([FakeResult(run)])
 
@@ -238,6 +243,7 @@ async def test_reject_route_maps_conflict_to_409_and_checks_access(monkeypatch):
         raise agent_service.ApprovalConflictError("run is not awaiting approval")
 
     monkeypatch.setattr(runs_route, "ensure_project_access", fake_access)
+    monkeypatch.setattr(runs_route, "require_project_role", _role_granted)
     monkeypatch.setattr(runs_route, "resume_after_approval", fake_resume)
     db = FakeSession([FakeResult(run)])
 
@@ -265,6 +271,7 @@ async def test_stream_route_releases_request_connection_before_streaming(monkeyp
         return None
 
     monkeypatch.setattr(runs_route, "ensure_project_access", fake_access)
+    monkeypatch.setattr(runs_route, "require_project_role", _role_granted)
     monkeypatch.setattr(runs_route, "_get_session_factory", lambda: _Factory([]))
     db = CommittingSession([FakeResult(run)])
 

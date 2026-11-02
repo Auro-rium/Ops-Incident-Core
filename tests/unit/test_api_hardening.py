@@ -426,6 +426,7 @@ def test_local_ingest_uses_window_setting_and_single_batch_event(monkeypatch, tm
     async def _run(*_args, **_kwargs):
         return {
             "project_id": str(uuid.uuid4()),
+            "status": "success",
             "documents_ingested": 1,
             "total_files_seen": 1,
             "files_ingested": 1,
