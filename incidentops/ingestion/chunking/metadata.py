@@ -39,6 +39,28 @@ COMMON_PATH_STOPWORDS = {
 }
 
 
+CODE_SUFFIXES = (".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".rb")
+INCIDENT_DIRECTORY_SEGMENTS = {"incidents", "postmortems"}
+INCIDENT_TEXT_SUFFIXES = (".md", ".txt")
+
+
+def path_segments(path: str) -> list[str]:
+    """Lower-cased path components, tolerant of Windows separators."""
+    return [part for part in path.replace("\\", "/").lower().split("/") if part and part not in (".", "..")]
+
+
+def is_incident_path(path: str) -> bool:
+    """Markdown/text under an ``incidents/`` or ``postmortems/`` directory.
+
+    Matching whole directory segments keeps paths such as ``incidentops/``
+    or ``docs/postmortem-template.md`` out of the incident parser.
+    """
+    lower = path.lower()
+    if not lower.endswith(INCIDENT_TEXT_SUFFIXES):
+        return False
+    return any(segment in INCIDENT_DIRECTORY_SEGMENTS for segment in path_segments(lower)[:-1])
+
+
 def extract_service_from_path(path: str) -> str | None:
     """Infer a likely service name from a path without hardcoded service lists."""
     normalized = PurePosixPath(path.replace("\\", "/"))
@@ -79,7 +101,7 @@ def extract_endpoints(text: str) -> list[str]:
 
 def classify_source_type(path: str) -> str:
     lower = path.lower()
-    if lower.endswith((".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".rb")):
+    if lower.endswith(CODE_SUFFIXES):
         return "code"
     if lower.endswith(".proto"):
         return "api_doc"
@@ -89,7 +111,7 @@ def classify_source_type(path: str) -> str:
         return "deploy"
     if lower.endswith(".json") and any(token in lower for token in ("deploy", "release", "commit")):
         return "deploy"
-    if "incident" in lower or "postmortem" in lower:
+    if is_incident_path(lower):
         return "incident"
     if "openapi" in lower or "swagger" in lower:
         return "api_doc"
@@ -110,7 +132,7 @@ def classify_source_type(path: str) -> str:
 
 def classify_doc_type(path: str) -> str:
     lower = path.lower()
-    if lower.endswith((".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".rb")):
+    if lower.endswith(CODE_SUFFIXES):
         return "code"
     if lower.endswith(".proto"):
         return "api_doc"
@@ -120,7 +142,7 @@ def classify_doc_type(path: str) -> str:
         lower.endswith(".json") and any(token in lower for token in ("deploy", "release", "commit"))
     ):
         return "deploy"
-    if "incident" in lower or "postmortem" in lower:
+    if is_incident_path(lower):
         return "incident"
     if lower.endswith((".yaml", ".yml")):
         if "openapi" in lower or "swagger" in lower:

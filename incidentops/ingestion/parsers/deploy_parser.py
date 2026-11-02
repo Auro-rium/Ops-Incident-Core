@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 from incidentops.ingestion.chunking.metadata import extract_service_from_path
 from incidentops.ingestion.schemas import RawChunk
@@ -55,12 +55,7 @@ def parse_deploy_history(content: str, file_path: str) -> list[RawChunk]:
         ]
         text = "\n".join(text_parts)
 
-        deployed_at = None
-        if deployed_at_str:
-            try:
-                deployed_at = datetime.fromisoformat(deployed_at_str.replace("Z", "+00:00"))
-            except ValueError:
-                pass
+        deployed_at = _parse_deployed_at(deployed_at_str)
 
         chunks.append(
             RawChunk(
@@ -79,6 +74,33 @@ def parse_deploy_history(content: str, file_path: str) -> list[RawChunk]:
             )
         )
     return chunks
+
+
+def _parse_deployed_at(value) -> datetime | None:
+    """Accept ISO-8601 strings or numeric epoch seconds/milliseconds; result is UTC-aware."""
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        seconds = value / 1000 if abs(value) >= 1e12 else value
+        try:
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if raw.lstrip("-").replace(".", "", 1).isdigit():
+        try:
+            return _parse_deployed_at(float(raw))
+        except ValueError:
+            return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def parse_patch_file(content: str, file_path: str) -> list[RawChunk]:

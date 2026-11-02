@@ -229,7 +229,7 @@ async def _index_one_document(
                 "chunk_type": raw_chunk.chunk_type,
                 "service_name": raw_chunk.service_name or service_name or normalized.metadata.get("service_name"),
                 "endpoint": raw_chunk.endpoint or normalized.metadata.get("endpoint"),
-                "deploy_hash": raw_chunk.deploy_hash or normalized.metadata.get("deploy_hash") or normalized.metadata.get("commit_sha"),
+                "deploy_hash": _chunk_deploy_hash(normalized, raw_chunk),
                 "timestamp_start": raw_chunk.timestamp_start,
                 "timestamp_end": raw_chunk.timestamp_end,
                 "section_title": raw_chunk.section_title,
@@ -460,21 +460,21 @@ def _parse_normalized_document(
     if suffix == ".json" and any(token in lower_path for token in ("deploy", "release", "commit")):
         chunks = parse_deploy_history(document.content, document.path)
         return chunks, None if chunks else "invalid or unsupported deploy JSON structure"
-    if source_type == "incident" or "incident" in lower_path or "postmortem" in lower_path:
-        return parse_incident(document.content, document.path), None
-    if source_type == "code" and suffix == ".py":
-        return parse_python(document.content, document.path, service_name=service_name), None
     if suffix == ".py":
         return parse_python(document.content, document.path, service_name=service_name), None
     if suffix == ".go":
         return parse_go(document.content, document.path, service_name=service_name), None
     if suffix in {".js", ".ts", ".jsx", ".tsx"}:
-        language = suffix.lstrip(".") if suffix != ".tsx" else "ts"
+        language = {".jsx": "js", ".tsx": "ts"}.get(suffix, suffix.lstrip("."))
         return parse_jsts(document.content, document.path, service_name=service_name, language=language), None
     if suffix == ".java":
         return parse_java(document.content, document.path, service_name=service_name), None
     if suffix == ".proto":
         return parse_proto(document.content, document.path, service_name=service_name), None
+    # Incident text is identified by an incidents/ or postmortems/ directory
+    # segment, never by a substring such as "incidentops/".
+    if source_type == "incident" or classify_source_type(document.path) == "incident":
+        return parse_incident(document.content, document.path), None
     if source_type == "code":
         return _parse_generic_code(document.content, document.path, service_name=service_name), None
     if suffix in {".yaml", ".yml", ".toml", ".ini"}:
@@ -489,6 +489,19 @@ def _parse_normalized_document(
         return parse_markdown(document.content, document.path, source_type=source_type, service_name=service_name), None
     logger.info("No parser configured for normalized document %s", document.path)
     return [], "no parser configured"
+
+
+def _chunk_deploy_hash(document: NormalizedDocument, raw_chunk: RawChunk) -> str | None:
+    """A repository commit is deploy evidence only for deploy/patch documents."""
+    explicit = raw_chunk.deploy_hash or document.metadata.get("deploy_hash")
+    if explicit:
+        return explicit
+    is_deploy = (
+        raw_chunk.source_type == "deploy"
+        or (document.source_type or "").lower() == "deploy"
+        or PurePosixPath(document.path.lower()).suffix in {".patch", ".diff"}
+    )
+    return document.metadata.get("commit_sha") if is_deploy else None
 
 
 def _parse_generic_code(content: str, path: str, *, service_name: str | None) -> list[RawChunk]:
