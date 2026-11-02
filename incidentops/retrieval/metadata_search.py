@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from incidentops.db.models import Chunk, Document
+from incidentops.retrieval.lexical_search import apply_chunk_filters
 
 _IGNORED_TERMS = {
     "about",
@@ -80,7 +81,7 @@ async def metadata_search(
         .limit(max(top_k * 3, top_k))
     )
     if filters:
-        stmt = _apply_filters(stmt, filters)
+        stmt = apply_chunk_filters(stmt, filters)
     result = await db.execute(stmt)
     scored = [
         {"chunk": chunk, "score": _exact_score(chunk, services, deploy_hashes, endpoints, terms)}
@@ -105,18 +106,6 @@ def _path_terms(value: Any) -> list[str]:
             if isinstance(term, str) and len(term) >= 4 and term.lower() not in _IGNORED_TERMS
         }
     )[:8]
-
-
-def _apply_filters(stmt, filters: dict[str, Any]):
-    if filters.get("service_name"):
-        stmt = stmt.where(Chunk.service_name == filters["service_name"])
-    if filters.get("deploy_hash"):
-        stmt = stmt.where(Chunk.deploy_hash == filters["deploy_hash"])
-    if filters.get("chunk_type"):
-        stmt = stmt.where(Chunk.chunk_type == filters["chunk_type"])
-    if filters.get("endpoint"):
-        stmt = stmt.where(Chunk.endpoint == filters["endpoint"])
-    return stmt
 
 
 def _exact_score(

@@ -8,6 +8,7 @@ from incidentops.config.settings import Settings
 from incidentops.db.models import ProjectRole
 from incidentops.investigation.service import investigate as run_investigation
 from incidentops.operations.service import record_operational_event
+from incidentops.retrieval.evidence_packer import evidence_preview
 from incidentops.schemas.api import (
     CitationInfo,
     EvidenceItem,
@@ -134,7 +135,8 @@ async def investigate(
                 service_name=item.get("service_name"),
                 deploy_hash=item.get("deploy_hash"),
                 score=round(item.get("score", 0), 4),
-                text_preview=item["text"][:300],
+                text_preview=evidence_preview(item),
+                prompt_injection_flagged=bool(item.get("prompt_injection_flagged")),
                 citation=CitationInfo(**item["citation"]),
             )
             for item in investigation.evidence

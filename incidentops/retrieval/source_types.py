@@ -53,6 +53,7 @@ def chunk_source_type(chunk) -> str:
         "go_module",
         "python_function",
         "python_class",
+        "python_module",
         "ts_function",
         "ts_class",
         "ts_interface",

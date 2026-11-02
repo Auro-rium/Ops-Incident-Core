@@ -403,6 +403,7 @@ class EvidenceItem(BaseModel):
     score: float
     text_preview: str
     why_retrieved: list[str] = Field(default_factory=list)
+    prompt_injection_flagged: bool = False
     citation: CitationInfo
 
 
@@ -417,6 +418,7 @@ class AnswerResponse(BaseModel):
     llm_latency_ms: int | None = None
     latency_ms: int
     warnings: list[str] = Field(default_factory=list)
+    warning: str | None = None
 
 
 class InvestigationRequest(BaseModel):

@@ -30,8 +30,9 @@ from incidentops.retrieval.query_intent import (
     classify_query_intent,
     investigate_supported,
 )
-from incidentops.retrieval.hybrid_search import hybrid_search, hybrid_search_with_debug
+from incidentops.retrieval.hybrid_search import hybrid_search, hybrid_search_with_debug, known_service_names
 from incidentops.retrieval.reranker import rerank_with_debug_async
+from incidentops.retrieval.source_types import chunk_source_type
 
 
 async def investigate(
@@ -41,12 +42,13 @@ async def investigate(
     top_k: int,
     reranker_model: str,
     debug: bool = False,
+    filters: dict | None = None,
 ) -> tuple[InvestigationResult, int]:
     start = time.time()
     task_type = classify_task(query)
     query_intent = classify_query_intent(query)
-    entities = extract_entities(query)
-    scope = resolve_scope(entities)
+    entities = extract_entities(query, await known_service_names(db, project_id))
+    scope = resolve_scope(entities, explicit_filters=filters)
     if debug:
         raw_results, retrieval_debug = await hybrid_search_with_debug(
             db,
@@ -195,13 +197,7 @@ def _build_cited_answer(evidence: list[dict], selected, supported: bool, missing
 
 
 def _raw_source_types(results: list[dict]) -> set[str]:
-    source_types: set[str] = set()
-    for result in results:
-        metadata = result["chunk"].metadata_json or {}
-        source_type = metadata.get("source_type")
-        if isinstance(source_type, str) and source_type:
-            source_types.add(source_type)
-    return source_types
+    return {chunk_source_type(result["chunk"]) for result in results} - {"unknown_text"}
 
 
 def _score_confidence(
