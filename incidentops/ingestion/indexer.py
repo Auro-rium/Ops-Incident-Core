@@ -7,14 +7,15 @@ import math
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from incidentops.config.settings import get_settings
-from incidentops.db.models import Chunk, Document, EvidenceRelation, IndexJob, RetrievalResult
+from incidentops.db.models import Chunk, Document, EvidenceRelation, IndexJob, RetrievalResult, SourceSync
 from incidentops.ingestion.chunking.chunker import count_tokens, split_text_by_tokens
 from incidentops.ingestion.chunking.metadata import classify_doc_type, classify_source_type, extract_service_from_path
 from incidentops.ingestion.diagnostics import build_source_coverage
@@ -92,8 +93,13 @@ async def index_normalized_documents(
     can never leave chunks missing for points that exist. Points without a
     chunk are dropped at read time; a failed publish queues a retry IndexJob.
 
-    ``mark_existing_seen=False`` keeps ``last_seen_sync_id`` of existing rows
-    untouched (worker jobs: the batch route already marked them when queued).
+    A document's ``content_hash`` is committed as NULL with its chunks and only
+    set once its vectors are live. If the process dies or is cancelled in between,
+    the next attempt or sync reprocesses it instead of skipping it as unchanged.
+
+    ``mark_existing_seen=False`` only moves ``last_seen_sync_id`` of existing rows
+    forward (worker jobs: the batch route marked them when queued, and a late job
+    from an older sync must not move that back).
     ``vector_retry_attempts`` seeds ``attempts`` on retry jobs created here.
     """
     settings = get_settings()
@@ -186,6 +192,7 @@ async def index_normalized_documents(
             settings=settings,
             retry_attempts=vector_retry_attempts,
         )
+        await db.commit()
 
     result.source_type_counts = dict(source_type_counts)
     result.chunk_type_counts = dict(chunk_type_counts)
@@ -228,9 +235,10 @@ async def _publish_vectors(
 ) -> tuple[int, int]:
     """Upsert new vectors, then drop the document's stale points.
 
-    Returns (deferred publishes, stale-point cleanup failures). A failed upsert
-    clears the document's content_hash (so neither the retry nor the next sync
-    skips it as unchanged) and queues an IndexJob for the dispatcher.
+    Returns (deferred publishes, stale-point cleanup failures). A successful
+    upsert restores the document's content_hash. A failed one leaves it NULL (so
+    neither the retry nor the next sync skips it as unchanged) and queues an
+    IndexJob for the dispatcher. The caller commits.
     """
     store = QdrantVectorStore(settings)
     deferred = 0
@@ -243,9 +251,6 @@ async def _publish_vectors(
                 "vector publish failed; queueing retry document_id=%s", publication.document_id
             )
             deferred += 1
-            await db.execute(
-                update(Document).where(Document.id == publication.document_id).values(content_hash=None)
-            )
             payload = publication.normalized.model_dump(mode="json")
             payload[INDEX_REASON_KEY] = INDEX_REASON_VECTOR_RETRY
             retryable = retry_attempts < settings.rag_index_max_retries
@@ -260,9 +265,19 @@ async def _publish_vectors(
                     status="pending" if retryable else "failed",
                     attempts=retry_attempts,
                     error_code=FAILURE_VECTOR_INDEX_FAILED,
+                    finished_at=None if retryable else datetime.now(timezone.utc),
                 )
             )
             continue
+        # The checksum match keeps a concurrent rewrite's NULL in place.
+        await db.execute(
+            update(Document)
+            .where(
+                Document.id == publication.document_id,
+                Document.checksum == publication.normalized.content_hash,
+            )
+            .values(content_hash=publication.normalized.content_hash)
+        )
         try:
             await store.delete_document_points_except(
                 project_id,
@@ -274,9 +289,24 @@ async def _publish_vectors(
             # filtered at read time, so this is logged rather than retried.
             cleanup_failures += 1
             logger.warning("stale vector cleanup failed document_id=%s", publication.document_id)
-    if deferred:
-        await db.commit()
     return deferred, cleanup_failures
+
+
+def _advance_seen_marker(document_id: uuid.UUID, source_id: uuid.UUID, sync_id: uuid.UUID):
+    """Claim a document for a sync unless a sync started at or after it already has.
+
+    A marker naming a sync that no longer exists counts as older.
+    """
+    started_at = select(SourceSync.started_at).where(SourceSync.id == sync_id).scalar_subquery()
+    same_or_newer = select(SourceSync.id).where(SourceSync.source_id == source_id, SourceSync.started_at >= started_at)
+    return (
+        update(Document)
+        .where(
+            Document.id == document_id,
+            or_(Document.last_seen_sync_id.is_(None), Document.last_seen_sync_id.not_in(same_or_newer)),
+        )
+        .values(last_seen_sync_id=sync_id)
+    )
 
 
 async def prune_stale_documents(
@@ -370,9 +400,12 @@ async def _index_one_document(
         )
     )
     current = existing_result.scalar_one_or_none()
-    if current is not None and sync_id is not None and mark_existing_seen:
+    if current is not None and sync_id is not None:
         # Received in this sync: never prune it, even if indexing it fails below.
-        current.last_seen_sync_id = sync_id
+        if mark_existing_seen:
+            current.last_seen_sync_id = sync_id
+        else:
+            await db.execute(_advance_seen_marker(current.id, source_id, sync_id))
     if current and current.content_hash == normalized.content_hash:
         return {
             "created": 0,
@@ -512,11 +545,12 @@ async def _index_one_document(
             )
             for chunk, embedding in zip(persisted_chunks, embeddings or [])
         ]
-
-    publication = None
-    if points or current is not None:
-        # Even without new vectors, an updated document's old points are stale.
-        publication = _VectorPublication(document_id=document_row.id, normalized=normalized, points=points)
+        publication = None
+        if points or current is not None:
+            # Even without new vectors, an updated document's old points are stale.
+            publication = _VectorPublication(document_id=document_row.id, normalized=normalized, points=points)
+            # Set again by _publish_vectors once the vectors are live.
+            document_row.content_hash = None
 
     return {
         "created": created,

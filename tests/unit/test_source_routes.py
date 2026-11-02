@@ -12,6 +12,7 @@ from apps.api.routes import sources
 from incidentops.config.settings import Settings
 from incidentops.db.models import Chunk, Document, IndexJob, ProjectRole, Source, SourceSync
 from incidentops.ingestion.indexer import INDEX_REASON_KEY, INDEX_REASON_REINDEX, PrunedDocuments
+from incidentops.ingestion.normalized import BatchIngestResult
 from incidentops.schemas.api import (
     BatchIngestRequest,
     CollectorRegisterRequest,
@@ -227,6 +228,94 @@ async def test_register_collector_checks_admin_once(access):
     assert access["role"] == []
 
 
+def _deny(status_code: int):
+    async def denied(*_args, **_kwargs):
+        raise HTTPException(status_code, detail="denied")
+
+    return denied
+
+
+@pytest.mark.asyncio
+async def test_start_sync_supersedes_running_syncs_for_the_source(access):
+    db = FakeDB()
+
+    await sources.start_sync(SOURCE_ID, SyncStartRequest(), None, db, Settings(), USER)
+
+    updates = [s for s in db.executed if isinstance(s, Update) and s.table.name == "source_syncs"]
+    assert len(updates) == 1
+    params = updates[0].compile().params
+    assert SOURCE_ID in params.values()
+    assert "running" in params.values() and "cancelled" in params.values()
+    new_syncs = [obj for obj in db.added if isinstance(obj, SourceSync)]
+    assert [sync.status for sync in new_syncs] == ["running"]
+
+
+def _role(role):
+    async def lookup(*_args, **_kwargs):
+        return role
+
+    return lookup
+
+
+@pytest.mark.asyncio
+async def test_source_a_caller_cannot_access_looks_missing(access, monkeypatch):
+    monkeypatch.setattr(sources, "ensure_project_access", _deny(403))
+    monkeypatch.setattr(sources, "get_project_role", _role(None))
+
+    with pytest.raises(HTTPException) as excinfo:
+        await sources.start_sync(SOURCE_ID, SyncStartRequest(), None, FakeDB(), Settings(), USER)
+
+    assert excinfo.value.status_code == 404
+    assert excinfo.value.detail == "Source not found"
+
+
+@pytest.mark.asyncio
+async def test_project_member_without_the_role_still_gets_403(access, monkeypatch):
+    # A viewer can already list this source, so a 404 would hide nothing and mislead.
+    monkeypatch.setattr(sources, "ensure_project_access", _deny(403))
+    monkeypatch.setattr(sources, "get_project_role", _role(ProjectRole.viewer))
+
+    with pytest.raises(HTTPException) as excinfo:
+        await sources.start_sync(SOURCE_ID, SyncStartRequest(), None, FakeDB(), Settings(), USER)
+
+    assert excinfo.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_sync_a_caller_cannot_access_looks_missing(access, monkeypatch):
+    monkeypatch.setattr(sources, "ensure_project_access", _deny(403))
+    monkeypatch.setattr(sources, "get_project_role", _role(None))
+    db = FakeDB(lambda _statement: _Result(value=_sync()))
+
+    with pytest.raises(HTTPException) as excinfo:
+        await sources.get_sync(SYNC_ID, db, Settings(), USER)
+
+    assert excinfo.value.status_code == 404
+    assert excinfo.value.detail == "Sync not found"
+
+
+@pytest.mark.asyncio
+async def test_anonymous_caller_gets_401_for_missing_and_existing_sources(access, monkeypatch):
+    monkeypatch.setattr(sources, "ensure_project_access", _deny(401))
+    settings = Settings(demo_mode_public=False)
+
+    statuses = []
+    for source_id in (SOURCE_ID, uuid.uuid4()):
+        with pytest.raises(HTTPException) as excinfo:
+            await sources.get_latest_sync(source_id, FakeDB(), settings, None)
+        statuses.append(excinfo.value.status_code)
+
+    assert statuses == [401, 401]
+
+
+@pytest.mark.asyncio
+async def test_anonymous_caller_gets_401_for_missing_sync(access):
+    with pytest.raises(HTTPException) as excinfo:
+        await sources.get_sync(uuid.uuid4(), FakeDB(), Settings(demo_mode_public=False), None)
+
+    assert excinfo.value.status_code == 401
+
+
 # --- Finding 3: async batch path ----------------------------------------------
 
 
@@ -358,6 +447,10 @@ def finish_env(access, monkeypatch):
     return state
 
 
+def _complete_finish(status: str = "success") -> SyncFinishRequest:
+    return SyncFinishRequest(status=status, complete=True)
+
+
 @pytest.mark.asyncio
 async def test_finish_sync_merges_collector_diagnostics_instead_of_overwriting(finish_env):
     finish_env["sync"].diagnostics_json = {
@@ -393,12 +486,13 @@ async def test_finish_sync_merges_collector_diagnostics_instead_of_overwriting(f
 async def test_successful_sync_prunes_unseen_documents_then_vectors(finish_env):
     db = FakeDB()
 
-    await sources.finish_sync(SOURCE_ID, SYNC_ID, SyncFinishRequest(status="success"), None, db, Settings(), USER)
+    await sources.finish_sync(SOURCE_ID, SYNC_ID, _complete_finish(), None, db, Settings(), USER)
 
     assert len(finish_env["pruned"]) == 1
     project_id, source_id, sync_id, commits_before = finish_env["pruned"][0]
     assert (project_id, source_id, sync_id) == (PROJECT_ID, SOURCE_ID, SYNC_ID)
     assert commits_before == 0
+    assert finish_env["sync"].status == "success"
     assert len(finish_env["vector_deletes"]) == 1
     assert finish_env["vector_deletes"][0][:2] == (PROJECT_ID, SOURCE_ID)
     diagnostics = finish_env["sync"].diagnostics_json
@@ -409,7 +503,7 @@ async def test_successful_sync_prunes_unseen_documents_then_vectors(finish_env):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["failed", "cancelled"])
 async def test_failed_or_cancelled_sync_does_not_prune(finish_env, status):
-    await sources.finish_sync(SOURCE_ID, SYNC_ID, SyncFinishRequest(status=status), None, FakeDB(), Settings(), USER)
+    await sources.finish_sync(SOURCE_ID, SYNC_ID, _complete_finish(status), None, FakeDB(), Settings(), USER)
 
     assert finish_env["pruned"] == []
 
@@ -418,10 +512,140 @@ async def test_failed_or_cancelled_sync_does_not_prune(finish_env, status):
 async def test_sync_without_received_documents_does_not_prune(finish_env):
     finish_env["sync"].documents_received = 0
 
-    await sources.finish_sync(SOURCE_ID, SYNC_ID, SyncFinishRequest(status="success"), None, FakeDB(), Settings(), USER)
+    await sources.finish_sync(SOURCE_ID, SYNC_ID, _complete_finish(), None, FakeDB(), Settings(), USER)
 
     assert finish_env["pruned"] == []
     assert finish_env["sync"].diagnostics_json["stale_prune_skipped"] == "no_documents_received"
+
+
+def test_finish_request_defaults_to_not_complete():
+    assert SyncFinishRequest(status="success").complete is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        SyncFinishRequest(status="success"),
+        SyncFinishRequest(status="success", complete=False),
+        # Only the request field counts, not a value inside free-form diagnostics.
+        SyncFinishRequest(status="success", diagnostics={"complete": True}),
+    ],
+)
+async def test_sync_not_declared_complete_does_not_prune(finish_env, body):
+    # --max-files or path-filtered runs finish "success" having seen a subset.
+    await sources.finish_sync(SOURCE_ID, SYNC_ID, body, None, FakeDB(), Settings(), USER)
+
+    assert finish_env["pruned"] == []
+    assert finish_env["vector_deletes"] == []
+    assert finish_env["sync"].diagnostics_json["stale_prune_skipped"] == "sync_not_complete"
+
+
+@pytest.mark.asyncio
+async def test_complete_partial_success_does_not_prune(finish_env):
+    await sources.finish_sync(SOURCE_ID, SYNC_ID, _complete_finish("partial_success"), None, FakeDB(), Settings(), USER)
+
+    assert finish_env["pruned"] == []
+    assert finish_env["vector_deletes"] == []
+    assert finish_env["sync"].diagnostics_json["stale_prune_skipped"] == "sync_not_successful"
+
+
+@pytest.mark.asyncio
+async def test_complete_success_with_rejected_documents_does_not_prune(finish_env):
+    # The client says success, but Core rejected documents during this sync.
+    finish_env["sync"].parser_errors = 1
+
+    await sources.finish_sync(SOURCE_ID, SYNC_ID, _complete_finish(), None, FakeDB(), Settings(), USER)
+
+    assert finish_env["sync"].status == "partial_success"
+    assert finish_env["pruned"] == []
+    assert finish_env["vector_deletes"] == []
+
+
+@pytest.mark.asyncio
+async def test_complete_success_with_collector_reported_errors_does_not_prune(finish_env):
+    body = SyncFinishRequest(status="success", complete=True, diagnostics={"error_count": 2})
+
+    await sources.finish_sync(SOURCE_ID, SYNC_ID, body, None, FakeDB(), Settings(), USER)
+
+    assert finish_env["pruned"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["read_failed", "redaction_failed", "malformed_content", "unknown", "new_reason"])
+async def test_files_the_collector_failed_to_read_block_pruning(finish_env, reason):
+    # Never sent, so never marked seen: pruning would delete the old good version.
+    body = SyncFinishRequest(status="success", complete=True, diagnostics={"skipped_reasons": {reason: 1}})
+
+    await sources.finish_sync(SOURCE_ID, SYNC_ID, body, None, FakeDB(), Settings(), USER)
+
+    assert finish_env["pruned"] == []
+    assert finish_env["sync"].diagnostics_json["stale_prune_skipped"] == "sync_had_failed_files"
+
+
+@pytest.mark.asyncio
+async def test_malformed_skip_reasons_block_pruning(finish_env):
+    body = SyncFinishRequest(status="success", complete=True, diagnostics={"skipped_reasons": ["read_failed"]})
+
+    await sources.finish_sync(SOURCE_ID, SYNC_ID, body, None, FakeDB(), Settings(), USER)
+
+    assert finish_env["pruned"] == []
+    assert finish_env["sync"].diagnostics_json["stale_prune_skipped"] == "sync_had_failed_files"
+
+
+@pytest.mark.asyncio
+async def test_policy_skips_do_not_block_pruning(finish_env):
+    reasons = {
+        "unchanged": 4,
+        "vendor_file": 1,
+        "generated_file": 1,
+        "unsupported_extension": 1,
+        "oversized": 1,
+        "empty": 1,
+        "binary": 1,
+        "read_failed": 0,
+    }
+    body = SyncFinishRequest(status="success", complete=True, diagnostics={"skipped_reasons": reasons})
+
+    await sources.finish_sync(SOURCE_ID, SYNC_ID, body, None, FakeDB(), Settings(), USER)
+
+    assert len(finish_env["pruned"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_success_with_failed_index_job_does_not_prune(finish_env):
+    # Retries can exhaust without touching parser_errors, so job rows are checked too.
+    def handler(statement):
+        if isinstance(statement, Select) and "index_jobs" in str(statement) and "count" in str(statement).lower():
+            return _Result(value=1)
+        return _Result()
+
+    await sources.finish_sync(SOURCE_ID, SYNC_ID, _complete_finish(), None, FakeDB(handler), Settings(), USER)
+
+    assert finish_env["pruned"] == []
+    assert finish_env["sync"].diagnostics_json["stale_prune_skipped"] == "sync_had_failed_index_jobs"
+
+
+@pytest.mark.asyncio
+async def test_finish_sync_locks_the_sync_row(access):
+    db = FakeDB(lambda statement: _Result(value=_sync(status="success", finished_at=sources._utcnow())))
+
+    await sources.finish_sync(SOURCE_ID, SYNC_ID, SyncFinishRequest(status="success"), None, db, Settings(), USER)
+
+    selects = [s for s in db.executed if isinstance(s, Select)]
+    assert selects[0]._for_update_arg is not None
+
+
+def test_batch_diagnostics_accumulate_vector_publish_counters():
+    result = BatchIngestResult(
+        received=1,
+        diagnostics={"vector_publish_deferred": 2, "stale_vector_cleanup_failures": 1},
+    )
+
+    merged = sources._merge_batch_diagnostics({"vector_publish_deferred": 3}, result, 0)
+
+    assert merged["vector_publish_deferred"] == 5
+    assert merged["stale_vector_cleanup_failures"] == 1
 
 
 # --- Finding 6: reindex re-embeds -------------------------------------------------
@@ -539,3 +763,201 @@ async def test_reindex_async_mode_queues_index_jobs_from_stored_payloads(access,
     assert document.content_hash is None
     assert response.diagnostics["index_jobs_queued"] == 1
     assert response.diagnostics["reindex_mode"] == "index_jobs"
+
+
+def _stored_job(external_id: str, text: str, *, status: str = "completed") -> IndexJob:
+    content, digest = _content(text)
+    return IndexJob(
+        project_id=PROJECT_ID,
+        source_id=SOURCE_ID,
+        normalized_payload_json={
+            "external_id": external_id,
+            "path": external_id,
+            "source_type": "runbook",
+            "content": content,
+            "content_hash": digest,
+        },
+        content_hash=digest,
+        index_version="old-version",
+        status=status,
+        attempts=0,
+    )
+
+
+def _document(external_id: str, text: str, **kwargs) -> Document:
+    return Document(
+        id=uuid.uuid4(),
+        project_id=PROJECT_ID,
+        source_id=SOURCE_ID,
+        external_id=external_id,
+        content_hash=_content(text)[1],
+        **kwargs,
+    )
+
+
+def _async_reindex_db(monkeypatch, documents: list[Document], stored: list[IndexJob]) -> FakeDB:
+    pages = [documents, []]
+
+    def handler(statement):
+        text = str(statement)
+        if isinstance(statement, Select) and "FROM index_jobs" in text:
+            return _Result(rows=stored)
+        if isinstance(statement, Select) and text.startswith("SELECT documents.id") and "count" not in text.lower():
+            return _Result(rows=pages.pop(0) if pages else [])
+        if isinstance(statement, Select) and "count" in text.lower():
+            return _Result(value=len(documents))
+        return _Result()
+
+    async def no_latest(*_args):
+        return None
+
+    async def no_counts(*_args):
+        return {}
+
+    monkeypatch.setattr(sources, "_latest_sync_for_source", no_latest)
+    monkeypatch.setattr(sources, "_source_type_counts", no_counts)
+    monkeypatch.setattr(sources, "_chunk_type_counts", no_counts)
+    return FakeDB(handler)
+
+
+@pytest.mark.asyncio
+async def test_reindex_job_uses_active_index_version_and_no_sync(access, monkeypatch):
+    document = _document("docs/a.md", "same")
+    db = _async_reindex_db(monkeypatch, [document], [_stored_job("docs/a.md", "same")])
+
+    await sources.reindex_source(
+        PROJECT_ID, SOURCE_ID, None, db, Settings(rag_async_indexing=True, vector_index_version="v-new"), USER
+    )
+
+    job = next(obj for obj in db.added if isinstance(obj, IndexJob))
+    assert job.index_version == "v-new"
+    # Counting a reindex into the last sync would corrupt that sync's diagnostics.
+    assert job.sync_id is None
+    assert job.attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_reindex_never_uses_a_payload_older_than_the_document(access, monkeypatch):
+    document = _document("docs/a.md", "current text")
+    db = _async_reindex_db(monkeypatch, [document], [_stored_job("docs/a.md", "older text")])
+
+    response = await sources.reindex_source(PROJECT_ID, SOURCE_ID, None, db, Settings(rag_async_indexing=True), USER)
+
+    assert not [obj for obj in db.added if isinstance(obj, IndexJob)]
+    assert document.content_hash == _content("current text")[1]
+    assert response.diagnostics["documents_without_stored_payload"] == 1
+    assert response.diagnostics["index_jobs_queued"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reindex_does_not_match_a_payload_of_another_document(access, monkeypatch):
+    document = _document("docs/a.md", "same")
+    db = _async_reindex_db(monkeypatch, [document], [_stored_job("docs/other.md", "same")])
+
+    response = await sources.reindex_source(PROJECT_ID, SOURCE_ID, None, db, Settings(rag_async_indexing=True), USER)
+
+    assert not [obj for obj in db.added if isinstance(obj, IndexJob)]
+    assert response.diagnostics["documents_without_stored_payload"] == 1
+
+
+@pytest.mark.asyncio
+async def test_reindex_skips_document_with_an_active_job(access, monkeypatch):
+    document = _document("docs/a.md", "same")
+    db = _async_reindex_db(monkeypatch, [document], [_stored_job("docs/a.md", "same", status="queued")])
+
+    response = await sources.reindex_source(PROJECT_ID, SOURCE_ID, None, db, Settings(rag_async_indexing=True), USER)
+
+    assert not [obj for obj in db.added if isinstance(obj, IndexJob)]
+    assert document.content_hash == _content("same")[1]
+    assert response.diagnostics["documents_already_pending"] == 1
+
+
+@pytest.mark.asyncio
+async def test_reindex_recovers_document_whose_publish_previously_failed(access, monkeypatch):
+    # A cleared content_hash with no active job: the checksum still names the content.
+    digest = _content("same")[1]
+    document = _document("docs/a.md", "same", checksum=digest)
+    document.content_hash = None
+    db = _async_reindex_db(monkeypatch, [document], [_stored_job("docs/a.md", "same", status="failed")])
+
+    response = await sources.reindex_source(PROJECT_ID, SOURCE_ID, None, db, Settings(rag_async_indexing=True), USER)
+
+    assert [job.content_hash for job in db.added if isinstance(job, IndexJob)] == [digest]
+    assert response.diagnostics["index_jobs_queued"] == 1
+
+
+def _inline_reindex_db(monkeypatch, store_cls, embed) -> FakeDB:
+    document_id = uuid.uuid4()
+    pages = [[(_chunk(document_id, "alpha"), "docs/a.md")], []]
+
+    def handler(statement):
+        text = str(statement)
+        if isinstance(statement, Select) and "JOIN documents" in text:
+            return _Result(rows=pages.pop(0) if pages else [])
+        if isinstance(statement, Select) and "count" in text.lower():
+            return _Result(value=1)
+        return _Result()
+
+    monkeypatch.setattr(sources, "embed_texts_async", embed)
+    monkeypatch.setattr(sources, "QdrantVectorStore", store_cls)
+    return FakeDB(handler)
+
+
+async def _good_embed(texts, model_name=None, **_kwargs):
+    return [[0.5] * 4 for _ in texts]
+
+
+class _OkStore:
+    def __init__(self, _settings):
+        pass
+
+    async def upsert(self, points, embedding_dim):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_reindex_inline_vector_failure_is_503_and_commits_nothing(access, monkeypatch):
+    class DownStore(_OkStore):
+        async def upsert(self, points, embedding_dim):
+            raise sources.VectorStoreError("qdrant down")
+
+    db = _inline_reindex_db(monkeypatch, DownStore, _good_embed)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await sources.reindex_source(
+            PROJECT_ID, SOURCE_ID, None, db, Settings(embedding_dim=4, rag_async_indexing=False), USER
+        )
+
+    assert excinfo.value.status_code == 503
+    assert db.commits == 0
+
+
+@pytest.mark.asyncio
+async def test_reindex_inline_embedding_failure_is_503_without_leaking(access, monkeypatch):
+    async def broken(texts, model_name=None, **_kwargs):
+        raise RuntimeError("secret provider detail")
+
+    db = _inline_reindex_db(monkeypatch, _OkStore, broken)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await sources.reindex_source(
+            PROJECT_ID, SOURCE_ID, None, db, Settings(embedding_dim=4, rag_async_indexing=False), USER
+        )
+
+    assert excinfo.value.status_code == 503
+    assert "secret" not in excinfo.value.detail
+
+
+@pytest.mark.asyncio
+async def test_reindex_inline_rejects_short_embedding_response(access, monkeypatch):
+    async def short(texts, model_name=None, **_kwargs):
+        return []
+
+    db = _inline_reindex_db(monkeypatch, _OkStore, short)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await sources.reindex_source(
+            PROJECT_ID, SOURCE_ID, None, db, Settings(embedding_dim=4, rag_async_indexing=False), USER
+        )
+
+    assert excinfo.value.status_code == 503

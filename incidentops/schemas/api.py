@@ -139,6 +139,8 @@ class SyncStartRequest(BaseModel):
 
 class SyncFinishRequest(BaseModel):
     status: str = Field(..., min_length=1, max_length=64)
+    # True only if this sync discovered the whole source; enables stale-document removal.
+    complete: bool = False
     diagnostics: dict[str, Any] = Field(default_factory=dict)
     coverage: dict[str, Any] = Field(default_factory=dict)
 

@@ -11,9 +11,9 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.sql import Select, Update
 
 from incidentops.config.settings import Settings
-from incidentops.db.models import Document, IndexJob, SourceSync
+from incidentops.db.models import Document, IndexJob, Source, SourceSync
 from incidentops.ingestion.indexer import INDEX_REASON_KEY, INDEX_REASON_VECTOR_RETRY
-from incidentops.ingestion.normalized import BatchIngestResult
+from incidentops.ingestion.normalized import BatchIngestResult, DocumentBatchError
 from incidentops.worker import index_dispatch, jobs
 
 PROJECT_ID = uuid.uuid4()
@@ -85,6 +85,8 @@ class FakeSession:
                 return _Result(self.world.get("sync"))
             if entity is Document:
                 return _Result(self.world.get("document"))
+            if entity is Source:
+                return _Result(self.world.get("source"))
             return _Result()
         return _Result()
 
@@ -312,3 +314,219 @@ async def test_dispatcher_reclaims_running_jobs_past_timeout(monkeypatch):
     cutoffs = [value for value in to_pending.values() if isinstance(value, datetime)]
     assert any(abs((before - timedelta(seconds=600)) - cutoff).total_seconds() < 5 for cutoff in cutoffs)
     assert ("commit", None) in log
+
+
+class _QueuedSession(_DispatchSession):
+    async def execute(self, statement):
+        self.executed.append(statement)
+        if isinstance(statement, Select):
+            return _Result(self.world.get("job"))
+        return _Result()
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_publishes_vector_retries_when_async_indexing_is_off(monkeypatch):
+    # Inline indexing is the default, and that path also queues vector retries.
+    job = _job(payload=_payload(**{INDEX_REASON_KEY: INDEX_REASON_VECTOR_RETRY}))
+    job.status = "pending"
+    world = {"job": job}
+    monkeypatch.setattr(index_dispatch, "_get_session_factory", lambda: lambda: _QueuedSession(world, []))
+    published: list = []
+
+    async def enqueue(job_type, payload):
+        published.append((job_type, payload))
+
+    published_count = await index_dispatch.dispatch_recoverable_index_jobs(
+        SimpleNamespace(enqueue=enqueue), Settings(rag_async_indexing=False)
+    )
+
+    assert published_count == 1
+    assert published == [("index_document", {"index_job_id": str(job.id)})]
+
+
+@pytest.mark.asyncio
+async def test_forced_job_is_stale_when_a_newer_rewrite_also_has_a_cleared_hash(harness, monkeypatch):
+    # The newer rewrite's publish failed too: content_hash alone cannot tell them apart.
+    harness.world["job"] = _job(payload=_payload(**{INDEX_REASON_KEY: INDEX_REASON_VECTOR_RETRY}))
+    harness.world["document"] = Document(id=uuid.uuid4(), content_hash=None, checksum="f" * 64)
+
+    async def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("stale job must not be indexed")
+
+    monkeypatch.setattr(jobs, "index_normalized_documents", fail_if_called)
+
+    await jobs.execute_index_document_job({"index_job_id": str(harness.world["job"].id)}, SETTINGS)
+
+    assert harness.world["job"].status == "stale"
+
+
+def _worker_sync(**kwargs) -> SourceSync:
+    defaults = dict(
+        id=SYNC_ID,
+        project_id=PROJECT_ID,
+        source_id=SOURCE_ID,
+        status="success",
+        chunks_created=4,
+        parser_errors=0,
+        diagnostics_json={},
+    )
+    defaults.update(kwargs)
+    return SourceSync(**defaults)
+
+
+@pytest.mark.asyncio
+async def test_vector_retry_does_not_count_the_document_twice(harness, monkeypatch):
+    harness.world["job"] = _job(payload=_payload(**{INDEX_REASON_KEY: INDEX_REASON_VECTOR_RETRY}))
+    harness.world["document"] = Document(id=uuid.uuid4(), content_hash=None, checksum=CONTENT_HASH)
+    sync = _worker_sync(diagnostics_json={"source_type_counts": {"runbook": 1}, "chunk_type_counts": {"markdown_section": 2}})
+    harness.world["sync"] = sync
+
+    async def fake_index(*_args, **_kwargs):
+        return BatchIngestResult(
+            received=1,
+            updated=1,
+            chunks_created=2,
+            source_type_counts={"runbook": 1},
+            chunk_type_counts={"markdown_section": 2},
+        )
+
+    monkeypatch.setattr(jobs, "index_normalized_documents", fake_index)
+
+    await jobs.execute_index_document_job({"index_job_id": str(harness.world["job"].id)}, SETTINGS)
+
+    assert sync.diagnostics_json["source_type_counts"] == {"runbook": 1}
+    assert sync.diagnostics_json["chunk_type_counts"] == {"markdown_section": 2}
+    assert sync.chunks_created == 4
+
+
+@pytest.mark.asyncio
+async def test_failed_document_is_not_counted_as_completed(harness, monkeypatch):
+    harness.world["job"] = _job()
+    sync = _worker_sync()
+    harness.world["sync"] = sync
+
+    async def fake_index(*_args, **_kwargs):
+        return BatchIngestResult(
+            received=1,
+            skipped_invalid=1,
+            errors=[DocumentBatchError(external_id="x", path="x", code="parser_exception", error="e", message="e")],
+        )
+
+    monkeypatch.setattr(jobs, "index_normalized_documents", fake_index)
+
+    await jobs.execute_index_document_job({"index_job_id": str(harness.world["job"].id)}, SETTINGS)
+
+    assert sync.diagnostics_json["index_jobs_failed"] == 1
+    assert sync.diagnostics_json.get("index_jobs_completed", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_worker_merges_vector_cleanup_failures_and_locks_the_sync(harness, monkeypatch):
+    harness.world["job"] = _job()
+    sync = _worker_sync()
+    harness.world["sync"] = sync
+
+    async def fake_index(*_args, **_kwargs):
+        return BatchIngestResult(received=1, created=1, diagnostics={"stale_vector_cleanup_failures": 2})
+
+    monkeypatch.setattr(jobs, "index_normalized_documents", fake_index)
+
+    await jobs.execute_index_document_job({"index_job_id": str(harness.world["job"].id)}, SETTINGS)
+
+    assert sync.diagnostics_json["stale_vector_cleanup_failures"] == 2
+    sync_selects = [
+        statement
+        for session in harness.sessions
+        for statement in session.executed
+        if isinstance(statement, Select) and statement.column_descriptions[0]["entity"] is SourceSync
+    ]
+    # Concurrent jobs of one sync would otherwise lose each other's increments.
+    assert sync_selects and all(s._for_update_arg is not None for s in sync_selects)
+
+
+def _indexing_source(status: str = "indexing") -> Source:
+    return Source(id=SOURCE_ID, project_id=PROJECT_ID, name="repo", source_type="git", status=status, sync_mode="manual")
+
+
+@pytest.mark.asyncio
+async def test_exhausted_last_job_settles_source_out_of_indexing(harness, monkeypatch):
+    harness.world["job"] = _job(attempts=SETTINGS.rag_index_max_retries - 1)
+    harness.world["sync"] = _worker_sync(finished_at=datetime.now(timezone.utc))
+    harness.world["source"] = _indexing_source()
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(jobs, "index_normalized_documents", boom)
+
+    with pytest.raises(RuntimeError):
+        await jobs.execute_index_document_job({"index_job_id": str(harness.world["job"].id)}, SETTINGS)
+
+    assert harness.world["source"].status == "error"
+    assert harness.world["source"].last_sync_status == "partial_success"
+
+
+@pytest.mark.asyncio
+async def test_retryable_failure_leaves_source_indexing(harness, monkeypatch):
+    harness.world["job"] = _job(attempts=0)
+    harness.world["sync"] = _worker_sync(finished_at=datetime.now(timezone.utc))
+    harness.world["source"] = _indexing_source()
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(jobs, "index_normalized_documents", boom)
+
+    with pytest.raises(RuntimeError):
+        await jobs.execute_index_document_job({"index_job_id": str(harness.world["job"].id)}, SETTINGS)
+
+    assert harness.world["source"].status == "indexing"
+
+
+@pytest.mark.asyncio
+async def test_stale_last_job_settles_source_out_of_indexing(harness):
+    harness.world["job"] = _job()
+    harness.world["job"].index_version = "older"
+    harness.world["sync"] = _worker_sync(finished_at=datetime.now(timezone.utc))
+    harness.world["source"] = _indexing_source()
+
+    await jobs.execute_index_document_job({"index_job_id": str(harness.world["job"].id)}, SETTINGS)
+
+    assert harness.world["job"].status == "stale"
+    assert harness.world["source"].status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_settling_does_not_overwrite_a_source_that_moved_on(harness, monkeypatch):
+    # A newer sync is running, or this sync failed: the job must not claim "ready".
+    harness.world["job"] = _job()
+    harness.world["sync"] = _worker_sync(finished_at=datetime.now(timezone.utc))
+    harness.world["source"] = _indexing_source(status="syncing")
+
+    async def fake_index(*_args, **_kwargs):
+        return BatchIngestResult(received=1, created=1)
+
+    monkeypatch.setattr(jobs, "index_normalized_documents", fake_index)
+
+    await jobs.execute_index_document_job({"index_job_id": str(harness.world["job"].id)}, SETTINGS)
+
+    assert harness.world["source"].status == "syncing"
+
+
+@pytest.mark.asyncio
+async def test_document_writes_commit_before_the_sync_row_is_locked(harness, monkeypatch):
+    # The batch route locks the sync, then documents. Holding a document update
+    # while waiting for the sync lock here would deadlock against it.
+    harness.world["job"] = _job()
+    harness.world["sync"] = _worker_sync()
+
+    async def fake_index(*_args, **_kwargs):
+        harness.log.append(("indexed",))
+        return BatchIngestResult(received=1, skipped_unchanged=1)
+
+    monkeypatch.setattr(jobs, "index_normalized_documents", fake_index)
+
+    await jobs.execute_index_document_job({"index_job_id": str(harness.world["job"].id)}, SETTINGS)
+
+    after_index = harness.log[harness.log.index(("indexed",)) + 1 :]
+    assert after_index[0][0] == "commit"
