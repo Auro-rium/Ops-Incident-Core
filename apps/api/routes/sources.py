@@ -21,7 +21,16 @@ from apps.api.deps import (
 from incidentops.config.settings import Settings
 from incidentops.db.models import Chunk, Document, IndexJob, RetrievalResult, SourceSync, Collector, ProjectRole, Source
 from incidentops.ingestion.diagnostics import build_source_coverage
-from incidentops.ingestion.failure_taxonomy import failure_reason_counts, normalize_failure_code
+from incidentops.ingestion.failure_taxonomy import (
+    FAILURE_BINARY,
+    FAILURE_EMPTY,
+    FAILURE_GENERATED_FILE,
+    FAILURE_OVERSIZED,
+    FAILURE_UNSUPPORTED_EXTENSION,
+    FAILURE_VENDOR_FILE,
+    failure_reason_counts,
+    normalize_failure_code,
+)
 from incidentops.ingestion.indexer import (
     INDEX_REASON_KEY,
     INDEX_REASON_REINDEX,
@@ -58,6 +67,7 @@ from incidentops.schemas.api import (
     SyncStatusResponse,
 )
 from incidentops.security.audit import record_audit_event
+from incidentops.security.rbac import get_project_role
 from incidentops.security.source_config import find_source_config_secret_violations
 
 logger = logging.getLogger("incidentops.api.sources")
@@ -66,6 +76,17 @@ router = APIRouter(prefix="/v1", tags=["Sources"])
 
 SYNC_STATUSES = {"running", "success", "partial_success", "failed", "cancelled"}
 ACTIVE_INDEX_JOB_STATUSES = {"pending", "queued", "running"}
+# Collector skips that say a file should not be indexed. Any other reason means
+# it could not be read, so its absence from the sync does not mean it was deleted.
+POLICY_SKIP_REASONS = {
+    "unchanged",
+    FAILURE_BINARY,
+    FAILURE_EMPTY,
+    FAILURE_GENERATED_FILE,
+    FAILURE_OVERSIZED,
+    FAILURE_UNSUPPORTED_EXTENSION,
+    FAILURE_VENDOR_FILE,
+}
 _REINDEX_PAGE_SIZE = 128
 _SEEN_MARK_BATCH_SIZE = 500
 
@@ -788,12 +809,7 @@ async def get_sync(
     if not sync:
         _reject_anonymous(user, settings)
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Sync not found")
-    try:
-        await ensure_project_access(db, sync.project_id, user, settings, minimum_role=ProjectRole.viewer)
-    except HTTPException as exc:
-        if exc.status_code == status.HTTP_403_FORBIDDEN:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Sync not found") from exc
-        raise
+    await _ensure_access_hiding_existence(db, sync.project_id, user, settings, ProjectRole.viewer, "Sync not found")
     return _sync_response(sync)
 
 
@@ -821,6 +837,11 @@ async def _stale_prune_skip_reason(
         return "sync_not_complete"
     if effective_status != "success":
         return "sync_not_successful"
+    skipped_reasons = (body.diagnostics or {}).get("skipped_reasons") or {}
+    if not isinstance(skipped_reasons, dict) or any(
+        count and reason not in POLICY_SKIP_REASONS for reason, count in skipped_reasons.items()
+    ):
+        return "sync_had_failed_files"
     if sync.documents_received <= 0:
         # Never wipe a source because a collector sent nothing.
         return "no_documents_received"
@@ -850,13 +871,29 @@ async def _require_accessible_source(
     except HTTPException:
         _reject_anonymous(user, settings)
         raise
-    try:
-        await ensure_project_access(db, source.project_id, user, settings, minimum_role=minimum_role)
-    except HTTPException as exc:
-        if exc.status_code == status.HTTP_403_FORBIDDEN:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Source not found") from exc
-        raise
+    await _ensure_access_hiding_existence(db, source.project_id, user, settings, minimum_role, "Source not found")
     return source
+
+
+async def _ensure_access_hiding_existence(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    user,
+    settings: Settings,
+    minimum_role: ProjectRole,
+    not_found_detail: str,
+) -> None:
+    """Answer 404 to non-members. Members lacking the role keep their 403: they can
+    already list the resource, so a 404 would hide nothing and only mislead them.
+    """
+    try:
+        await ensure_project_access(db, project_id, user, settings, minimum_role=minimum_role)
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_403_FORBIDDEN:
+            raise
+        if await get_project_role(db, project_id, user.id) is not None:
+            raise
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=not_found_detail) from exc
 
 
 def _reject_anonymous(user, settings: Settings) -> None:

@@ -402,7 +402,9 @@ async def test_worker_job_advances_seen_marker_only_forward(log):
     assert len(advances) == 1
     compiled = str(advances[0])
     assert "started_at" in compiled and "source_syncs" in compiled
-    assert SYNC_ID in advances[0].compile().params.values()
+    params = advances[0].compile().params.values()
+    assert SYNC_ID in params
+    assert SOURCE_ID in params
 
 
 @pytest.mark.asyncio

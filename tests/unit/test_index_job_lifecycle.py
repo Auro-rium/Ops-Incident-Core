@@ -511,3 +511,22 @@ async def test_settling_does_not_overwrite_a_source_that_moved_on(harness, monke
     await jobs.execute_index_document_job({"index_job_id": str(harness.world["job"].id)}, SETTINGS)
 
     assert harness.world["source"].status == "syncing"
+
+
+@pytest.mark.asyncio
+async def test_document_writes_commit_before_the_sync_row_is_locked(harness, monkeypatch):
+    # The batch route locks the sync, then documents. Holding a document update
+    # while waiting for the sync lock here would deadlock against it.
+    harness.world["job"] = _job()
+    harness.world["sync"] = _worker_sync()
+
+    async def fake_index(*_args, **_kwargs):
+        harness.log.append(("indexed",))
+        return BatchIngestResult(received=1, skipped_unchanged=1)
+
+    monkeypatch.setattr(jobs, "index_normalized_documents", fake_index)
+
+    await jobs.execute_index_document_job({"index_job_id": str(harness.world["job"].id)}, SETTINGS)
+
+    after_index = harness.log[harness.log.index(("indexed",)) + 1 :]
+    assert after_index[0][0] == "commit"

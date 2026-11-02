@@ -337,6 +337,9 @@ async def execute_index_document_job(payload: dict, settings: Settings) -> None:
                 mark_existing_seen=False,
                 vector_retry_attempts=index_job.attempts,
             )
+            # Release document row locks first: the batch route takes the sync
+            # lock and then document locks, so the opposite order could deadlock.
+            await db.commit()
             index_job.status = "completed" if not indexed.errors else "failed"
             index_job.error_code = indexed.errors[0].code if indexed.errors else None
             index_job.finished_at = datetime.now(timezone.utc)

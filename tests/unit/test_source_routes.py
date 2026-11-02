@@ -250,9 +250,17 @@ async def test_start_sync_supersedes_running_syncs_for_the_source(access):
     assert [sync.status for sync in new_syncs] == ["running"]
 
 
+def _role(role):
+    async def lookup(*_args, **_kwargs):
+        return role
+
+    return lookup
+
+
 @pytest.mark.asyncio
 async def test_source_a_caller_cannot_access_looks_missing(access, monkeypatch):
     monkeypatch.setattr(sources, "ensure_project_access", _deny(403))
+    monkeypatch.setattr(sources, "get_project_role", _role(None))
 
     with pytest.raises(HTTPException) as excinfo:
         await sources.start_sync(SOURCE_ID, SyncStartRequest(), None, FakeDB(), Settings(), USER)
@@ -262,8 +270,21 @@ async def test_source_a_caller_cannot_access_looks_missing(access, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_project_member_without_the_role_still_gets_403(access, monkeypatch):
+    # A viewer can already list this source, so a 404 would hide nothing and mislead.
+    monkeypatch.setattr(sources, "ensure_project_access", _deny(403))
+    monkeypatch.setattr(sources, "get_project_role", _role(ProjectRole.viewer))
+
+    with pytest.raises(HTTPException) as excinfo:
+        await sources.start_sync(SOURCE_ID, SyncStartRequest(), None, FakeDB(), Settings(), USER)
+
+    assert excinfo.value.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_sync_a_caller_cannot_access_looks_missing(access, monkeypatch):
     monkeypatch.setattr(sources, "ensure_project_access", _deny(403))
+    monkeypatch.setattr(sources, "get_project_role", _role(None))
     db = FakeDB(lambda _statement: _Result(value=_sync()))
 
     with pytest.raises(HTTPException) as excinfo:
@@ -548,6 +569,47 @@ async def test_complete_success_with_collector_reported_errors_does_not_prune(fi
     await sources.finish_sync(SOURCE_ID, SYNC_ID, body, None, FakeDB(), Settings(), USER)
 
     assert finish_env["pruned"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["read_failed", "redaction_failed", "malformed_content", "unknown", "new_reason"])
+async def test_files_the_collector_failed_to_read_block_pruning(finish_env, reason):
+    # Never sent, so never marked seen: pruning would delete the old good version.
+    body = SyncFinishRequest(status="success", complete=True, diagnostics={"skipped_reasons": {reason: 1}})
+
+    await sources.finish_sync(SOURCE_ID, SYNC_ID, body, None, FakeDB(), Settings(), USER)
+
+    assert finish_env["pruned"] == []
+    assert finish_env["sync"].diagnostics_json["stale_prune_skipped"] == "sync_had_failed_files"
+
+
+@pytest.mark.asyncio
+async def test_malformed_skip_reasons_block_pruning(finish_env):
+    body = SyncFinishRequest(status="success", complete=True, diagnostics={"skipped_reasons": ["read_failed"]})
+
+    await sources.finish_sync(SOURCE_ID, SYNC_ID, body, None, FakeDB(), Settings(), USER)
+
+    assert finish_env["pruned"] == []
+    assert finish_env["sync"].diagnostics_json["stale_prune_skipped"] == "sync_had_failed_files"
+
+
+@pytest.mark.asyncio
+async def test_policy_skips_do_not_block_pruning(finish_env):
+    reasons = {
+        "unchanged": 4,
+        "vendor_file": 1,
+        "generated_file": 1,
+        "unsupported_extension": 1,
+        "oversized": 1,
+        "empty": 1,
+        "binary": 1,
+        "read_failed": 0,
+    }
+    body = SyncFinishRequest(status="success", complete=True, diagnostics={"skipped_reasons": reasons})
+
+    await sources.finish_sync(SOURCE_ID, SYNC_ID, body, None, FakeDB(), Settings(), USER)
+
+    assert len(finish_env["pruned"]) == 1
 
 
 @pytest.mark.asyncio

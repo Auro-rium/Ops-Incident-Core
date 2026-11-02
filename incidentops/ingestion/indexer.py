@@ -292,13 +292,13 @@ async def _publish_vectors(
     return deferred, cleanup_failures
 
 
-def _advance_seen_marker(document_id: uuid.UUID, sync_id: uuid.UUID):
+def _advance_seen_marker(document_id: uuid.UUID, source_id: uuid.UUID, sync_id: uuid.UUID):
     """Claim a document for a sync unless a sync started at or after it already has.
 
     A marker naming a sync that no longer exists counts as older.
     """
     started_at = select(SourceSync.started_at).where(SourceSync.id == sync_id).scalar_subquery()
-    same_or_newer = select(SourceSync.id).where(SourceSync.started_at >= started_at)
+    same_or_newer = select(SourceSync.id).where(SourceSync.source_id == source_id, SourceSync.started_at >= started_at)
     return (
         update(Document)
         .where(
@@ -405,7 +405,7 @@ async def _index_one_document(
         if mark_existing_seen:
             current.last_seen_sync_id = sync_id
         else:
-            await db.execute(_advance_seen_marker(current.id, sync_id))
+            await db.execute(_advance_seen_marker(current.id, source_id, sync_id))
     if current and current.content_hash == normalized.content_hash:
         return {
             "created": 0,
