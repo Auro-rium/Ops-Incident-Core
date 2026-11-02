@@ -15,6 +15,7 @@ from incidentops.investigation.hypothesis_generator import generate_hypotheses
 from incidentops.investigation.incident_matcher import find_previous_incidents
 from incidentops.investigation.log_analyzer import analyze_logs
 from incidentops.investigation.root_cause_selector import select_root_cause
+from incidentops.investigation.schemas import InvestigationEntities
 from incidentops.investigation.scope_resolver import resolve_scope
 from incidentops.investigation.timeline_builder import build_timeline
 
@@ -36,8 +37,18 @@ def extract_entities_node(state):
     return state
 
 
+RISK_LEVELS = ("low", "medium", "high")
+CONFIDENCE_RISK_POINTS = {"high": 0, "medium": 1, "low": 2}
+APPROVAL_MIN_RISK = "medium"
+_ENTITY_FIELDS = ("service_name", "endpoint", "deploy_hash", "symptom", "time_window")
+
+
 def resolve_scope_node(state):
-    state.retrieval_plan = resolve_scope(extract_entities(state.user_query))
+    if state.entities:
+        entities = InvestigationEntities(**{key: state.entities.get(key) for key in _ENTITY_FIELDS})
+    else:
+        entities = extract_entities(state.user_query)
+    state.retrieval_plan = resolve_scope(entities)
     return state
 
 
@@ -84,40 +95,8 @@ def select_root_cause_node(state):
     return state
 
 
-def draft_incident_report_node(state):
-    state.incident_report_draft = draft_incident_report(
-        {
-            "task_type": state.task_type,
-            "likely_root_cause": state.selected_root_cause,
-            "suggested_fix": state.final_answer.get("suggested_fix", ""),
-        }
-    )
-    return state
-
-
-def draft_issue_node(state):
-    state.issue_draft = draft_github_issue(
-        {
-            "likely_root_cause": state.selected_root_cause,
-            "suggested_fix": state.final_answer.get("suggested_fix", ""),
-        }
-    )
-    return state
-
-
-def risk_gate_node(state):
-    action = request_approval("create_github_issue")
-    state.risk_level = "medium"
-    state.pending_approval = action["requires_approval"]
-    return state
-
-
-def wait_for_human_approval_node(state):
-    state.status = "awaiting_approval" if state.pending_approval else state.status
-    return state
-
-
-def finalize_answer_node(state):
+def compose_answer_node(state):
+    """Build the answer content (incl. suggested fix) before any drafts use it."""
     timeline = build_timeline(
         state.evidence,
         state.log_findings,
@@ -158,5 +137,74 @@ def finalize_answer_node(state):
         "evidence": state.evidence,
         "unknowns": [] if state.previous_incidents else ["No prior incident match reached confidence threshold."],
     }
+    return state
+
+
+def draft_incident_report_node(state):
+    state.incident_report_draft = draft_incident_report(
+        {
+            "task_type": state.task_type,
+            "likely_root_cause": state.selected_root_cause,
+            "suggested_fix": state.final_answer.get("suggested_fix") or "",
+        }
+    )
+    return state
+
+
+def draft_issue_node(state):
+    if not state.create_issue_draft:
+        state.issue_draft = {}
+        return state
+    state.issue_draft = draft_github_issue(
+        {
+            "likely_root_cause": state.selected_root_cause,
+            "suggested_fix": state.final_answer.get("suggested_fix") or "",
+        }
+    )
+    return state
+
+
+def missing_data_count(state) -> int:
+    return sum(
+        [
+            not state.deploy_findings.get("diff_count"),
+            not state.log_findings.get("timestamped_logs"),
+            not state.previous_incidents,
+            not any(item.get("source_type") in {"runbook", "api_doc"} for item in state.evidence),
+        ]
+    )
+
+
+def compute_risk_level(confidence: str | None, missing_count: int, has_issue_draft: bool) -> str:
+    points = CONFIDENCE_RISK_POINTS.get(str(confidence or "low"), CONFIDENCE_RISK_POINTS["low"])
+    points += 0 if missing_count <= 0 else 1 if missing_count <= 2 else 2
+    points += 1 if has_issue_draft else 0
+    if points <= 1:
+        return "low"
+    return "medium" if points <= 3 else "high"
+
+
+def risk_gate_node(state):
+    has_issue_draft = bool(state.issue_draft)
+    state.risk_level = compute_risk_level(
+        state.selected_root_cause.get("confidence"),
+        missing_data_count(state),
+        has_issue_draft,
+    )
+    risky = RISK_LEVELS.index(state.risk_level) >= RISK_LEVELS.index(APPROVAL_MIN_RISK)
+    state.pending_approval = bool(
+        has_issue_draft and risky and request_approval("create_github_issue")["requires_approval"]
+    )
+    return state
+
+
+def wait_for_human_approval_node(state):
+    state.status = "awaiting_approval" if state.pending_approval else state.status
+    return state
+
+
+def finalize_answer_node(state):
+    if not state.final_answer:
+        state = compose_answer_node(state)
     state.status = "completed" if not state.pending_approval else "awaiting_approval"
     return state
