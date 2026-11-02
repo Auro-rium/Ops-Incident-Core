@@ -280,3 +280,22 @@ def test_workflow_run_error_does_not_leak_exception_text():
     error = agent_service._safe_error(RuntimeError("postgres://user:hunter2@db failed"))
     assert "hunter2" not in error
     assert error == "runtimeerror"
+
+
+def test_node_failure_error_names_node_without_exception_text():
+    error = agent_service._safe_error(agent_service.NodeExecutionError("analyze_logs", ValueError("hunter2")))
+    assert error == "node_failed:analyze_logs:valueerror"
+
+
+@pytest.mark.asyncio
+async def test_node_runner_raises_safe_error_after_exhausting_attempts():
+    def failing_node(_state):
+        raise ValueError("hunter2")
+
+    with pytest.raises(agent_service.NodeExecutionError) as exc_info:
+        await agent_service.execute_node_with_observability(
+            FakeSession([]), uuid.uuid4(), "analyze_logs", failing_node, SimpleNamespace(), Settings(workflow_max_retries=0)
+        )
+
+    assert "hunter2" not in str(exc_info.value)
+    assert exc_info.value.node_name == "analyze_logs"

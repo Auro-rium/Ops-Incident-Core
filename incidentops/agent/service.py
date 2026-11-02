@@ -37,6 +37,15 @@ class ApprovalConflictError(Exception):
     """The run or its approval is not in a state that can be resolved."""
 
 
+class NodeExecutionError(RuntimeError):
+    """A workflow node exhausted its attempts; carries only the safe failure labels."""
+
+    def __init__(self, node_name: str, cause: Exception | None) -> None:
+        self.node_name = node_name
+        self.cause_type = cause.__class__.__name__.lower()[:64] if cause else "unknown"
+        super().__init__(f"node_failed:{node_name}:{self.cause_type}")
+
+
 async def create_run(db: AsyncSession, project_id: uuid.UUID, user_id: uuid.UUID | None, query: str) -> AgentRun:
     run = AgentRun(project_id=project_id, user_id=user_id, user_query=query, status=RunStatus.queued)
     db.add(run)
@@ -192,7 +201,7 @@ async def execute_node_with_observability(
                 )
                 continue
             break
-    raise RuntimeError(f"Node {node_name} failed: {_safe_error(last_error or RuntimeError('unknown error'))}")
+    raise NodeExecutionError(node_name, last_error) from last_error
 
 
 async def _call_node(node, state: InvestigationState) -> InvestigationState:
@@ -314,4 +323,6 @@ async def resume_after_approval(
 
 
 def _safe_error(exc: Exception) -> str:
+    if isinstance(exc, NodeExecutionError):
+        return str(exc)
     return exc.__class__.__name__.lower()[:64]
