@@ -119,6 +119,7 @@ async def answer(
             message = "LLM synthesis failed. Returning retrieved evidence only."
     else:
         message = "LLM provider not configured. Returning retrieved evidence only."
+    warnings.extend(_retrieval_quality_warnings(raw_results, evidence, settings.embedding_model))
     latency_ms = int((time.time() - start) * 1000)
     incr("answer_requests")
     incr("answer_requests_total")
@@ -153,6 +154,30 @@ async def answer(
         warnings=warnings,
         warning=warning,
     )
+
+
+def _retrieval_quality_warnings(results: list[dict], evidence: list[dict], embedding_model: str) -> list[str]:
+    """Describe missing retrieval signals without treating ranking scores as confidence."""
+    if not evidence:
+        return ["no evidence was retrieved for this question"]
+    warnings: list[str] = []
+    if embedding_model == "local-hash-v1":
+        warnings.append(
+            "local hash retrieval scores are not calibrated for relevance; verify cited evidence"
+        )
+    evidence_ids = {str(item["chunk_id"]) for item in evidence}
+    selected = [
+        result for result in results
+        if str(result["chunk"].id) in evidence_ids
+    ]
+    if selected and not any(
+        result.get("lexical_score", 0) or result.get("metadata_score", 0)
+        for result in selected
+    ):
+        warnings.append(
+            "selected evidence has no lexical or metadata match; relevance may be weak"
+        )
+    return warnings
 
 
 def _raw_source_types(results: list[dict]) -> set[str]:

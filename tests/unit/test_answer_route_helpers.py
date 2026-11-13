@@ -7,6 +7,7 @@ from apps.api.routes.answer import (
     _is_direct_lookup_candidate,
     _llm_answer_body,
     _raw_source_types,
+    _retrieval_quality_warnings,
 )
 from incidentops.investigation.service import _raw_source_types as investigation_raw_source_types
 from incidentops.llm.prompts import SYSTEM_PROMPT
@@ -111,3 +112,29 @@ def test_direct_answer_uses_settings_limits_and_score_gap_confidence():
     assert len(close.answer_text) <= 80
     assert close.confidence == "medium"
     assert decisive.confidence == "high"
+
+
+def test_retrieval_quality_warns_for_unmatched_hash_vectors():
+    results = [{"chunk": SimpleNamespace(id="c1"), "vector_score": 0.9}]
+    warnings = _retrieval_quality_warnings(results, [{"chunk_id": "c1"}], "local-hash-v1")
+
+    assert any("not calibrated" in warning for warning in warnings)
+    assert any("relevance may be weak" in warning for warning in warnings)
+
+
+def test_retrieval_quality_reports_no_evidence():
+    assert _retrieval_quality_warnings([], [], "local-hash-v1") == [
+        "no evidence was retrieved for this question"
+    ]
+
+
+def test_retrieval_quality_checks_only_selected_evidence():
+    results = [
+        {"chunk": SimpleNamespace(id="c1"), "vector_score": 0.9},
+        {"chunk": SimpleNamespace(id="c2"), "lexical_score": 0.8},
+    ]
+    warnings = _retrieval_quality_warnings(results, [{"chunk_id": "c1"}], "local-hash-v1")
+    assert any("relevance may be weak" in warning for warning in warnings)
+
+    warnings = _retrieval_quality_warnings(results, [{"chunk_id": "c2"}], "other-model")
+    assert warnings == []
