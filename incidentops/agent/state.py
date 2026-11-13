@@ -33,6 +33,8 @@ class InvestigationGraphState(TypedDict, total=False):
     final_answer: dict[str, Any]
     status: str
     error: str | None
+    create_issue_draft: bool
+    known_services: list[str]
 
 
 @dataclass
@@ -57,6 +59,8 @@ class InvestigationState:
     final_answer: dict[str, Any] = field(default_factory=dict)
     status: str = "queued"
     error: str | None = None
+    create_issue_draft: bool = True
+    known_services: list[str] = field(default_factory=list)
 
 
 def state_to_graph_dict(state: InvestigationState) -> InvestigationGraphState:
@@ -89,4 +93,6 @@ def state_from_graph_dict(state: InvestigationGraphState | dict[str, Any]) -> In
         final_answer=dict(state.get("final_answer") or {}),
         status=str(state.get("status") or "queued"),
         error=state.get("error"),
+        create_issue_draft=bool(state.get("create_issue_draft", True)),
+        known_services=list(state.get("known_services") or []),
     )

@@ -14,6 +14,9 @@ from incidentops.retrieval.model_gateway import RemoteModelError, remote_rerank
 
 logger = logging.getLogger("incidentops.retrieval.reranker")
 
+# A fused-score lead this large over the runner-up is treated as decisive.
+DECISIVE_SCORE_GAP = 0.18
+
 _cross_encoder = None
 _ce_model_name: str | None = None
 
@@ -197,7 +200,7 @@ def _should_skip_cross_encoder(results: list[dict]) -> bool:
     second_score = float(second.get("fused_score", 0.0) or 0.0)
     score_gap = top_score - second_score
     top_reasons = set(top.get("metadata_boost_reasons") or [])
-    if score_gap >= 0.18:
+    if score_gap >= DECISIVE_SCORE_GAP:
         return True
     decisive_reasons = {
         "endpoint_match",

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -17,9 +20,10 @@ from apps.api.deps import (
     require_user,
 )
 from incidentops.agent.events import append_run_event
-from incidentops.agent.service import create_run, execute_run, resume_after_approval
+from incidentops.agent.service import ApprovalConflictError, create_run, execute_run, resume_after_approval
 from incidentops.config.settings import Settings
 from incidentops.db.models import AgentRun, AgentRunEvent, ProjectRole, RunStatus
+from incidentops.db.session import _get_session_factory
 from incidentops.observability.metrics import incr
 from incidentops.schemas.api import (
     ApprovalDecisionRequest,
@@ -33,6 +37,11 @@ from incidentops.security.audit import record_audit_event
 from incidentops.worker.queue import get_job_queue
 
 router = APIRouter(prefix="/v1", tags=["Runs"])
+
+EVENT_STREAM_POLL_INTERVAL_SECONDS = 1.0
+EVENT_STREAM_MAX_SECONDS = 300.0
+# awaiting_approval ends the stream too: nothing more happens until a human decides.
+EVENT_STREAM_END_STATUSES = {RunStatus.awaiting_approval, RunStatus.completed, RunStatus.failed, RunStatus.rejected}
 
 
 @router.post("/runs", response_model=RunResponse)
@@ -191,34 +200,62 @@ async def get_run_events(
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     await ensure_project_access(db, run.project_id, user, settings, minimum_role=ProjectRole.viewer)
+    if stream:
+        # FastAPI keeps this session open until the stream ends; give its connection back.
+        await db.commit()
+        return StreamingResponse(
+            _stream_run_events(
+                run_id,
+                _get_session_factory(),
+                poll_interval=EVENT_STREAM_POLL_INTERVAL_SECONDS,
+                max_seconds=EVENT_STREAM_MAX_SECONDS,
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
     result = await db.execute(
         select(AgentRunEvent).where(AgentRunEvent.run_id == run_id).order_by(AgentRunEvent.sequence_no.asc())
     )
-    events = result.scalars().all()
-    if not stream:
-        return [
-            RunEventResponse(
-                sequence_no=event.sequence_no,
-                event_type=event.event_type,
-                node_name=event.node_name,
-                payload=event.payload_json or {},
-                created_at=event.created_at,
-            )
-            for event in events
-        ]
+    return [_event_response(event) for event in result.scalars().all()]
 
-    async def event_stream():
+
+async def _stream_run_events(run_id: uuid.UUID, session_factory, *, poll_interval: float, max_seconds: float):
+    """Yield new run events as SSE until the run stops progressing or the time cap passes.
+
+    Each poll uses a short-lived session so an open stream does not pin a pooled
+    connection. Status is read before events, so a poll that sees an ending
+    status also delivers everything written before that status.
+    """
+    deadline = time.monotonic() + max_seconds
+    last_sequence = 0
+    while True:
+        async with session_factory() as db:
+            run_status = (await db.execute(select(AgentRun.status).where(AgentRun.id == run_id))).scalar_one_or_none()
+            result = await db.execute(
+                select(AgentRunEvent)
+                .where(AgentRunEvent.run_id == run_id, AgentRunEvent.sequence_no > last_sequence)
+                .order_by(AgentRunEvent.sequence_no.asc())
+            )
+            events = result.scalars().all()
         for event in events:
-            payload = RunEventResponse(
-                sequence_no=event.sequence_no,
-                event_type=event.event_type,
-                node_name=event.node_name,
-                payload=event.payload_json or {},
-                created_at=event.created_at,
-            )
-            yield f"data: {payload.model_dump_json()}\n\n"
+            last_sequence = event.sequence_no
+            yield f"data: {_event_response(event).model_dump_json()}\n\n"
+        finished = run_status is None or run_status in EVENT_STREAM_END_STATUSES
+        if finished or time.monotonic() >= deadline:
+            end = {"status": run_status.value if run_status else None, "reason": "finished" if finished else "time_cap"}
+            yield f"event: end\ndata: {json.dumps(end)}\n\n"
+            return
+        await asyncio.sleep(poll_interval)
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+def _event_response(event: AgentRunEvent) -> RunEventResponse:
+    return RunEventResponse(
+        sequence_no=event.sequence_no,
+        event_type=event.event_type,
+        node_name=event.node_name,
+        payload=event.payload_json or {},
+        created_at=event.created_at,
+    )
 
 
 @router.post("/runs/{run_id}/approve", response_model=ApprovalDecisionResponse)
@@ -227,17 +264,41 @@ async def approve_run(
     body: ApprovalDecisionRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
     user=Depends(require_user),
 ):
+    return await _decide_run(run_id, body, request, db, settings, user, approved=True)
+
+
+@router.post("/runs/{run_id}/reject", response_model=ApprovalDecisionResponse)
+async def reject_run(
+    run_id: uuid.UUID,
+    body: ApprovalDecisionRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+    user=Depends(require_user),
+):
+    return await _decide_run(run_id, body, request, db, settings, user, approved=False)
+
+
+async def _decide_run(run_id, body, request, db, settings, user, *, approved: bool) -> ApprovalDecisionResponse:
     result = await db.execute(select(AgentRun).where(AgentRun.id == run_id))
     run = result.scalar_one_or_none()
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
+    await ensure_project_access(db, run.project_id, user, settings, minimum_role=ProjectRole.approver)
+    # ensure_project_access returns early on a demo bypass; approval always needs the role.
     await require_project_role(db, run.project_id, user.id, ProjectRole.approver)
-    await resume_after_approval(db, run, approved=True, rationale=body.rationale)
+    try:
+        run = await resume_after_approval(
+            db, run, approved=approved, rationale=body.rationale, resolved_by_user_id=user.id
+        )
+    except ApprovalConflictError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     await record_audit_event(
         db,
-        action="approval_approved",
+        action="approval_approved" if approved else "approval_rejected",
         status="success",
         project_id=run.project_id,
         user=user,
@@ -249,31 +310,4 @@ async def approve_run(
 
 
 def _safe_error(exc: Exception) -> str:
-    return str(exc).replace("\n", " ")[:1000]
-
-
-@router.post("/runs/{run_id}/reject", response_model=ApprovalDecisionResponse)
-async def reject_run(
-    run_id: uuid.UUID,
-    body: ApprovalDecisionRequest,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    user=Depends(require_user),
-):
-    result = await db.execute(select(AgentRun).where(AgentRun.id == run_id))
-    run = result.scalar_one_or_none()
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    await require_project_role(db, run.project_id, user.id, ProjectRole.approver)
-    await resume_after_approval(db, run, approved=False, rationale=body.rationale)
-    await record_audit_event(
-        db,
-        action="approval_rejected",
-        status="success",
-        project_id=run.project_id,
-        user=user,
-        resource_type="agent_run",
-        resource_id=run.id,
-        request=request,
-    )
-    return ApprovalDecisionResponse(run_id=run.id, status=run.status.value, rationale=body.rationale)
+    return exc.__class__.__name__.lower()[:64]

@@ -7,7 +7,7 @@ from __future__ import annotations
 import uuid
 from typing import AsyncGenerator
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +17,7 @@ from incidentops.db.models import Project
 from incidentops.db.session import get_db as _get_db
 from incidentops.security.auth import decode_token
 from incidentops.security.audit import record_rate_limit_exceeded
+from incidentops.security.client_ip import client_ip
 from incidentops.security.rate_limit import get_rate_limiter
 from incidentops.security.rbac import require_project_role
 
@@ -65,33 +66,6 @@ async def require_user(user: User | None = Depends(get_current_user)) -> User:
     return user
 
 
-async def require_viewer(
-    project_id: uuid.UUID,
-    user: User = Depends(require_user),
-    db: AsyncSession = Depends(get_db),
-) -> User:
-    await require_project_role(db, project_id, user.id, ProjectRole.viewer)
-    return user
-
-
-async def require_investigator(
-    project_id: uuid.UUID,
-    user: User = Depends(require_user),
-    db: AsyncSession = Depends(get_db),
-) -> User:
-    await require_project_role(db, project_id, user.id, ProjectRole.investigator)
-    return user
-
-
-async def require_approver(
-    project_id: uuid.UUID,
-    user: User = Depends(require_user),
-    db: AsyncSession = Depends(get_db),
-) -> User:
-    await require_project_role(db, project_id, user.id, ProjectRole.approver)
-    return user
-
-
 async def ensure_project_access(
     db: AsyncSession,
     project_id: uuid.UUID,
@@ -133,6 +107,13 @@ def enforce_json_size(payload: object, max_bytes: int, label: str) -> None:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=f"{label} exceeds configured size limit")
 
 
+def rate_limit_key(user: User | None, request: Request | None, action: str) -> str:
+    """Rate-limit bucket for an action: per user when authenticated, else per client IP."""
+    if user is not None:
+        return f"{action}:user:{user.id}"
+    return f"{action}:ip:{client_ip(request, get_settings()) or 'unknown'}"
+
+
 async def check_rate_limit(
     db: AsyncSession,
     settings: Settings,
@@ -147,7 +128,9 @@ async def check_rate_limit(
     if not settings.rate_limit_enabled:
         return
     try:
-        get_rate_limiter(settings).check(key, limit, window_seconds or settings.rate_limit_window_seconds)
+        await get_rate_limiter(settings).check(
+            key, limit, window_seconds or settings.rate_limit_window_seconds
+        )
     except HTTPException:
         await record_rate_limit_exceeded(
             db,

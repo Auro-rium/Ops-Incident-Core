@@ -2,17 +2,70 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import shutil
 import subprocess
 import tempfile
 import time
 from pathlib import Path
+from typing import Callable
 
 from incidentops.config.settings import Settings
 
 from .service import CollectorService
 from .benchmark import CoreBenchmarkClient
+
+logger = logging.getLogger("incidentops.collector")
+
+_DAEMON_MAX_BACKOFF_SECONDS = 3600
+
+
+def run_daemon(
+    service: CollectorService,
+    args: argparse.Namespace,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    max_iterations: int | None = None,
+) -> None:
+    """Sync forever; a failed cycle backs off and never ends the process."""
+    failures = 0
+    iterations = 0
+    while max_iterations is None or iterations < max_iterations:
+        iterations += 1
+        try:
+            summary = _daemon_cycle(service, args)
+        except Exception as exc:
+            failures += 1
+            delay = _daemon_backoff(args.interval_seconds, failures)
+            # Class name only: clone errors quote the repo URL, which can hold credentials.
+            logger.warning("collector sync failed (%s); retrying in %ss", type(exc).__name__, delay)
+        else:
+            failures = 0
+            delay = args.interval_seconds
+            print(json.dumps(summary.diagnostics(), sort_keys=True), flush=True)
+        sleep(delay)
+
+
+def _daemon_cycle(service: CollectorService, args: argparse.Namespace):
+    workspace = Path(tempfile.mkdtemp(prefix="incidentops-collector-daemon-"))
+    try:
+        root = args.path
+        if args.repo_url:
+            root = workspace / "repo"
+            subprocess.run(["git", "clone", "--depth", "1", args.repo_url, str(root)], check=True)
+        return service.sync(
+            root, project_id=args.project_id, source_name=args.source_name,
+            collector_name=args.collector_name, environment=args.environment,
+            repo_name=Path(args.repo_url.rstrip("/")).stem if args.repo_url else None,
+        )
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def _daemon_backoff(interval_seconds: int, failures: int) -> int:
+    base = max(interval_seconds, 1)
+    return min(base * 2 ** (failures - 1), max(base, _DAEMON_MAX_BACKOFF_SECONDS))
 
 
 def main() -> None:
@@ -67,22 +120,10 @@ def main() -> None:
     elif args.command == "daemon":
         if (not args.path and not args.repo_url) or not args.project_id:
             raise SystemExit("COLLECTOR_ROOT or COLLECTOR_REPO_URL and INCIDENTOPS_PROJECT_ID are required for daemon mode")
-        while True:
-            workspace = Path(tempfile.mkdtemp(prefix="incidentops-collector-daemon-"))
-            try:
-                root = args.path
-                if args.repo_url:
-                    root = workspace / "repo"
-                    subprocess.run(["git", "clone", "--depth", "1", args.repo_url, str(root)], check=True)
-                summary = service.sync(
-                    root, project_id=args.project_id, source_name=args.source_name,
-                    collector_name=args.collector_name, environment=args.environment,
-                    repo_name=Path(args.repo_url.rstrip("/")).stem if args.repo_url else None,
-                )
-            finally:
-                shutil.rmtree(workspace, ignore_errors=True)
-            print(json.dumps(summary.diagnostics(), sort_keys=True), flush=True)
-            time.sleep(args.interval_seconds)
+        # A missing credential never heals itself, so fail fast instead of backing off forever.
+        if not os.getenv("INCIDENTOPS_API_URL", "").strip() or not os.getenv("INCIDENTOPS_TOKEN", "").strip():
+            raise SystemExit("INCIDENTOPS_API_URL and INCIDENTOPS_TOKEN are required for daemon mode")
+        run_daemon(service, args)
     else:
         workspace = Path(tempfile.mkdtemp(prefix="incidentops-collector-"))
         try:

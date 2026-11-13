@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -20,8 +21,23 @@ from apps.api.deps import (
 from incidentops.config.settings import Settings
 from incidentops.db.models import Chunk, Document, IndexJob, RetrievalResult, SourceSync, Collector, ProjectRole, Source
 from incidentops.ingestion.diagnostics import build_source_coverage
-from incidentops.ingestion.failure_taxonomy import failure_reason_counts
-from incidentops.ingestion.indexer import index_normalized_documents
+from incidentops.ingestion.failure_taxonomy import (
+    FAILURE_BINARY,
+    FAILURE_EMPTY,
+    FAILURE_GENERATED_FILE,
+    FAILURE_OVERSIZED,
+    FAILURE_UNSUPPORTED_EXTENSION,
+    FAILURE_VENDOR_FILE,
+    failure_reason_counts,
+    normalize_failure_code,
+)
+from incidentops.ingestion.indexer import (
+    INDEX_REASON_KEY,
+    INDEX_REASON_REINDEX,
+    delete_document_vectors,
+    index_normalized_documents,
+    prune_stale_documents,
+)
 from incidentops.ingestion.normalized import (
     BatchIngestResult,
     DocumentBatchError,
@@ -33,7 +49,7 @@ from incidentops.observability.metrics import incr
 from incidentops.operations.service import record_operational_event
 from incidentops.retrieval.embeddings import embed_texts_async
 from incidentops.retrieval.cache import invalidate_project
-from incidentops.retrieval.vector_store import QdrantVectorStore, VectorStoreError
+from incidentops.retrieval.vector_store import QdrantVectorStore, VectorStoreError, chunk_point
 from incidentops.schemas.api import (
     BatchIngestErrorResponse,
     BatchIngestRequest,
@@ -50,13 +66,29 @@ from incidentops.schemas.api import (
     SyncStartRequest,
     SyncStatusResponse,
 )
-from incidentops.security.rbac import require_project_role
 from incidentops.security.audit import record_audit_event
+from incidentops.security.rbac import get_project_role
 from incidentops.security.source_config import find_source_config_secret_violations
+
+logger = logging.getLogger("incidentops.api.sources")
 
 router = APIRouter(prefix="/v1", tags=["Sources"])
 
 SYNC_STATUSES = {"running", "success", "partial_success", "failed", "cancelled"}
+ACTIVE_INDEX_JOB_STATUSES = {"pending", "queued", "running"}
+# Collector skips that say a file should not be indexed. Any other reason means
+# it could not be read, so its absence from the sync does not mean it was deleted.
+POLICY_SKIP_REASONS = {
+    "unchanged",
+    FAILURE_BINARY,
+    FAILURE_EMPTY,
+    FAILURE_GENERATED_FILE,
+    FAILURE_OVERSIZED,
+    FAILURE_UNSUPPORTED_EXTENSION,
+    FAILURE_VENDOR_FILE,
+}
+_REINDEX_PAGE_SIZE = 128
+_SEEN_MARK_BATCH_SIZE = 500
 
 
 @router.post("/projects/{project_id}/sources", response_model=SourceResponse, status_code=status.HTTP_201_CREATED)
@@ -69,7 +101,6 @@ async def create_source(
     user=Depends(require_user),
 ):
     await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.admin)
-    await require_project_role(db, project_id, user.id, ProjectRole.admin)
     violations = find_source_config_secret_violations(body.config)
     if violations:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="config contains raw secret material; use credentials_ref")
@@ -135,7 +166,6 @@ async def delete_source(
     user=Depends(require_user),
 ):
     await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.admin)
-    await require_project_role(db, project_id, user.id, ProjectRole.admin)
     source = await _require_source(db, source_id)
     if source.project_id != project_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Source not found for project")
@@ -147,7 +177,9 @@ async def delete_source(
         "retrieval_results": await _count_source_retrieval_results(db, source_id),
     }
     try:
-        await QdrantVectorStore(settings).delete_by_filter(project_id, source_id=str(source_id))
+        await QdrantVectorStore(settings).delete_by_filter(
+            project_id, all_index_versions=True, source_id=str(source_id)
+        )
     except VectorStoreError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Vector store deletion failed") from exc
     chunk_ids = select(Chunk.id).where(Chunk.source_id == source_id)
@@ -182,7 +214,6 @@ async def reindex_source(
     user=Depends(require_user),
 ):
     await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.admin)
-    await require_project_role(db, project_id, user.id, ProjectRole.admin)
     source = await _require_source(db, source_id)
     if source.project_id != project_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Source not found for project")
@@ -195,6 +226,16 @@ async def reindex_source(
         db,
         select(func.count()).select_from(Chunk).where(Chunk.project_id == project_id, Chunk.source_id == source_id),
     )
+    # Re-embedding calls the configured (possibly paid) embedding provider.
+    chunks_created = 0
+    job_counts: dict[str, int] = {}
+    if settings.rag_async_indexing:
+        reindex_mode = "index_jobs"
+        job_counts = await _queue_reindex_jobs(db, source, settings)
+    else:
+        reindex_mode = "reembed_inline"
+        chunks_created = await _reembed_source_chunks(db, project_id, source_id, settings)
+    # Last, so these row locks are not held during the embedding calls above.
     await db.execute(
         update(Chunk)
         .where(Chunk.project_id == project_id, Chunk.source_id == source_id)
@@ -203,10 +244,11 @@ async def reindex_source(
     source_type_counts = await _source_type_counts(db, project_id, source_id)
     chunk_type_counts = await _chunk_type_counts(db, project_id, source_id)
     diagnostics = {
-        "reindex_mode": "refresh_existing_chunks",
+        "reindex_mode": reindex_mode,
         "documents_reindexed": documents_reindexed,
         "chunks_reindexed": chunks_reindexed,
-        "chunks_created": 0,
+        "chunks_created": chunks_created,
+        **job_counts,
         "source_type_counts": source_type_counts,
         "chunk_type_counts": chunk_type_counts,
         "reindexed_at": _utcnow().isoformat(),
@@ -230,19 +272,22 @@ async def reindex_source(
             "source_id": str(source_id),
             "documents_reindexed": documents_reindexed,
             "chunks_reindexed": chunks_reindexed,
-            "chunks_created": 0,
+            "chunks_created": chunks_created,
+            **job_counts,
         },
     )
     await record_operational_event(
         db,
         project_id=project_id,
         category="indexing",
-        event_type="source_reindex_refreshed",
+        event_type="source_reindexed",
         payload={
             "source_id": str(source_id),
-            "reindex_mode": "refresh_existing_chunks",
+            "reindex_mode": reindex_mode,
             "documents_reindexed": documents_reindexed,
             "chunks_reindexed": chunks_reindexed,
+            "chunks_created": chunks_created,
+            **job_counts,
         },
     )
     await db.commit()
@@ -251,7 +296,7 @@ async def reindex_source(
         source_id=source_id,
         documents_reindexed=documents_reindexed,
         chunks_reindexed=chunks_reindexed,
-        chunks_created=0,
+        chunks_created=chunks_created,
         diagnostics=diagnostics,
     )
 
@@ -311,7 +356,6 @@ async def register_collector(
     user=Depends(require_user),
 ):
     await ensure_project_access(db, project_id, user, settings, minimum_role=ProjectRole.admin)
-    await require_project_role(db, project_id, user.id, ProjectRole.admin)
     now = _utcnow()
     statement = (
         insert(Collector)
@@ -360,10 +404,16 @@ async def start_sync(
     settings: Settings = Depends(get_settings_dep),
     user=Depends(require_user),
 ):
-    source = await _require_source(db, source_id)
-    await require_project_role(db, source.project_id, user.id, ProjectRole.admin)
+    source = await _require_accessible_source(db, source_id, user, settings, ProjectRole.admin)
     enforce_json_size(body.diagnostics, settings.max_sync_diagnostics_bytes, "sync diagnostics")
     collector = await _validate_collector(db, source.project_id, body.collector_id)
+    # Overlapping syncs overwrite each other's last_seen_sync_id, and whichever
+    # finished first would prune what the other saw. Only the newest sync lives.
+    await db.execute(
+        update(SourceSync)
+        .where(SourceSync.source_id == source.id, SourceSync.status == "running")
+        .values(status="cancelled", finished_at=_utcnow(), error_message="superseded by a newer sync")
+    )
     sync = SourceSync(
         project_id=source.project_id,
         source_id=source.id,
@@ -403,8 +453,7 @@ async def ingest_documents_batch(
     settings: Settings = Depends(get_settings_dep),
     user=Depends(require_user),
 ):
-    source = await _require_source(db, source_id)
-    await require_project_role(db, source.project_id, user.id, ProjectRole.admin)
+    source = await _require_accessible_source(db, source_id, user, settings, ProjectRole.admin)
     await check_rate_limit(
         db,
         settings,
@@ -415,7 +464,11 @@ async def ingest_documents_batch(
         project_id=source.project_id,
         action="documents_batch_ingest",
     )
-    sync = await _require_sync(db, body.sync_id, source.id)
+    # Index jobs update this row concurrently in async mode. Inline mode commits
+    # mid-request (and has no such writers), so a lock would not survive anyway.
+    sync = await _require_sync(db, body.sync_id, source.id, settings.rag_async_indexing)
+    if sync.status != "running":
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="sync is not running")
     await _validate_collector(db, source.project_id, body.collector_id)
     _validate_sync_collector(sync, body.collector_id)
     if sync.collector_id is None and body.collector_id is not None:
@@ -445,6 +498,8 @@ async def ingest_documents_batch(
             )
         for document in body.documents
     ]
+    # Everything received in this sync (valid or not) is protected from pruning.
+    await _mark_documents_seen(db, source, sync.id, [document.external_id for document in body.documents])
     queued_index_jobs = 0
     if settings.rag_async_indexing:
         validated_documents: list[NormalizedDocument] = []
@@ -460,7 +515,7 @@ async def ingest_documents_batch(
                     DocumentBatchError(
                         external_id=validation.external_id,
                         path=validation.path,
-                        code="duplicate_external_id",
+                        code=normalize_failure_code("duplicate_external_id"),
                         error="duplicate external_id in batch",
                         message="duplicate external_id in batch",
                     )
@@ -468,22 +523,37 @@ async def ingest_documents_batch(
                 continue
             seen_external_ids.add(validation.external_id)
             validated_documents.append(validation)
-        index_jobs = [
-            IndexJob(
-                project_id=source.project_id,
-                source_id=source.id,
-                sync_id=sync.id,
-                normalized_payload_json=document.model_dump(mode="json"),
-                content_hash=document.content_hash,
-                index_version=settings.vector_index_version,
+        existing_hashes = await _existing_document_hashes(
+            db, source, [document.external_id for document in validated_documents]
+        )
+        index_jobs: list[IndexJob] = []
+        created = updated = skipped_unchanged = 0
+        for document in validated_documents:
+            if document.external_id in existing_hashes:
+                if existing_hashes[document.external_id] == document.content_hash:
+                    skipped_unchanged += 1
+                    continue
+                updated += 1
+            else:
+                created += 1
+            index_jobs.append(
+                IndexJob(
+                    project_id=source.project_id,
+                    source_id=source.id,
+                    sync_id=sync.id,
+                    normalized_payload_json=document.model_dump(mode="json"),
+                    content_hash=document.content_hash,
+                    index_version=settings.vector_index_version,
+                )
             )
-            for document in validated_documents
-        ]
         db.add_all(index_jobs)
         await db.flush()
         queued_index_jobs = len(index_jobs)
         result = BatchIngestResult(
             received=len(normalized_documents),
+            created=created,
+            updated=updated,
+            skipped_unchanged=skipped_unchanged,
             skipped_invalid=len(validation_errors),
             errors=validation_errors,
             embedding_backend=settings.embedding_model,
@@ -617,18 +687,17 @@ async def finish_sync(
     settings: Settings = Depends(get_settings_dep),
     user=Depends(require_user),
 ):
-    source = await _require_source(db, source_id)
-    await require_project_role(db, source.project_id, user.id, ProjectRole.admin)
+    source = await _require_accessible_source(db, source_id, user, settings, ProjectRole.admin)
     enforce_json_size(body.diagnostics, settings.max_sync_diagnostics_bytes, "sync diagnostics")
     enforce_json_size(body.coverage, settings.max_sync_diagnostics_bytes, "sync coverage")
-    sync = await _require_sync(db, sync_id, source.id)
+    sync = await _require_sync(db, sync_id, source.id, True)
     if body.status not in SYNC_STATUSES - {"running"}:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="invalid sync status")
     if sync.finished_at is not None:
         if sync.status == body.status or (sync.status == "partial_success" and body.status == "success"):
             return SyncStatusResponse(sync_id=sync.id, status=sync.status)
         raise HTTPException(status.HTTP_409_CONFLICT, detail="sync is already finished")
-    diagnostics = {**(sync.diagnostics_json or {}), **(body.diagnostics or {})}
+    diagnostics = _merge_finish_diagnostics(sync.diagnostics_json or {}, body.diagnostics or {})
     parser_errors = max(
         sync.parser_errors,
         int(diagnostics.get("parser_errors", sync.parser_errors) or 0),
@@ -668,6 +737,17 @@ async def finish_sync(
     source.last_sync_finished_at = sync.finished_at
     source.last_sync_status = "indexing" if pending_index_jobs else effective_status
     source.last_error = sync.error_message
+
+    pruned_document_ids: list[uuid.UUID] = []
+    prune_skipped = await _stale_prune_skip_reason(db, sync, body, effective_status)
+    if prune_skipped:
+        diagnostics["stale_prune_skipped"] = prune_skipped
+    else:
+        pruned = await prune_stale_documents(db, source.project_id, source.id, sync.id)
+        pruned_document_ids = pruned.document_ids
+        diagnostics["stale_documents_deleted"] = len(pruned.document_ids)
+        diagnostics["stale_chunks_deleted"] = pruned.chunks_deleted
+    sync.diagnostics_json = diagnostics
     await record_audit_event(
         db,
         action="sync_failed" if effective_status == "failed" else "sync_finished",
@@ -682,10 +762,21 @@ async def finish_sync(
             "files_seen": sync.files_seen,
             "files_skipped": sync.files_skipped,
             "parser_errors": sync.parser_errors,
+            "stale_documents_deleted": len(pruned_document_ids),
         },
     )
     await db.flush()
     await db.commit()
+    if pruned_document_ids:
+        # Postgres is authoritative and already committed; orphaned points are
+        # dropped at read time, so a Qdrant failure here is recorded, not raised.
+        vectors_deleted = await delete_document_vectors(
+            source.project_id, source.id, pruned_document_ids, settings
+        )
+        if not vectors_deleted:
+            sync.diagnostics_json = {**diagnostics, "stale_vector_cleanup_failed": True}
+            await db.commit()
+        await invalidate_project(source.project_id)
     return SyncStatusResponse(sync_id=sync.id, status=sync.status)
 
 
@@ -696,8 +787,7 @@ async def get_latest_sync(
     settings: Settings = Depends(get_settings_dep),
     user=Depends(get_current_user),
 ):
-    source = await _require_source(db, source_id)
-    await ensure_project_access(db, source.project_id, user, settings, minimum_role=ProjectRole.viewer)
+    source = await _require_accessible_source(db, source_id, user, settings, ProjectRole.viewer)
     result = await db.execute(
         select(SourceSync).where(SourceSync.source_id == source.id).order_by(SourceSync.started_at.desc()).limit(1)
     )
@@ -717,8 +807,9 @@ async def get_sync(
     result = await db.execute(select(SourceSync).where(SourceSync.id == sync_id))
     sync = result.scalar_one_or_none()
     if not sync:
+        _reject_anonymous(user, settings)
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Sync not found")
-    await ensure_project_access(db, sync.project_id, user, settings, minimum_role=ProjectRole.viewer)
+    await _ensure_access_hiding_existence(db, sync.project_id, user, settings, ProjectRole.viewer, "Sync not found")
     return _sync_response(sync)
 
 
@@ -730,13 +821,99 @@ async def _require_source(db: AsyncSession, source_id: uuid.UUID) -> Source:
     return source
 
 
-async def _require_sync(db: AsyncSession, sync_id: uuid.UUID, source_id: uuid.UUID) -> SourceSync:
-    result = await db.execute(
-        select(SourceSync).where(
-            SourceSync.id == sync_id,
-            SourceSync.source_id == source_id,
-        )
+async def _stale_prune_skip_reason(
+    db: AsyncSession,
+    sync: SourceSync,
+    body: SyncFinishRequest,
+    effective_status: str,
+) -> str | None:
+    """Say why this sync must not delete unseen documents; None means it may.
+
+    Pruning is opt-in and only follows a clean, whole-source sync. Subset runs
+    (--max-files, path filters) finish "success" too, and any rejected document
+    (effective_status is then partial_success) means the sync's view is suspect.
+    """
+    if not body.complete:
+        return "sync_not_complete"
+    if effective_status != "success":
+        return "sync_not_successful"
+    skipped_reasons = (body.diagnostics or {}).get("skipped_reasons") or {}
+    if not isinstance(skipped_reasons, dict) or any(
+        count and reason not in POLICY_SKIP_REASONS for reason, count in skipped_reasons.items()
+    ):
+        return "sync_had_failed_files"
+    if sync.documents_received <= 0:
+        # Never wipe a source because a collector sent nothing.
+        return "no_documents_received"
+    # Exhausted retries do not touch parser_errors, so check the job rows too.
+    failed_jobs = await _count(
+        db,
+        select(func.count()).select_from(IndexJob).where(IndexJob.sync_id == sync.id, IndexJob.status == "failed"),
     )
+    return "sync_had_failed_index_jobs" if failed_jobs else None
+
+
+async def _require_accessible_source(
+    db: AsyncSession,
+    source_id: uuid.UUID,
+    user,
+    settings: Settings,
+    minimum_role: ProjectRole,
+) -> Source:
+    """Load a source for a route keyed only by source id, without confirming it exists.
+
+    The project is only known from the row, so the lookup has to come first. A
+    caller without access gets the same answer as for a missing source: 401 when
+    anonymous, otherwise 404. Denials are still audited by the role check.
+    """
+    try:
+        source = await _require_source(db, source_id)
+    except HTTPException:
+        _reject_anonymous(user, settings)
+        raise
+    await _ensure_access_hiding_existence(db, source.project_id, user, settings, minimum_role, "Source not found")
+    return source
+
+
+async def _ensure_access_hiding_existence(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    user,
+    settings: Settings,
+    minimum_role: ProjectRole,
+    not_found_detail: str,
+) -> None:
+    """Answer 404 to non-members. Members lacking the role keep their 403: they can
+    already list the resource, so a 404 would hide nothing and only mislead them.
+    """
+    try:
+        await ensure_project_access(db, project_id, user, settings, minimum_role=minimum_role)
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_403_FORBIDDEN:
+            raise
+        if await get_project_role(db, project_id, user.id) is not None:
+            raise
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=not_found_detail) from exc
+
+
+def _reject_anonymous(user, settings: Settings) -> None:
+    if user is None and (settings.is_production_like or not settings.demo_mode_public):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+
+
+async def _require_sync(
+    db: AsyncSession,
+    sync_id: uuid.UUID,
+    source_id: uuid.UUID,
+    for_update: bool = False,
+) -> SourceSync:
+    statement = select(SourceSync).where(
+        SourceSync.id == sync_id,
+        SourceSync.source_id == source_id,
+    )
+    if for_update:
+        statement = statement.with_for_update()
+    result = await db.execute(statement)
     sync = result.scalar_one_or_none()
     if not sync:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Sync not found for source")
@@ -817,9 +994,208 @@ def _merge_batch_diagnostics(
         diagnostics.get("chunk_type_counts", {}),
         result.chunk_type_counts,
     )
+    for counter in ("vector_publish_deferred", "stale_vector_cleanup_failures"):
+        diagnostics[counter] = int(diagnostics.get(counter, 0) or 0) + int(result.diagnostics.get(counter, 0) or 0)
     diagnostics["warnings"] = result.warnings
     diagnostics["embedding_backend"] = result.embedding_backend
     return diagnostics
+
+
+def _merge_finish_diagnostics(core: dict, collector: dict) -> dict:
+    """Merge collector finish diagnostics into Core's without losing Core counts.
+
+    Keys only the collector reports are added. For keys both sides report,
+    counters take the larger value (per key for count maps), lists are unioned
+    and other values keep Core's. Differing collector values are kept under
+    ``collector_reported`` for inspection.
+    """
+    merged = dict(core)
+    reported: dict = dict(merged.get("collector_reported") or {})
+    for key, value in collector.items():
+        if key not in merged or merged[key] in (None, "", [], {}):
+            merged[key] = value
+            continue
+        current = merged[key]
+        if current != value:
+            reported[key] = value
+        if _is_count(current) and _is_count(value):
+            merged[key] = max(int(current), int(value))
+        elif isinstance(current, dict) and isinstance(value, dict):
+            combined = dict(current)
+            for sub_key, sub_value in value.items():
+                existing = combined.get(sub_key)
+                if _is_count(existing) and _is_count(sub_value):
+                    combined[sub_key] = max(int(existing), int(sub_value))
+                elif existing is None:
+                    combined[sub_key] = sub_value
+            merged[key] = combined
+        elif isinstance(current, list) and isinstance(value, list):
+            merged[key] = current + [item for item in value if item not in current]
+    if reported:
+        merged["collector_reported"] = reported
+    return merged
+
+
+def _is_count(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+async def _mark_documents_seen(
+    db: AsyncSession,
+    source: Source,
+    sync_id: uuid.UUID,
+    external_ids: list[str],
+) -> None:
+    unique_ids = list(dict.fromkeys(external_id for external_id in external_ids if external_id))
+    for start in range(0, len(unique_ids), _SEEN_MARK_BATCH_SIZE):
+        await db.execute(
+            update(Document)
+            .where(
+                Document.project_id == source.project_id,
+                Document.source_id == source.id,
+                Document.external_id.in_(unique_ids[start : start + _SEEN_MARK_BATCH_SIZE]),
+            )
+            .values(last_seen_sync_id=sync_id)
+        )
+
+
+async def _existing_document_hashes(
+    db: AsyncSession,
+    source: Source,
+    external_ids: list[str],
+) -> dict[str, str | None]:
+    if not external_ids:
+        return {}
+    result = await db.execute(
+        select(Document.external_id, Document.content_hash).where(
+            Document.project_id == source.project_id,
+            Document.source_id == source.id,
+            Document.external_id.in_(external_ids),
+        )
+    )
+    return {str(external_id): content_hash for external_id, content_hash in result.all()}
+
+
+async def _reembed_source_chunks(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    source_id: uuid.UUID,
+    settings: Settings,
+) -> int:
+    """Re-embed existing chunks in place; point ids are chunk ids, so upserts replace.
+
+    Postgres is not changed here, so a failure part way leaves valid vectors for
+    every chunk and the request can simply be repeated.
+    """
+    store = QdrantVectorStore(settings)
+    reembedded = 0
+    after_id: uuid.UUID | None = None
+    while True:
+        statement = (
+            select(Chunk, Document.path)
+            .join(Document, Chunk.document_id == Document.id)
+            .where(Chunk.project_id == project_id, Chunk.source_id == source_id)
+            .order_by(Chunk.id)
+            .limit(_REINDEX_PAGE_SIZE)
+        )
+        if after_id is not None:
+            statement = statement.where(Chunk.id > after_id)
+        rows = (await db.execute(statement)).all()
+        if not rows:
+            return reembedded
+        try:
+            embeddings = await embed_texts_async([chunk.text for chunk, _ in rows], model_name=settings.embedding_model)
+        except Exception as exc:
+            logger.warning("reindex embedding failed source_id=%s error=%s", source_id, exc.__class__.__name__)
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Embedding backend unavailable") from exc
+        if len(embeddings) != len(rows):
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Embedding backend unavailable")
+        points = [
+            chunk_point(chunk, embedding, index_version=settings.vector_index_version, document_path=path)
+            for (chunk, path), embedding in zip(rows, embeddings)
+        ]
+        try:
+            await store.upsert(points, settings.embedding_dim)
+        except VectorStoreError as exc:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Vector store update failed") from exc
+        reembedded += len(rows)
+        after_id = rows[-1][0].id
+
+
+async def _queue_reindex_jobs(db: AsyncSession, source: Source, settings: Settings) -> dict[str, int]:
+    """Queue one index job per document from its stored payload for the dispatcher.
+
+    Core keeps no raw document content outside index job payloads. A payload is
+    used only if it matches the document's current content, or the job would roll
+    the document back; documents without one (indexed inline) are counted, not
+    touched, and a later sync or inline reindex covers them.
+    """
+    queued = without_payload = already_pending = 0
+    after_id: uuid.UUID | None = None
+    while True:
+        statement = (
+            select(Document)
+            .where(Document.project_id == source.project_id, Document.source_id == source.id)
+            .order_by(Document.id)
+            .limit(_REINDEX_PAGE_SIZE)
+        )
+        if after_id is not None:
+            statement = statement.where(Document.id > after_id)
+        documents = (await db.execute(statement)).scalars().all()
+        if not documents:
+            return {
+                "index_jobs_queued": queued,
+                "documents_without_stored_payload": without_payload,
+                "documents_already_pending": already_pending,
+            }
+        # content_hash is NULL while a publish is outstanding; checksum keeps the value.
+        hashes = {document.content_hash or document.checksum for document in documents} - {None}
+        stored_jobs = (
+            await db.execute(
+                select(IndexJob)
+                .where(
+                    IndexJob.project_id == source.project_id,
+                    IndexJob.source_id == source.id,
+                    IndexJob.content_hash.in_(hashes),
+                )
+                .order_by(IndexJob.created_at.desc())
+            )
+        ).scalars().all()
+        payloads: dict[tuple[str | None, str], dict] = {}
+        active: set[tuple[str | None, str]] = set()
+        for job in stored_jobs:
+            payload = job.normalized_payload_json or {}
+            key = (payload.get("external_id"), job.content_hash)
+            payloads.setdefault(key, payload)
+            if job.status in ACTIVE_INDEX_JOB_STATUSES:
+                active.add(key)
+        for document in documents:
+            content_hash = document.content_hash or document.checksum
+            key = (document.external_id, content_hash)
+            if key in active:
+                already_pending += 1
+                continue
+            payload = payloads.get(key)
+            if payload is None:
+                without_payload += 1
+                continue
+            # Cleared so the worker re-embeds it instead of skipping it as unchanged.
+            document.content_hash = None
+            db.add(
+                IndexJob(
+                    project_id=source.project_id,
+                    source_id=source.id,
+                    # No sync: a reindex must not add to the last sync's counters.
+                    sync_id=None,
+                    normalized_payload_json={**payload, INDEX_REASON_KEY: INDEX_REASON_REINDEX},
+                    content_hash=content_hash,
+                    index_version=settings.vector_index_version,
+                    status="pending",
+                    attempts=0,
+                )
+            )
+            queued += 1
+        after_id = documents[-1].id
 
 
 def _normalize_coverage(coverage: dict, diagnostics: dict) -> dict:

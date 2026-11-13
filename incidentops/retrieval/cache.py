@@ -20,18 +20,27 @@ logger = logging.getLogger("incidentops.retrieval.cache")
 _client = None
 
 
-def _key(namespace: str, value: str) -> str:
+def _embedding_key(text: str, model: str | None, input_type: str) -> str:
+    """Key embeddings by the model that produced them and the provider input type.
+
+    Query and passage vectors differ for asymmetric models (NVIDIA, Azure ML),
+    and a per-call model override must not reuse the configured model's vectors.
+    """
     settings = get_settings()
-    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
-    return f"incidentops:rag:{namespace}:{settings.vector_index_version}:{settings.embedding_model}:{settings.rag_model_revision}:{digest}"
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    resolved_model = model or settings.embedding_model
+    return (
+        f"incidentops:rag:embedding:{settings.vector_index_version}:{resolved_model}:{input_type}:"
+        f"{settings.rag_model_revision}:{digest}"
+    )
 
 
-async def get_embedding(text: str) -> list[float] | None:
+async def get_embedding(text: str, *, model: str | None = None, input_type: str = "passage") -> list[float] | None:
     client = await _redis_client()
     if client is None:
         return None
     try:
-        value = await client.get(_key("embedding", text))
+        value = await client.get(_embedding_key(text, model, input_type))
         if not value:
             incr("rag_embedding_cache_misses_total")
             return None
@@ -45,13 +54,23 @@ async def get_embedding(text: str) -> list[float] | None:
         return None
 
 
-async def set_embedding(text: str, vector: list[float]) -> None:
+async def set_embedding(
+    text: str,
+    vector: list[float],
+    *,
+    model: str | None = None,
+    input_type: str = "passage",
+) -> None:
     client = await _redis_client()
     if client is None:
         return
     try:
         settings = get_settings()
-        await client.set(_key("embedding", text), json.dumps(vector), ex=settings.rag_cache_ttl_seconds)
+        await client.set(
+            _embedding_key(text, model, input_type),
+            json.dumps(vector),
+            ex=settings.rag_cache_ttl_seconds,
+        )
     except Exception:
         logger.debug("embedding cache set failed", exc_info=True)
 

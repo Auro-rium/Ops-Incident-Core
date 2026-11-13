@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
@@ -20,11 +22,16 @@ router = APIRouter(prefix="/v1/evals", tags=["Evals"])
 
 
 @router.get("")
-async def list_evals(db: AsyncSession = Depends(get_db), user=Depends(require_user)):
+async def list_evals(
+    project_id: uuid.UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_user),
+):
     project_ids = select(ProjectMember.project_id).where(ProjectMember.user_id == user.id)
-    result = await db.execute(
-        select(EvalRun).where(EvalRun.project_id.in_(project_ids)).order_by(EvalRun.created_at.desc())
-    )
+    query = select(EvalRun).where(EvalRun.project_id.in_(project_ids))
+    if project_id is not None:
+        query = query.where(EvalRun.project_id == project_id)
+    result = await db.execute(query.order_by(EvalRun.created_at.desc()))
     runs = result.scalars().all()
     return [
         EvalRunResponse(
@@ -60,6 +67,9 @@ async def run_eval_endpoint(
         action="eval_run",
     )
     await ensure_project_access(db, body.project_id, user, settings, minimum_role=ProjectRole.admin)
+    if body.cases is not None and body.cases_path:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Provide either cases or cases_path, not both")
+    inline_cases = _validate_inline_cases(body.cases, settings) if body.cases is not None else None
     try:
         cases_path = str(resolve_cases_path(body.cases_path, settings)) if body.cases_path else None
     except ValueError as exc:
@@ -74,7 +84,14 @@ async def run_eval_endpoint(
             idempotency_key=f"eval:{run.id}",
         )
     else:
-        run = await run_eval_persisted(db, body.project_id, top_k=body.top_k, cases_path=cases_path, settings=settings)
+        run = await run_eval_persisted(
+            db,
+            body.project_id,
+            top_k=body.top_k,
+            cases_path=cases_path,
+            settings=settings,
+            cases=inline_cases,
+        )
         operational_run = None
     await record_audit_event(
         db,
@@ -85,7 +102,11 @@ async def run_eval_endpoint(
         resource_type="eval_run",
         resource_id=run.id,
         request=request,
-        metadata={"top_k": body.top_k, "cases_path": cases_path},
+        metadata={
+            "top_k": body.top_k,
+            "cases_path": cases_path,
+            "inline_case_count": len(inline_cases) if inline_cases is not None else None,
+        },
     )
     if settings.worker_mode == "queue":
         await record_audit_event(
@@ -104,7 +125,13 @@ async def run_eval_endpoint(
         try:
             await get_job_queue(settings).enqueue(
                 "execute_evaluator_agent",
-                {"eval_run_id": str(run.id), "operational_run_id": str(operational_run.id), "top_k": body.top_k, "cases_path": cases_path},
+                {
+                    "eval_run_id": str(run.id),
+                    "operational_run_id": str(operational_run.id),
+                    "top_k": body.top_k,
+                    "cases_path": cases_path,
+                    "cases": inline_cases,
+                },
             )
         except Exception as exc:
             error = _safe_error(exc)
@@ -137,6 +164,17 @@ async def run_eval_endpoint(
 
 def _safe_error(exc: Exception) -> str:
     return exc.__class__.__name__.lower()[:64]
+
+
+def _validate_inline_cases(cases: list[dict[str, Any]], settings: Settings) -> list[dict[str, Any]]:
+    size = len(json.dumps(cases, default=str).encode("utf-8"))
+    if size > settings.max_eval_cases_bytes:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Inline eval cases exceed MAX_EVAL_CASES_BYTES")
+    for case in cases:
+        question = case.get("question") if isinstance(case, dict) else None
+        if not isinstance(question, str) or not question.strip():
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Each inline eval case needs a non-empty question")
+    return cases
 
 
 @router.get("/{eval_run_id}", response_model=EvalRunResponse)

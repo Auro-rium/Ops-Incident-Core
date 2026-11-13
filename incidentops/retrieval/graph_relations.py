@@ -33,9 +33,14 @@ def build_chunk_relations(document, chunks: list) -> list[dict[str, Any]]:
             relations.append(_relation(chunk, "defines", path_key, f"symbol:{symbol_name}", relation_metadata))
         if chunk.endpoint:
             relations.append(_relation(chunk, "implements", path_key, f"endpoint:{chunk.endpoint}", relation_metadata))
-        if chunk.deploy_hash:
+        if chunk.deploy_hash and _is_deploy_evidence(chunk, relation_metadata["source_type"]):
             relations.append(_relation(chunk, "changed_by", path_key, f"deploy:{chunk.deploy_hash}", relation_metadata))
     return relations
+
+
+def _is_deploy_evidence(chunk, source_type: str) -> bool:
+    """Only deploy records and patches show that a path changed in a deploy."""
+    return source_type == "deploy" or str(chunk.chunk_type or "").startswith("deploy_")
 
 
 def _relation(chunk, relation_type: str, from_key: str, to_key: str, metadata: dict[str, Any]) -> dict[str, Any]:

@@ -21,10 +21,13 @@ def _result_json(result) -> dict:
 async def _probe() -> None:
     project_id = os.environ["PROJECT_ID"]
     mcp_url = os.environ["MCP_URL"]
-    query = os.environ.get("MCP_PROBE_QUERY", "Where is FastAPI used?")
-    token = os.environ.get("MCP_TOKEN", "").strip()
+    query = os.environ.get("MCP_PROBE_QUERY", "Where is the primary application entrypoint implemented?")
+    investigate_query = os.environ.get("MCP_INVESTIGATE_QUERY", "").strip() or query
+    # Inbound token for the MCP server itself (MCP_INBOUND_TOKEN), not the
+    # Core service token the server uses for its outbound calls.
+    token = os.environ.get("MCP_INBOUND_TOKEN", "").strip()
     if not token:
-        raise RuntimeError("MCP_TOKEN is required")
+        raise RuntimeError("MCP_INBOUND_TOKEN is required")
 
     async with streamablehttp_client(
         mcp_url,
@@ -51,7 +54,8 @@ async def _probe() -> None:
             )
             investigation = _result_json(
                 await session.call_tool(
-                    "investigate_incident", {"project_id": project_id, "query": query, "top_k": 5}
+                    "investigate_incident",
+                    {"project_id": project_id, "query": investigate_query, "top_k": 5},
                 )
             )
 

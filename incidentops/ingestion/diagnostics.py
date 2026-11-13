@@ -3,8 +3,17 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 
+from incidentops.collector.discovery import discover_files, skip_reason
 from incidentops.config.settings import Settings, get_settings
 from incidentops.ingestion.chunking.metadata import classify_source_type
+
+
+def merge_counts(left: dict | None, right: dict | None) -> dict[str, int]:
+    """Sum two {key: count} mappings without mutating either."""
+    merged = {str(key): int(value or 0) for key, value in (left or {}).items()}
+    for key, value in (right or {}).items():
+        merged[str(key)] = merged.get(str(key), 0) + int(value or 0)
+    return merged
 
 
 def build_source_coverage(source_type_counts: dict[str, int], chunk_type_counts: dict[str, int] | None = None) -> dict:
@@ -52,19 +61,19 @@ def inspect_folder(data_path: str, settings: Settings | None = None) -> dict:
     total_files_seen = 0
     ingestable_files = 0
 
-    for path in sorted(base.rglob("*")):
-        if not path.is_file() or "__pycache__" in str(path) or path.name.startswith("."):
+    for item in discover_files(base):
+        reason = skip_reason(item, settings, max_bytes=settings.max_ingest_file_bytes)
+        if reason in {"vendor_file", "generated_file"}:
             continue
         total_files_seen += 1
-        rel_path = str(path.relative_to(base))
-        suffix = path.suffix.lower() or "<none>"
-        file_type_counts[suffix] += 1
-        size_bytes = path.stat().st_size
-        if suffix not in settings.supported_extensions_set:
-            unsupported_files.append({"path": rel_path, "reason": "unsupported_extension", "size_bytes": size_bytes})
-            continue
-        if size_bytes > settings.max_ingest_file_bytes:
+        rel_path = item.relative_path
+        size_bytes = item.size_bytes
+        file_type_counts[Path(rel_path).suffix.lower() or "<none>"] += 1
+        if reason == "oversized":
             oversized_files.append({"path": rel_path, "reason": "file_too_large", "size_bytes": size_bytes})
+            continue
+        if reason:
+            unsupported_files.append({"path": rel_path, "reason": reason, "size_bytes": size_bytes})
             continue
         ingestable_files += 1
         source_type_counts[classify_source_type(rel_path)] += 1

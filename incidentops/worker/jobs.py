@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from incidentops.agent.service import execute_run
 from incidentops.config.settings import Settings
-from incidentops.db.models import AgentRun, EvalRun, EvalStatus, IndexJob, OperationalRun, OperationalRunStatus, RunStatus, Source, SourceSync
+from incidentops.db.models import AgentRun, Document, EvalRun, EvalStatus, IndexJob, OperationalRun, OperationalRunStatus, RunStatus, Source, SourceSync
 from incidentops.db.session import _get_session_factory
 from incidentops.eval.runner import execute_eval_run
-from incidentops.ingestion.indexer import index_normalized_documents
+from incidentops.ingestion.diagnostics import build_source_coverage, merge_counts
+from incidentops.ingestion.indexer import (
+    INDEX_REASON_KEY,
+    INDEX_REASON_REINDEX,
+    INDEX_REASON_VECTOR_RETRY,
+    index_normalized_documents,
+)
 from incidentops.ingestion.normalized import NormalizedDocument
 from incidentops.observability.metrics import incr, observe_latency
 from incidentops.observability.tracing import traced
@@ -141,7 +148,14 @@ async def execute_eval_run_job(payload: dict, settings: Settings) -> None:
             resource_type="eval_run",
             resource_id=run.id,
         )
-        run = await execute_eval_run(db, run, top_k=top_k, cases_path=cases_path)
+        run = await execute_eval_run(
+            db,
+            run,
+            top_k=top_k,
+            cases_path=cases_path,
+            settings=settings,
+            cases=payload.get("cases"),
+        )
         await record_audit_event(
             db,
             action="eval_job_failed" if run.status == EvalStatus.failed else "eval_job_completed",
@@ -189,11 +203,12 @@ async def execute_evaluator_agent_job(payload: dict, settings: Settings) -> None
                 top_k=top_k,
                 cases_path=cases_path,
                 settings=settings,
+                cases=payload.get("cases"),
             )
         summary = dict(completed_eval.summary_json or {})
-        op_run.model_call_count = 0
-        op_run.input_tokens = 0
-        op_run.output_tokens = 0
+        op_run.model_call_count = int(summary.get("model_call_count") or 0)
+        op_run.input_tokens = int(summary.get("input_tokens") or 0)
+        op_run.output_tokens = int(summary.get("output_tokens") or 0)
         op_run.summary_json = {
             "status": "completed" if completed_eval.status != EvalStatus.failed else "failed",
             "eval_run_id": str(completed_eval.id),
@@ -202,6 +217,7 @@ async def execute_evaluator_agent_job(payload: dict, settings: Settings) -> None
             "avg_evidence_recall": float(summary.get("avg_evidence_recall") or summary.get("avg_recall") or 0.0),
             "wrong_source_type_rate": float(summary.get("wrong_source_type_rate") or 0.0),
             "latency_p95_ms": float(summary.get("latency_p95_ms") or 0.0),
+            "passed_cases": int(summary.get("passed_cases") or 0),
             "model_judging_used": False,
         }
         op_run.status = OperationalRunStatus.completed if completed_eval.status != EvalStatus.failed else OperationalRunStatus.failed
@@ -243,7 +259,14 @@ async def execute_operational_agent_job(payload: dict, settings: Settings, expec
 
 
 async def execute_index_document_job(payload: dict, settings: Settings) -> None:
-    """Parse, embed, and publish a redacted pending document by durable ID."""
+    """Parse, embed, and publish a redacted pending document by durable ID.
+
+    The row is committed as ``running`` before work starts so that a worker
+    crash leaves a row the dispatcher can reclaim after the job timeout. Any
+    failure (including timeout cancellation) moves it back to ``pending`` with
+    attempts already incremented, or to ``failed`` once retries are exhausted.
+    The dispatcher is the only component that republishes the job.
+    """
     index_job_id = uuid.UUID(str(payload["index_job_id"]))
     factory = _get_session_factory()
     async with factory() as db:
@@ -254,24 +277,47 @@ async def execute_index_document_job(payload: dict, settings: Settings) -> None:
         if not index_job:
             logger.info("index job unavailable or already locked id=%s", index_job_id)
             return
-        if index_job.status in {"completed", "stale", "running"}:
+        if index_job.status in {"completed", "stale", "running", "failed"}:
             return
         if index_job.attempts >= settings.rag_index_max_retries:
             index_job.status = "failed"
             index_job.error_code = index_job.error_code or "retry_limit_exceeded"
             index_job.finished_at = datetime.now(timezone.utc)
+            await _settle_source_if_sync_drained(
+                db, await _load_locked_sync(db, index_job.sync_id), index_job.id, job_failed=True
+            )
             await db.commit()
             return
         if index_job.index_version != settings.vector_index_version:
             index_job.status = "stale"
             index_job.error_code = "index_version_changed"
             index_job.finished_at = datetime.now(timezone.utc)
+            await _settle_source_if_sync_drained(
+                db, await _load_locked_sync(db, index_job.sync_id), index_job.id, job_failed=False
+            )
+            await db.commit()
+            return
+        if await _forced_index_job_is_stale(db, index_job):
+            index_job.status = "stale"
+            index_job.error_code = "document_rewritten"
+            index_job.finished_at = datetime.now(timezone.utc)
+            await _settle_source_if_sync_drained(
+                db, await _load_locked_sync(db, index_job.sync_id), index_job.id, job_failed=False
+            )
             await db.commit()
             return
 
         index_job.status = "running"
         index_job.attempts += 1
         index_job.started_at = datetime.now(timezone.utc)
+        index_job.finished_at = None
+        await db.commit()
+        job_context = {
+            "project_id": index_job.project_id,
+            "sync_id": index_job.sync_id,
+            "index_version": index_job.index_version,
+            "attempts": index_job.attempts,
+        }
         try:
             normalized = NormalizedDocument.model_validate(index_job.normalized_payload_json)
             batcher = _get_embedding_batcher(settings)
@@ -286,37 +332,49 @@ async def execute_index_document_job(payload: dict, settings: Settings) -> None:
                 index_job.sync_id,
                 [normalized],
                 embed_fn=embed_fn,
+                # The batch route marked existing rows as seen when it queued this
+                # job; a late job from an older sync must not move that marker back.
+                mark_existing_seen=False,
+                vector_retry_attempts=index_job.attempts,
             )
+            # Release document row locks first: the batch route takes the sync
+            # lock and then document locks, so the opposite order could deadlock.
+            await db.commit()
             index_job.status = "completed" if not indexed.errors else "failed"
             index_job.error_code = indexed.errors[0].code if indexed.errors else None
             index_job.finished_at = datetime.now(timezone.utc)
 
-            if index_job.sync_id:
-                sync_result = await db.execute(select(SourceSync).where(SourceSync.id == index_job.sync_id))
-                sync = sync_result.scalar_one_or_none()
-                if sync:
+            sync = await _load_locked_sync(db, index_job.sync_id)
+            if sync:
+                sync.parser_errors += len(indexed.errors)
+                diagnostics = dict(sync.diagnostics_json or {})
+                diagnostics["index_jobs_completed"] = int(diagnostics.get("index_jobs_completed", 0) or 0) + (
+                    not indexed.errors
+                )
+                diagnostics["index_jobs_failed"] = int(diagnostics.get("index_jobs_failed", 0) or 0) + bool(indexed.errors)
+                # A forced job re-publishes a document this sync already counted.
+                if not _is_forced_index_job(index_job):
                     sync.chunks_created += indexed.chunks_created
-                    sync.parser_errors += len(indexed.errors)
-                    diagnostics = dict(sync.diagnostics_json or {})
-                    diagnostics["index_jobs_completed"] = int(diagnostics.get("index_jobs_completed", 0) or 0) + 1
-                    diagnostics["index_jobs_failed"] = int(diagnostics.get("index_jobs_failed", 0) or 0) + bool(indexed.errors)
-                    sync.diagnostics_json = diagnostics
-                    if sync.finished_at is not None:
-                        pending_result = await db.execute(
-                            select(IndexJob.id).where(
-                                IndexJob.sync_id == sync.id,
-                                IndexJob.status.in_(("pending", "queued", "running")),
-                            )
-                        )
-                        if pending_result.first() is None:
-                            failed_result = await db.execute(
-                                select(IndexJob.id).where(IndexJob.sync_id == sync.id, IndexJob.status == "failed")
-                            )
-                            source_result = await db.execute(select(Source).where(Source.id == index_job.source_id))
-                            source = source_result.scalar_one_or_none()
-                            if source:
-                                source.status = "error" if failed_result.first() is not None else "ready"
-                                source.last_sync_status = "partial_success" if source.status == "error" else "success"
+                    diagnostics["source_type_counts"] = merge_counts(
+                        diagnostics.get("source_type_counts"), indexed.source_type_counts
+                    )
+                    diagnostics["chunk_type_counts"] = merge_counts(
+                        diagnostics.get("chunk_type_counts"), indexed.chunk_type_counts
+                    )
+                for counter in ("vector_publish_deferred", "stale_vector_cleanup_failures"):
+                    diagnostics[counter] = int(diagnostics.get(counter, 0) or 0) + int(
+                        (indexed.diagnostics or {}).get(counter, 0) or 0
+                    )
+                sync.diagnostics_json = diagnostics
+                sync.coverage_json = {
+                    **(sync.coverage_json or {}),
+                    **build_source_coverage(
+                        diagnostics.get("source_type_counts") or {}, diagnostics.get("chunk_type_counts") or {}
+                    ),
+                }
+                await _settle_source_if_sync_drained(
+                    db, sync, index_job.id, job_failed=index_job.status == "failed"
+                )
 
             await record_audit_event(
                 db,
@@ -341,28 +399,136 @@ async def execute_index_document_job(payload: dict, settings: Settings) -> None:
                 },
             )
             await db.commit()
-        except Exception as exc:
-            logger.exception("index job failed index_job_id=%s", index_job_id)
-            retryable = index_job.attempts < settings.rag_index_max_retries
-            index_job.status = "pending" if retryable else "failed"
-            index_job.error_code = exc.__class__.__name__.lower()[:64]
-            index_job.finished_at = None if retryable else datetime.now(timezone.utc)
-            await record_audit_event(
-                db,
-                action="index_job_retry_scheduled" if retryable else "index_job_failed",
-                status=index_job.status,
-                project_id=index_job.project_id,
-                resource_type="index_job",
-                resource_id=index_job.id,
-                metadata={"index_version": index_job.index_version, "error_code": index_job.error_code},
-            )
-            await record_operational_event(
-                db,
-                project_id=index_job.project_id,
-                category="indexing",
-                event_type="index_document_retry" if retryable else "index_document_failed",
-                severity="medium" if retryable else "high",
-                payload={"index_job_id": str(index_job.id), "index_version": index_job.index_version, "error_code": index_job.error_code},
-            )
-            await db.commit()
+        except BaseException as exc:
+            # Includes asyncio.CancelledError from the worker's job timeout,
+            # which would otherwise leave the row ``running`` forever.
+            cancelled = isinstance(exc, (asyncio.CancelledError, asyncio.TimeoutError))
+            if not cancelled:
+                logger.exception("index job failed index_job_id=%s", index_job_id)
+            else:
+                logger.warning("index job cancelled index_job_id=%s", index_job_id)
+            error_code = "job_timeout" if cancelled else exc.__class__.__name__.lower()[:64]
+            try:
+                await db.rollback()
+            except Exception:  # pragma: no cover - connection may already be unusable
+                logger.debug("rollback after index job failure failed", exc_info=True)
+            try:
+                await asyncio.shield(
+                    _record_index_job_failure(factory, index_job_id, job_context, error_code, settings)
+                )
+            except Exception:  # pragma: no cover - never mask the original failure
+                logger.exception("could not record index job failure index_job_id=%s", index_job_id)
             raise
+
+
+async def _load_locked_sync(db, sync_id: uuid.UUID | None) -> SourceSync | None:
+    """Lock the sync row: concurrent jobs of one sync read-modify-write its counters."""
+    if sync_id is None:
+        return None
+    result = await db.execute(select(SourceSync).where(SourceSync.id == sync_id).with_for_update())
+    return result.scalar_one_or_none()
+
+
+async def _settle_source_if_sync_drained(db, sync: SourceSync | None, job_id: uuid.UUID, *, job_failed: bool) -> None:
+    """Move a source out of ``indexing`` once its finished sync has no active jobs.
+
+    Any other source status means a newer sync took over or this one failed.
+    """
+    if sync is None or sync.finished_at is None:
+        return
+    pending_result = await db.execute(
+        select(IndexJob.id).where(
+            IndexJob.sync_id == sync.id,
+            IndexJob.id != job_id,
+            IndexJob.status.in_(("pending", "queued", "running")),
+        )
+    )
+    if pending_result.first() is not None:
+        return
+    source_result = await db.execute(select(Source).where(Source.id == sync.source_id))
+    source = source_result.scalar_one_or_none()
+    if source is None or source.status != "indexing":
+        return
+    failed_result = await db.execute(
+        select(IndexJob.id).where(IndexJob.sync_id == sync.id, IndexJob.status == "failed")
+    )
+    failed = job_failed or failed_result.first() is not None
+    source.status = "error" if failed else "ready"
+    source.last_sync_status = "partial_success" if failed else "success"
+
+
+def _is_forced_index_job(index_job: IndexJob) -> bool:
+    payload = index_job.normalized_payload_json or {}
+    return payload.get(INDEX_REASON_KEY) in {INDEX_REASON_VECTOR_RETRY, INDEX_REASON_REINDEX}
+
+
+async def _forced_index_job_is_stale(db, index_job: IndexJob) -> bool:
+    """Core-created jobs (vector retry/reindex) re-publish known content.
+
+    They only make sense while the document still exists with a cleared
+    content_hash and this job's content; if it was pruned or rewritten since,
+    the job is stale. The checksum catches a rewrite whose own publish failed.
+    """
+    if not _is_forced_index_job(index_job):
+        return False
+    payload = index_job.normalized_payload_json or {}
+    result = await db.execute(
+        select(Document).where(
+            Document.project_id == index_job.project_id,
+            Document.source_id == index_job.source_id,
+            Document.external_id == payload.get("external_id"),
+        )
+    )
+    document = result.scalar_one_or_none()
+    if document is None or document.content_hash is not None:
+        return True
+    return document.checksum not in (None, index_job.content_hash)
+
+
+async def _record_index_job_failure(
+    factory,
+    index_job_id: uuid.UUID,
+    job_context: dict,
+    error_code: str,
+    settings: Settings,
+) -> None:
+    retryable = job_context["attempts"] < settings.rag_index_max_retries
+    status = "pending" if retryable else "failed"
+    async with factory() as db:
+        await db.execute(
+            update(IndexJob)
+            .where(IndexJob.id == index_job_id, IndexJob.status == "running")
+            .values(
+                status=status,
+                attempts=job_context["attempts"],
+                error_code=error_code,
+                queued_at=None,
+                finished_at=None if retryable else datetime.now(timezone.utc),
+            )
+        )
+        if not retryable:
+            await _settle_source_if_sync_drained(
+                db, await _load_locked_sync(db, job_context["sync_id"]), index_job_id, job_failed=True
+            )
+        await record_audit_event(
+            db,
+            action="index_job_retry_scheduled" if retryable else "index_job_failed",
+            status=status,
+            project_id=job_context["project_id"],
+            resource_type="index_job",
+            resource_id=index_job_id,
+            metadata={"index_version": job_context["index_version"], "error_code": error_code},
+        )
+        await record_operational_event(
+            db,
+            project_id=job_context["project_id"],
+            category="indexing",
+            event_type="index_document_retry" if retryable else "index_document_failed",
+            severity="medium" if retryable else "high",
+            payload={
+                "index_job_id": str(index_job_id),
+                "index_version": job_context["index_version"],
+                "error_code": error_code,
+            },
+        )
+        await db.commit()

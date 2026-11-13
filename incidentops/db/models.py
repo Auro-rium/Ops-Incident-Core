@@ -88,6 +88,7 @@ class User(Base):
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failed_login_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -253,6 +254,8 @@ class Document(Base):
     content_hash: Mapped[str | None] = mapped_column(String(128))
     modified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     size_bytes: Mapped[int | None] = mapped_column(Integer)
+    # Last sync that reported this document; complete syncs remove documents not seen.
+    last_seen_sync_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     project: Mapped["Project"] = relationship(back_populates="documents")
@@ -265,6 +268,7 @@ class Document(Base):
         Index("ix_documents_project_source_type", "project_id", "source_type"),
         Index("ix_documents_project_source_external", "project_id", "source_id", "external_id"),
         UniqueConstraint("project_id", "source_id", "external_id", name="uq_documents_project_source_external_id"),
+        Index("ix_documents_source_last_seen_sync", "source_id", "last_seen_sync_id"),
     )
 
 

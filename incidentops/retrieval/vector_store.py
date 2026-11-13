@@ -33,6 +33,17 @@ def _headers(settings: Settings) -> dict[str, str]:
     return headers
 
 
+# Collections (and their payload indexes) already verified in this process,
+# keyed by (base_url, collection, embedding_dim). Setup is idempotent in Qdrant,
+# but repeating it on every upsert costs ~len(_FILTER_FIELDS) round trips.
+_ENSURED_COLLECTIONS: set[tuple[str, str, int]] = set()
+
+
+def reset_collection_cache() -> None:
+    """Forget verified collections (tests, or after a collection is dropped)."""
+    _ENSURED_COLLECTIONS.clear()
+
+
 def _base_url(settings: Settings) -> str:
     configured = settings.qdrant_url.strip().rstrip("/")
     if not configured:
@@ -60,6 +71,9 @@ class QdrantVectorStore:
 
     async def ensure_collection(self, embedding_dim: int) -> None:
         base_url = _base_url(self.settings)
+        cache_key = (base_url, self.collection, int(embedding_dim))
+        if cache_key in _ENSURED_COLLECTIONS:
+            return
         headers = _headers(self.settings)
         try:
             async with httpx.AsyncClient(timeout=self.settings.qdrant_timeout_seconds) as client:
@@ -85,12 +99,18 @@ class QdrantVectorStore:
                         json={"field_name": field_name, "field_schema": "keyword"},
                     )
                     self._raise_for_status(payload_index, f"payload index creation for {field_name}")
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ValueError) as exc:
             raise VectorStoreError("Qdrant collection setup failed") from exc
+        _ENSURED_COLLECTIONS.add(cache_key)
 
     async def upsert(self, points: list[dict[str, Any]], embedding_dim: int) -> None:
         if not points:
             return
+        for point in points:
+            if len(point.get("vector") or []) != embedding_dim:
+                raise VectorStoreError(
+                    "embedding dimension does not match the configured vector index"
+                )
         await self.ensure_collection(embedding_dim)
         try:
             async with httpx.AsyncClient(timeout=self.settings.qdrant_timeout_seconds) as client:
@@ -99,6 +119,9 @@ class QdrantVectorStore:
                     headers=_headers(self.settings),
                     json={"points": points},
                 )
+            if response.status_code == 404:
+                # The collection disappeared after it was verified; re-check next time.
+                _ENSURED_COLLECTIONS.discard((_base_url(self.settings), self.collection, int(embedding_dim)))
             self._raise_for_status(response, "point upsert")
         except httpx.HTTPError as exc:
             raise VectorStoreError("Qdrant point upsert failed") from exc
@@ -115,7 +138,9 @@ class QdrantVectorStore:
             {"key": "index_version", "match": {"value": self.settings.vector_index_version}},
         ]
         for field_name, value in (filters or {}).items():
-            if field_name in _FILTER_FIELDS and value is not None:
+            if field_name == "endpoint" and value is not None:
+                must.append(_endpoint_condition(str(value)))
+            elif field_name in _FILTER_FIELDS and value is not None:
                 must.append({"key": field_name, "match": {"value": str(value)}})
         try:
             async with httpx.AsyncClient(timeout=self.settings.qdrant_timeout_seconds) as client:
@@ -135,7 +160,10 @@ class QdrantVectorStore:
         if response.status_code == 404:
             return []
         self._raise_for_status(response, "vector search")
-        points = response.json().get("result", {}).get("points", [])
+        try:
+            points = response.json().get("result", {}).get("points", [])
+        except ValueError as exc:
+            raise VectorStoreError("Qdrant vector search returned an invalid response") from exc
         hits: list[VectorHit] = []
         for point in points:
             try:
@@ -144,18 +172,58 @@ class QdrantVectorStore:
                 continue
         return hits
 
-    async def delete_by_filter(self, project_id: uuid.UUID, **filters: str) -> None:
-        must = [{"key": "project_id", "match": {"value": str(project_id)}}]
+    async def delete_by_filter(
+        self,
+        project_id: uuid.UUID,
+        *,
+        all_index_versions: bool = False,
+        **filters: str | list[str],
+    ) -> None:
+        """Delete points matching the filters, scoped to the active index version.
+
+        ``all_index_versions=True`` is only for purges (project/source/document
+        removal) where vectors of every index version must go.
+        """
+        must = self._scope(project_id, all_index_versions=all_index_versions)
         for field_name, value in filters.items():
             if field_name not in _FILTER_FIELDS:
                 raise VectorStoreError(f"unsupported Qdrant filter field: {field_name}")
-            must.append({"key": field_name, "match": {"value": str(value)}})
+            if isinstance(value, (list, tuple, set)):
+                values = [str(item) for item in value]
+                if not values:
+                    return
+                must.append({"key": field_name, "match": {"any": values}})
+            else:
+                must.append({"key": field_name, "match": {"value": str(value)}})
+        await self._delete({"must": must})
+
+    async def delete_document_points_except(
+        self,
+        project_id: uuid.UUID,
+        document_id: str,
+        keep_point_ids: list[str],
+    ) -> None:
+        """Delete a document's points in the active index except the given ids."""
+        must = self._scope(project_id, all_index_versions=False)
+        must.append({"key": "document_id", "match": {"value": str(document_id)}})
+        point_filter: dict[str, Any] = {"must": must}
+        if keep_point_ids:
+            point_filter["must_not"] = [{"has_id": [str(point_id) for point_id in keep_point_ids]}]
+        await self._delete(point_filter)
+
+    def _scope(self, project_id: uuid.UUID, *, all_index_versions: bool) -> list[dict[str, Any]]:
+        must: list[dict[str, Any]] = [{"key": "project_id", "match": {"value": str(project_id)}}]
+        if not all_index_versions:
+            must.append({"key": "index_version", "match": {"value": self.settings.vector_index_version}})
+        return must
+
+    async def _delete(self, point_filter: dict[str, Any]) -> None:
         try:
             async with httpx.AsyncClient(timeout=self.settings.qdrant_timeout_seconds) as client:
                 response = await client.post(
                     f"{_base_url(self.settings)}/collections/{self.collection}/points/delete?wait=true",
                     headers=_headers(self.settings),
-                    json={"filter": {"must": must}},
+                    json={"filter": point_filter},
                 )
         except httpx.HTTPError as exc:
             raise VectorStoreError("Qdrant point deletion failed") from exc
@@ -182,11 +250,41 @@ _FILTER_FIELDS = {
     "package_name",
     "service_name",
     "endpoint",
+    "endpoint_prefixes",
     "commit_sha",
     "deploy_hash",
     "content_hash",
     "index_version",
 }
+
+
+_MAX_ENDPOINT_PREFIXES = 16
+
+
+def endpoint_prefixes(endpoint: str | None) -> list[str]:
+    """Path prefixes of an endpoint, stored because Qdrant keywords cannot prefix-match.
+
+    Mirrors ``lexical_search.endpoint_filter_clause``: ``/orders/{id}`` is found by
+    ``/orders`` but ``/orders-v2`` is not, and non-path values only match exactly.
+    """
+    if not endpoint or not endpoint.startswith("/"):
+        return []
+    prefixes = ["/"]
+    current = ""
+    for segment in [part for part in endpoint.split("/") if part][: _MAX_ENDPOINT_PREFIXES - 1]:
+        current = f"{current}/{segment}"
+        prefixes.append(current)
+    return prefixes
+
+
+def _endpoint_condition(endpoint: str) -> dict[str, Any]:
+    """Exact or path-prefix match. The exact arm keeps points indexed before
+    ``endpoint_prefixes`` existed matching as they did, until they are re-published.
+    """
+    base = endpoint.rstrip("/") or "/"
+    should: list[dict[str, Any]] = [{"key": "endpoint", "match": {"value": value}} for value in sorted({base, endpoint})]
+    should.append({"key": "endpoint_prefixes", "match": {"value": base}})
+    return {"should": should}
 
 
 def chunk_point(
@@ -211,6 +309,7 @@ def chunk_point(
         "package_name": str(metadata.get("package_name") or metadata.get("module_path") or ""),
         "service_name": str(chunk.service_name or ""),
         "endpoint": str(chunk.endpoint or ""),
+        "endpoint_prefixes": endpoint_prefixes(chunk.endpoint),
         "commit_sha": str(metadata.get("commit_sha") or ""),
         "deploy_hash": str(chunk.deploy_hash or ""),
         "content_hash": str(metadata.get("content_hash") or ""),

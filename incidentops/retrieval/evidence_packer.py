@@ -4,8 +4,10 @@ Evidence packer.
 
 from __future__ import annotations
 
+from incidentops.security.output_sanitizer import sanitize_output
 from incidentops.security.prompt_injection import inspect_untrusted_text
 from incidentops.security.secret_redaction import redact_secrets
+from incidentops.retrieval.source_types import chunk_source_type
 
 SOURCE_PRIORITY = {
     "deploy": 0,
@@ -19,66 +21,14 @@ SOURCE_PRIORITY = {
 
 DEFAULT_MAX_CHARS_PER_CHUNK = 1600
 DEFAULT_MAX_TOTAL_CHARS = 10000
+DEFAULT_PREVIEW_CHARS = 300
+# Evidence flagged for instruction-like text stays visible (flag-only policy)
+# but drops this many positions so clean evidence of similar rank leads.
+PROMPT_INJECTION_RANK_PENALTY = 1
 
 
 def _source_type_from_chunk(chunk) -> str:
-    metadata = chunk.metadata_json or {}
-    raw_source_type = metadata.get("source_type")
-    if raw_source_type in {"deploy", "logs", "code", "incident", "runbook", "api_doc", "config"}:
-        return raw_source_type
-    if raw_source_type == "incident_report":
-        return "incident"
-    if raw_source_type == "deploy_history":
-        return "deploy"
-    ct = chunk.chunk_type or ""
-    if ct in {"deploy_diff", "deploy_commit"}:
-        return "deploy"
-    if ct in {"log_window", "error_cluster", "log_time_window", "log_error_burst"}:
-        return "logs"
-    if ct in {
-        "function",
-        "class",
-        "module",
-        "code_file",
-        "go_fallback",
-        "python_fallback",
-        "ts_fallback",
-        "js_fallback",
-        "java_fallback",
-        "go_function",
-        "go_method",
-        "go_type",
-        "go_struct",
-        "go_interface",
-        "go_module",
-        "python_function",
-        "python_class",
-        "ts_function",
-        "ts_class",
-        "ts_interface",
-        "java_method",
-        "java_class",
-        "java_interface",
-    }:
-        return "code"
-    if ct in {"incident_section", "incident_symptom", "incident_timeline", "incident_root_cause", "incident_action"}:
-        return "incident"
-    if ct in ("api_endpoint", "openapi_endpoint", "openapi_schema", "proto_service", "proto_rpc", "proto_message", "proto_enum", "proto_preamble", "proto_fallback"):
-        return "api_doc"
-    if ct in ("config_section", "config_service_block", "env_var_block", "dependency_block", "config_fallback"):
-        return "config"
-    if ct in ("markdown_section", "markdown_heading_section", "markdown_procedure", "markdown_table", "markdown_faq"):
-        doc_path = metadata.get("document_path", "")
-        path = getattr(chunk, "document_path", doc_path) or ""
-        lower_path = path.lower()
-        if "runbook" in path.lower():
-            return "runbook"
-        if "api" in lower_path or "openapi" in lower_path or "swagger" in lower_path:
-            return "api_doc"
-        if lower_path.endswith((".yaml", ".yml", ".json", ".toml", ".ini")):
-            return "config"
-        return "runbook"
-    return "runbook"
+    return chunk_source_type(chunk)
 
 
 def pack_evidence(
@@ -125,18 +75,57 @@ def pack_evidence(
             "timestamp_start": chunk.timestamp_start,
             "timestamp_end": chunk.timestamp_end,
             "text": text,
-            "score": r.get("rerank_score") or r.get("fused_score", 0.0),
+            "score": _result_score(r),
+            "reranked": r.get("rerank_score") is not None,
             "vector_score": r.get("vector_score"),
             "lexical_score": r.get("lexical_score"),
             "injection_flags": inspection,
+            "prompt_injection_flagged": bool(inspection["is_suspicious"]),
             "why_retrieved": list(r.get("metadata_boost_reasons") or []),
         }
         evidence.append(item)
         total_chars += len(text)
         if len(evidence) >= max_evidence:
             break
-    evidence.sort(key=lambda e: (-e["score"], SOURCE_PRIORITY.get(e["source_type"], 99), e["document_path"]))
-    return evidence[:max_evidence]
+    # A partial rerank yields a reranked head and a fused-score tail. The two
+    # score scales are not comparable, so order by tier first, then score.
+    evidence.sort(
+        key=lambda e: (
+            not e["reranked"],
+            -e["score"],
+            SOURCE_PRIORITY.get(e["source_type"], 99),
+            e["document_path"],
+        )
+    )
+    return _demote_flagged(evidence)[:max_evidence]
+
+
+def evidence_preview(item: dict, max_chars: int = DEFAULT_PREVIEW_CHARS) -> str:
+    """Sanitized, bounded preview of evidence text for API responses.
+
+    The full text is sanitized before truncation so a cut cannot leave an
+    unterminated script tag that the sanitizer no longer recognizes.
+    """
+    return sanitize_output(item.get("text") or "")[:max_chars]
+
+
+def _result_score(result: dict) -> float:
+    rerank_score = result.get("rerank_score")
+    if rerank_score is not None:
+        return float(rerank_score)
+    return float(result.get("fused_score", 0.0) or 0.0)
+
+
+def _demote_flagged(evidence: list[dict]) -> list[dict]:
+    ranked = list(evidence)
+    # Lowest-ranked first, so adjacent flagged items cannot swap back past each
+    # other and stay ahead of the clean evidence behind them.
+    for item in [entry for entry in reversed(evidence) if entry["prompt_injection_flagged"]]:
+        index = ranked.index(item)
+        target = min(index + PROMPT_INJECTION_RANK_PENALTY, len(ranked) - 1)
+        if target != index:
+            ranked.insert(target, ranked.pop(index))
+    return ranked
 
 
 def _compact_text(text: str, *, max_chars: int) -> str:

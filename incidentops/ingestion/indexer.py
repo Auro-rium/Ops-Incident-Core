@@ -6,16 +6,23 @@ import logging
 import math
 import uuid
 from collections import Counter
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from incidentops.config.settings import get_settings
-from incidentops.db.models import Chunk, Document, EvidenceRelation
+from incidentops.db.models import Chunk, Document, EvidenceRelation, IndexJob, RetrievalResult, SourceSync
 from incidentops.ingestion.chunking.chunker import count_tokens, split_text_by_tokens
-from incidentops.ingestion.chunking.metadata import classify_doc_type, classify_source_type, extract_service_from_path
+from incidentops.ingestion.chunking.metadata import (
+    classify_doc_type,
+    classify_source_type,
+    extract_service_from_path,
+    is_deploy_json_path,
+)
 from incidentops.ingestion.diagnostics import build_source_coverage
 from incidentops.ingestion.failure_taxonomy import (
     FAILURE_CHUNK_LIMIT_EXCEEDED,
@@ -50,6 +57,29 @@ from incidentops.retrieval.vector_store import QdrantVectorStore, VectorStoreErr
 
 logger = logging.getLogger("incidentops.ingestion.indexer")
 
+# Index jobs created by Core itself (not by a collector batch) carry this key in
+# their normalized payload. The worker treats them as "re-publish this exact
+# content" and marks them stale if the document has been rewritten since.
+INDEX_REASON_KEY = "_index_reason"
+INDEX_REASON_VECTOR_RETRY = "vector_retry"
+INDEX_REASON_REINDEX = "reindex"
+_PRUNE_BATCH_SIZE = 500
+
+
+@dataclass
+class _VectorPublication:
+    """Vectors for one document, published to Qdrant after Postgres commits."""
+
+    document_id: uuid.UUID
+    normalized: NormalizedDocument
+    points: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class PrunedDocuments:
+    document_ids: list[uuid.UUID] = field(default_factory=list)
+    chunks_deleted: int = 0
+
 
 async def index_normalized_documents(
     db: AsyncSession,
@@ -59,7 +89,24 @@ async def index_normalized_documents(
     documents: list[NormalizedDocument],
     *,
     embed_fn: Any | None = None,
+    mark_existing_seen: bool = True,
+    vector_retry_attempts: int = 0,
 ) -> BatchIngestResult:
+    """Index documents into Postgres, then publish their vectors to Qdrant.
+
+    Postgres is committed before Qdrant is touched, so a vector-store failure
+    can never leave chunks missing for points that exist. Points without a
+    chunk are dropped at read time; a failed publish queues a retry IndexJob.
+
+    A document's ``content_hash`` is committed as NULL with its chunks and only
+    set once its vectors are live. If the process dies or is cancelled in between,
+    the next attempt or sync reprocesses it instead of skipping it as unchanged.
+
+    ``mark_existing_seen=False`` only moves ``last_seen_sync_id`` of existing rows
+    forward (worker jobs: the batch route marked them when queued, and a late job
+    from an older sync must not move that back).
+    ``vector_retry_attempts`` seeds ``attempts`` on retry jobs created here.
+    """
     settings = get_settings()
     result = BatchIngestResult(received=len(documents), embedding_backend=settings.embedding_model if embed_fn else None)
     if not documents:
@@ -68,6 +115,7 @@ async def index_normalized_documents(
     source_type_counts: Counter[str] = Counter()
     chunk_type_counts: Counter[str] = Counter()
     seen_external_ids: set[str] = set()
+    publications: list[_VectorPublication] = []
     for normalized in documents:
         validation_result = validate_normalized_document(normalized, settings)
         if isinstance(validation_result, DocumentBatchError):
@@ -96,6 +144,8 @@ async def index_normalized_documents(
                 normalized,
                 embed_fn=embed_fn,
                 settings=settings,
+                sync_id=sync_id,
+                mark_existing_seen=mark_existing_seen,
             )
         except DocumentIndexingError as exc:
             result.skipped_invalid += 1
@@ -130,6 +180,24 @@ async def index_normalized_documents(
         if operation["created"] or operation["updated"]:
             source_type_counts[normalized.source_type] += 1
         chunk_type_counts.update(operation["chunk_type_counts"])
+        if operation.get("publication") is not None:
+            publications.append(operation["publication"])
+
+    vector_publish_deferred = 0
+    stale_vector_cleanup_failures = 0
+    if publications:
+        # Make the new chunks durable first; only then replace vectors.
+        await db.commit()
+        vector_publish_deferred, stale_vector_cleanup_failures = await _publish_vectors(
+            db,
+            project_id,
+            source_id,
+            sync_id,
+            publications,
+            settings=settings,
+            retry_attempts=vector_retry_attempts,
+        )
+        await db.commit()
 
     result.source_type_counts = dict(source_type_counts)
     result.chunk_type_counts = dict(chunk_type_counts)
@@ -152,10 +220,163 @@ async def index_normalized_documents(
         "source_type_counts": result.source_type_counts,
         "chunk_type_counts": result.chunk_type_counts,
         "embedding_backend": result.embedding_backend,
+        "vector_publish_deferred": vector_publish_deferred,
+        "stale_vector_cleanup_failures": stale_vector_cleanup_failures,
     }
     if result.created or result.updated:
         await invalidate_project(project_id)
     return result
+
+
+async def _publish_vectors(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    source_id: uuid.UUID,
+    sync_id: uuid.UUID | None,
+    publications: list[_VectorPublication],
+    *,
+    settings: Any,
+    retry_attempts: int,
+) -> tuple[int, int]:
+    """Upsert new vectors, then drop the document's stale points.
+
+    Returns (deferred publishes, stale-point cleanup failures). A successful
+    upsert restores the document's content_hash. A failed one leaves it NULL (so
+    neither the retry nor the next sync skips it as unchanged) and queues an
+    IndexJob for the dispatcher. The caller commits.
+    """
+    store = QdrantVectorStore(settings)
+    deferred = 0
+    cleanup_failures = 0
+    for publication in publications:
+        try:
+            await store.upsert(publication.points, settings.embedding_dim)
+        except VectorStoreError:
+            logger.warning(
+                "vector publish failed; queueing retry document_id=%s", publication.document_id
+            )
+            deferred += 1
+            payload = publication.normalized.model_dump(mode="json")
+            payload[INDEX_REASON_KEY] = INDEX_REASON_VECTOR_RETRY
+            retryable = retry_attempts < settings.rag_index_max_retries
+            db.add(
+                IndexJob(
+                    project_id=project_id,
+                    source_id=source_id,
+                    sync_id=sync_id,
+                    normalized_payload_json=payload,
+                    content_hash=publication.normalized.content_hash,
+                    index_version=settings.vector_index_version,
+                    status="pending" if retryable else "failed",
+                    attempts=retry_attempts,
+                    error_code=FAILURE_VECTOR_INDEX_FAILED,
+                    finished_at=None if retryable else datetime.now(timezone.utc),
+                )
+            )
+            continue
+        # The checksum match keeps a concurrent rewrite's NULL in place.
+        await db.execute(
+            update(Document)
+            .where(
+                Document.id == publication.document_id,
+                Document.checksum == publication.normalized.content_hash,
+            )
+            .values(content_hash=publication.normalized.content_hash)
+        )
+        try:
+            await store.delete_document_points_except(
+                project_id,
+                str(publication.document_id),
+                [point["id"] for point in publication.points],
+            )
+        except VectorStoreError:
+            # New vectors are live; leftover points have no chunk and are
+            # filtered at read time, so this is logged rather than retried.
+            cleanup_failures += 1
+            logger.warning("stale vector cleanup failed document_id=%s", publication.document_id)
+    return deferred, cleanup_failures
+
+
+def _advance_seen_marker(document_id: uuid.UUID, source_id: uuid.UUID, sync_id: uuid.UUID):
+    """Claim a document for a sync unless a sync started at or after it already has.
+
+    A marker naming a sync that no longer exists counts as older.
+    """
+    started_at = select(SourceSync.started_at).where(SourceSync.id == sync_id).scalar_subquery()
+    same_or_newer = select(SourceSync.id).where(SourceSync.source_id == source_id, SourceSync.started_at >= started_at)
+    return (
+        update(Document)
+        .where(
+            Document.id == document_id,
+            or_(Document.last_seen_sync_id.is_(None), Document.last_seen_sync_id.not_in(same_or_newer)),
+        )
+        .values(last_seen_sync_id=sync_id)
+    )
+
+
+async def prune_stale_documents(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    source_id: uuid.UUID,
+    sync_id: uuid.UUID,
+) -> PrunedDocuments:
+    """Delete a source's documents that the given (complete) sync did not see.
+
+    Removes chunks, evidence relations and retrieval results explicitly; the
+    caller commits, then calls ``delete_document_vectors`` for Qdrant.
+    """
+    stale_result = await db.execute(
+        select(Document.id).where(
+            Document.project_id == project_id,
+            Document.source_id == source_id,
+            (Document.last_seen_sync_id.is_(None)) | (Document.last_seen_sync_id != sync_id),
+        )
+    )
+    document_ids = list(stale_result.scalars().all())
+    pruned = PrunedDocuments(document_ids=document_ids)
+    if not document_ids:
+        return pruned
+    for start in range(0, len(document_ids), _PRUNE_BATCH_SIZE):
+        batch = document_ids[start : start + _PRUNE_BATCH_SIZE]
+        chunk_result = await db.execute(select(Chunk.id).where(Chunk.document_id.in_(batch)))
+        chunk_ids = list(chunk_result.scalars().all())
+        pruned.chunks_deleted += len(chunk_ids)
+        if chunk_ids:
+            await db.execute(delete(EvidenceRelation).where(EvidenceRelation.evidence_chunk_id.in_(chunk_ids)))
+            await db.execute(delete(RetrievalResult).where(RetrievalResult.chunk_id.in_(chunk_ids)))
+            await db.execute(delete(Chunk).where(Chunk.id.in_(chunk_ids)))
+        await db.execute(
+            delete(Document).where(
+                Document.project_id == project_id,
+                Document.source_id == source_id,
+                Document.id.in_(batch),
+            )
+        )
+    return pruned
+
+
+async def delete_document_vectors(
+    project_id: uuid.UUID,
+    source_id: uuid.UUID,
+    document_ids: list[uuid.UUID],
+    settings: Any,
+) -> bool:
+    """Best-effort Qdrant cleanup for removed documents (all index versions)."""
+    store = QdrantVectorStore(settings)
+    ok = True
+    for start in range(0, len(document_ids), _PRUNE_BATCH_SIZE):
+        batch = [str(document_id) for document_id in document_ids[start : start + _PRUNE_BATCH_SIZE]]
+        try:
+            await store.delete_by_filter(
+                project_id,
+                all_index_versions=True,
+                source_id=str(source_id),
+                document_id=batch,
+            )
+        except VectorStoreError:
+            ok = False
+            logger.warning("stale document vector cleanup failed count=%s", len(batch))
+    return ok
 
 
 class DocumentIndexingError(Exception):
@@ -173,6 +394,8 @@ async def _index_one_document(
     *,
     embed_fn: Any | None,
     settings: Any,
+    sync_id: uuid.UUID | None = None,
+    mark_existing_seen: bool = True,
 ) -> dict[str, Any]:
     existing_result = await db.execute(
         select(Document).where(
@@ -182,6 +405,12 @@ async def _index_one_document(
         )
     )
     current = existing_result.scalar_one_or_none()
+    if current is not None and sync_id is not None:
+        # Received in this sync: never prune it, even if indexing it fails below.
+        if mark_existing_seen:
+            current.last_seen_sync_id = sync_id
+        else:
+            await db.execute(_advance_seen_marker(current.id, source_id, sync_id))
     if current and current.content_hash == normalized.content_hash:
         return {
             "created": 0,
@@ -229,7 +458,7 @@ async def _index_one_document(
                 "chunk_type": raw_chunk.chunk_type,
                 "service_name": raw_chunk.service_name or service_name or normalized.metadata.get("service_name"),
                 "endpoint": raw_chunk.endpoint or normalized.metadata.get("endpoint"),
-                "deploy_hash": raw_chunk.deploy_hash or normalized.metadata.get("deploy_hash") or normalized.metadata.get("commit_sha"),
+                "deploy_hash": _chunk_deploy_hash(normalized, raw_chunk),
                 "timestamp_start": raw_chunk.timestamp_start,
                 "timestamp_end": raw_chunk.timestamp_end,
                 "section_title": raw_chunk.section_title,
@@ -254,18 +483,11 @@ async def _index_one_document(
             raise DocumentIndexingError("embedding_error", f"failed to embed document: {exc.__class__.__name__}") from exc
         if len(embeddings) != len(chunk_payloads):
             raise DocumentIndexingError("embedding_error", "embedding backend returned an unexpected result count")
-
-    if current is not None:
-        try:
-            await QdrantVectorStore(settings).delete_by_filter(
-                project_id,
-                document_id=str(current.id),
-            )
-        except VectorStoreError as exc:
+        if any(len(embedding) != settings.embedding_dim for embedding in embeddings):
             raise DocumentIndexingError(
-                "vector_index_failed",
-                "failed to replace document vectors",
-            ) from exc
+                FAILURE_EMBEDDING_FAILED,
+                "embedding dimension does not match the configured vector index",
+            )
 
     async with db.begin_nested():
         document_row = current
@@ -284,6 +506,7 @@ async def _index_one_document(
                 content_hash=normalized.content_hash,
                 modified_at=normalized.modified_at,
                 size_bytes=normalized.size_bytes,
+                last_seen_sync_id=sync_id,
             )
             db.add(document_row)
             await db.flush()
@@ -317,28 +540,22 @@ async def _index_one_document(
             .values(search_tsvector=func.to_tsvector("english", Chunk.text))
         )
         await db.flush()
-        if embeddings:
-            if any(len(embedding) != settings.embedding_dim for embedding in embeddings):
-                raise DocumentIndexingError(
-                    FAILURE_EMBEDDING_FAILED,
-                    "embedding dimension does not match the configured vector index",
-                )
-            try:
-                points = [
-                    chunk_point(
-                        chunk,
-                        embedding,
-                        index_version=settings.vector_index_version,
-                        document_path=document_row.path,
-                    )
-                    for chunk, embedding in zip(persisted_chunks, embeddings)
-                ]
-                await QdrantVectorStore(settings).upsert(points, settings.embedding_dim)
-            except VectorStoreError as exc:
-                raise DocumentIndexingError(
-                    "vector_index_failed",
-                    "failed to publish document vectors",
-                ) from exc
+        # Build points now (chunk ids exist after flush); publish after commit.
+        points = [
+            chunk_point(
+                chunk,
+                embedding,
+                index_version=settings.vector_index_version,
+                document_path=document_row.path,
+            )
+            for chunk, embedding in zip(persisted_chunks, embeddings or [])
+        ]
+        publication = None
+        if points or current is not None:
+            # Even without new vectors, an updated document's old points are stale.
+            publication = _VectorPublication(document_id=document_row.id, normalized=normalized, points=points)
+            # Set again by _publish_vectors once the vectors are live.
+            document_row.content_hash = None
 
     return {
         "created": created,
@@ -346,6 +563,7 @@ async def _index_one_document(
         "skipped_unchanged": 0,
         "chunks_created": len(chunk_payloads),
         "chunk_type_counts": dict(chunk_type_counts),
+        "publication": publication,
     }
 
 
@@ -457,24 +675,24 @@ def _parse_normalized_document(
     if source_type == "deploy" and suffix == ".json":
         chunks = parse_deploy_history(document.content, document.path)
         return chunks, None if chunks else "invalid or unsupported deploy JSON structure"
-    if suffix == ".json" and any(token in lower_path for token in ("deploy", "release", "commit")):
+    if is_deploy_json_path(document.path):
         chunks = parse_deploy_history(document.content, document.path)
         return chunks, None if chunks else "invalid or unsupported deploy JSON structure"
-    if source_type == "incident" or "incident" in lower_path or "postmortem" in lower_path:
-        return parse_incident(document.content, document.path), None
-    if source_type == "code" and suffix == ".py":
-        return parse_python(document.content, document.path, service_name=service_name), None
     if suffix == ".py":
         return parse_python(document.content, document.path, service_name=service_name), None
     if suffix == ".go":
         return parse_go(document.content, document.path, service_name=service_name), None
     if suffix in {".js", ".ts", ".jsx", ".tsx"}:
-        language = suffix.lstrip(".") if suffix != ".tsx" else "ts"
+        language = {".jsx": "js", ".tsx": "ts"}.get(suffix, suffix.lstrip("."))
         return parse_jsts(document.content, document.path, service_name=service_name, language=language), None
     if suffix == ".java":
         return parse_java(document.content, document.path, service_name=service_name), None
     if suffix == ".proto":
         return parse_proto(document.content, document.path, service_name=service_name), None
+    # Incident text is identified by an incidents/ or postmortems/ directory
+    # segment, never by a substring such as "incidentops/".
+    if source_type == "incident" or classify_source_type(document.path) == "incident":
+        return parse_incident(document.content, document.path), None
     if source_type == "code":
         return _parse_generic_code(document.content, document.path, service_name=service_name), None
     if suffix in {".yaml", ".yml", ".toml", ".ini"}:
@@ -489,6 +707,19 @@ def _parse_normalized_document(
         return parse_markdown(document.content, document.path, source_type=source_type, service_name=service_name), None
     logger.info("No parser configured for normalized document %s", document.path)
     return [], "no parser configured"
+
+
+def _chunk_deploy_hash(document: NormalizedDocument, raw_chunk: RawChunk) -> str | None:
+    """A repository commit is deploy evidence only for deploy/patch documents."""
+    explicit = raw_chunk.deploy_hash or document.metadata.get("deploy_hash")
+    if explicit:
+        return explicit
+    is_deploy = (
+        raw_chunk.source_type == "deploy"
+        or (document.source_type or "").lower() == "deploy"
+        or PurePosixPath(document.path.lower()).suffix in {".patch", ".diff"}
+    )
+    return document.metadata.get("commit_sha") if is_deploy else None
 
 
 def _parse_generic_code(content: str, path: str, *, service_name: str | None) -> list[RawChunk]:

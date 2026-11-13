@@ -69,7 +69,7 @@ class LLMProvider:
             "temperature": temperature,
         }
         token_limit_key = "max_completion_tokens" if self.azure_mode else "max_tokens"
-        payload[token_limit_key] = max(max_tokens, 4096) if self.azure_mode else max_tokens
+        payload[token_limit_key] = max_tokens
         if not self.azure_mode:
             payload["model"] = self.model
         if response_format:
@@ -126,11 +126,12 @@ class LLMProvider:
                 content = data["choices"][0]["message"]["content"]
                 try:
                     parsed = json.loads(content)
-                    if isinstance(parsed, dict):
-                        parsed["_meta"] = meta
-                    return parsed
                 except json.JSONDecodeError:
                     return {"raw_response": content, "_meta": meta}
+                if not isinstance(parsed, dict):
+                    return {"raw_response": content, "_meta": meta}
+                parsed["_meta"] = meta
+                return parsed
         except httpx.HTTPStatusError as exc:
             logger.error("LLM HTTP error %d: %s", exc.response.status_code, exc.response.text[:200])
             incr("llm_failures")

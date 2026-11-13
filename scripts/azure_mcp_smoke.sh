@@ -6,8 +6,8 @@ AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:?AZURE_RESOURCE_GROUP is required}"
 NAME_PREFIX="${NAME_PREFIX:?NAME_PREFIX is required}"
 MCP_APP_NAME="${MCP_APP_NAME:-${NAME_PREFIX}-mcp}"
 PROJECT_ID="${PROJECT_ID:-${INCIDENTOPS_PROJECT_ID:-}}"
-SEARCH_QUERY="${SEARCH_QUERY:-Where is the history service implemented?}"
-INVESTIGATE_QUERY="${INVESTIGATE_QUERY:-Which parts of the Temporal repo are relevant to investigating workflow task latency?}"
+SEARCH_QUERY="${SEARCH_QUERY:-Where is the primary application entrypoint implemented?}"
+INVESTIGATE_QUERY="${INVESTIGATE_QUERY:-Which evidence shows the service deployment and latency behavior?}"
 MCP_PROBE_TIMEOUT_SECONDS="${MCP_PROBE_TIMEOUT_SECONDS:-45}"
 MCP_WAIT_TIMEOUT_SECONDS="${MCP_WAIT_TIMEOUT_SECONDS:-120}"
 MCP_POLL_SECONDS="${MCP_POLL_SECONDS:-5}"
@@ -22,7 +22,10 @@ fi
 echo "Running MCP smoke from a short-lived Azure Container Apps job..."
 MCP_JOB_NAME="${MCP_JOB_NAME:-${NAME_PREFIX}-mcp-probe-job}"
 CORE_IMAGE="${CORE_IMAGE:-$(az containerapp show --resource-group "$AZURE_RESOURCE_GROUP" --name "${NAME_PREFIX}-core-api" --query 'properties.template.containers[0].image' --output tsv --only-show-errors)}"
-MCP_TOKEN="${MCP_TOKEN:?MCP_TOKEN is required for the private MCP job smoke}"
+# The probe job reads the MCP inbound token from its Key Vault-backed secret
+# (declared in main.bicep, so redeploys keep it). Passing MCP_INBOUND_TOKEN
+# overrides it for this run only, until the next deploy.
+MCP_INBOUND_TOKEN="${MCP_INBOUND_TOKEN:-}"
 MCP_FQDN="$(az containerapp show --resource-group "$AZURE_RESOURCE_GROUP" --name "$MCP_APP_NAME" --query 'properties.configuration.ingress.fqdn' --output tsv --only-show-errors)"
 MCP_URL="${MCP_URL:-https://${MCP_FQDN}/mcp}"
 if [[ -z "$MCP_FQDN" ]]; then
@@ -30,11 +33,13 @@ if [[ -z "$MCP_FQDN" ]]; then
   exit 1
 fi
 echo "MCP target: private app $MCP_APP_NAME (URL host only: ${MCP_FQDN})"
-az containerapp job secret set \
-  --resource-group "$AZURE_RESOURCE_GROUP" \
-  --name "$MCP_JOB_NAME" \
-  --secrets "incidentops-mcp-token=$MCP_TOKEN" \
-  --only-show-errors >/dev/null
+if [[ -n "$MCP_INBOUND_TOKEN" ]]; then
+  az containerapp job secret set \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --name "$MCP_JOB_NAME" \
+    --secrets "incidentops-mcp-inbound-token=$MCP_INBOUND_TOKEN" \
+    --only-show-errors >/dev/null
+fi
 execution_name="$(az containerapp job start \
   --resource-group "$AZURE_RESOURCE_GROUP" \
   --name "$MCP_JOB_NAME" \
@@ -45,9 +50,9 @@ execution_name="$(az containerapp job start \
     PROJECT_ID="$PROJECT_ID" \
     MCP_URL="$MCP_URL" \
     MCP_PROBE_QUERY="$SEARCH_QUERY" \
-    MCP_TOKEN=secretref:incidentops-mcp-token \
+    MCP_INVESTIGATE_QUERY="$INVESTIGATE_QUERY" \
+    MCP_INBOUND_TOKEN=secretref:incidentops-mcp-inbound-token \
     MCP_PROBE_TIMEOUT_SECONDS="$MCP_PROBE_TIMEOUT_SECONDS" \
-  --only-show-errors \
   --query name --output tsv --only-show-errors)"
 
 if [[ -z "$execution_name" ]]; then

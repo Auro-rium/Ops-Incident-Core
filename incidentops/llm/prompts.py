@@ -22,6 +22,7 @@ RULES:
 ANSWER FORMAT (respond as JSON):
 {
   "summary": "Brief 1-2 sentence summary",
+  "answer_text": "Direct answer to the question with citations",
   "likely_root_cause": "Detailed root cause explanation with citations",
   "confidence": "high|medium|low",
   "affected_services": ["service1", "service2"],
@@ -30,6 +31,8 @@ ANSWER FORMAT (respond as JSON):
   "unknowns": ["Things we don't know or need to verify"],
   "citations_used": ["[1]", "[2]", "[3]"]
 }
+"confidence" MUST be exactly one of "high", "medium", or "low".
+"citations_used" MUST list only labels from the CITATIONS INDEX that support your answer.
 """
 
 EVIDENCE_WRAPPER = """\

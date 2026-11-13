@@ -5,6 +5,10 @@ from datetime import datetime
 from typing import Any
 
 
+# Skips that lose evidence the source still has, rather than excluding it by rule.
+EVIDENCE_LOSS_SKIPS = {"read_failed", "redaction_failed"}
+
+
 @dataclass(frozen=True)
 class DiscoveredFile:
     absolute_path: str
@@ -36,12 +40,19 @@ class CollectorSummary:
     skipped_reasons: dict[str, int] = field(default_factory=dict)
     source_type_counts: dict[str, int] = field(default_factory=dict)
     language_counts: dict[str, int] = field(default_factory=dict)
-    hint_counts: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    # False when this sync did not cover the whole source, so absent documents prove nothing.
+    complete: bool = True
 
-    def skip(self, reason: str) -> None:
-        self.files_skipped += 1
-        self.skipped_reasons[reason] = self.skipped_reasons.get(reason, 0) + 1
+    def skip(self, reason: str, count: int = 1) -> None:
+        self.files_skipped += count
+        self.skipped_reasons[reason] = self.skipped_reasons.get(reason, 0) + count
+        if reason in EVIDENCE_LOSS_SKIPS:
+            self.complete = False
+
+    @property
+    def lost_evidence(self) -> bool:
+        return any(reason in self.skipped_reasons for reason in EVIDENCE_LOSS_SKIPS)
 
     def count(self, mapping: dict[str, int], value: str) -> None:
         mapping[value] = mapping.get(value, 0) + 1
@@ -87,6 +98,6 @@ class CollectorSummary:
             "skipped_reasons": dict(sorted(self.skipped_reasons.items())),
             "source_type_counts": dict(sorted(self.source_type_counts.items())),
             "language_counts": dict(sorted(self.language_counts.items())),
-            "hint_counts": dict(sorted(self.hint_counts.items())),
             "warnings": list(self.warnings),
+            "complete": self.complete,
         }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from dataclasses import replace
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,7 +12,7 @@ from incidentops.investigation.entity_extractor import extract_entities
 from incidentops.investigation.hypothesis_generator import generate_hypotheses
 from incidentops.investigation.incident_matcher import find_previous_incidents
 from incidentops.investigation.log_analyzer import analyze_logs
-from incidentops.investigation.root_cause_selector import select_root_cause
+from incidentops.investigation.root_cause_selector import reconcile_confidence, select_root_cause
 from incidentops.investigation.schemas import InvestigationResult
 from incidentops.investigation.scope_resolver import resolve_scope
 from incidentops.investigation.timeline_builder import build_timeline
@@ -30,8 +31,9 @@ from incidentops.retrieval.query_intent import (
     classify_query_intent,
     investigate_supported,
 )
-from incidentops.retrieval.hybrid_search import hybrid_search, hybrid_search_with_debug
+from incidentops.retrieval.hybrid_search import hybrid_search, hybrid_search_with_debug, known_service_names
 from incidentops.retrieval.reranker import rerank_with_debug_async
+from incidentops.retrieval.source_types import chunk_source_type
 
 
 async def investigate(
@@ -41,12 +43,13 @@ async def investigate(
     top_k: int,
     reranker_model: str,
     debug: bool = False,
+    filters: dict | None = None,
 ) -> tuple[InvestigationResult, int]:
     start = time.time()
     task_type = classify_task(query)
     query_intent = classify_query_intent(query)
-    entities = extract_entities(query)
-    scope = resolve_scope(entities)
+    entities = extract_entities(query, await known_service_names(db, project_id))
+    scope = resolve_scope(entities, explicit_filters=filters)
     if debug:
         raw_results, retrieval_debug = await hybrid_search_with_debug(
             db,
@@ -100,17 +103,7 @@ async def investigate(
             if service
         }
     )
-    missing_data = []
-    if not deploy_findings["diff_count"]:
-        missing_data.append("deployment history not found")
-    if not log_findings["timestamped_logs"]:
-        missing_data.append("logs missing timestamps")
-    if not previous_incidents:
-        missing_data.append("no previous incident reports")
-    if not any(item.get("source_type") == "deploy" for item in evidence):
-        missing_data.append("no code diff found")
-    if not any(item.get("source_type") in {"runbook", "api_doc"} for item in evidence):
-        missing_data.append("no service ownership docs")
+    missing_data = _missing_data(evidence, log_findings, deploy_findings, previous_incidents)
 
     available_source_types = {item.get("source_type") for item in evidence if item.get("source_type")}
     supported, support_reasons = investigate_supported(query_intent, available_source_types)
@@ -125,7 +118,10 @@ async def investigate(
         previous_incidents=previous_incidents,
         missing_data=missing_data,
     )
-    selected.confidence = confidence
+    selected = reconcile_confidence(selected, confidence)
+    if selected.confidence != confidence:
+        confidence_reasons.append("no hypothesis met the bar for a confident root cause")
+    confidence = selected.confidence
     if not supported and query_intent.intent in {
         INTENT_CODE_LOCATION,
         INTENT_CONFIG_LOOKUP,
@@ -133,7 +129,10 @@ async def investigate(
         INTENT_API_CONTRACT,
         INTENT_GENERIC,
     }:
-        selected.summary = "This query is better handled as cited evidence lookup than as a runtime root-cause investigation."
+        selected = replace(
+            selected,
+            summary="This query is better handled as cited evidence lookup than as a runtime root-cause investigation.",
+        )
 
     suggested_fix = None
     if not supported:
@@ -181,6 +180,27 @@ async def investigate(
     return result, latency_ms
 
 
+def _missing_data(
+    evidence: list[dict],
+    log_findings: dict,
+    deploy_findings: dict,
+    previous_incidents: list[dict],
+) -> list[str]:
+    source_types = {item.get("source_type") for item in evidence}
+    missing_data = []
+    if not deploy_findings["diff_count"]:
+        missing_data.append("deployment history or code diff not found")
+    if "logs" not in source_types:
+        missing_data.append("no runtime logs found")
+    elif not log_findings["timestamped_logs"]:
+        missing_data.append("logs missing timestamps")
+    if not previous_incidents:
+        missing_data.append("no previous incident reports")
+    if not source_types & {"runbook", "api_doc"}:
+        missing_data.append("no service ownership docs")
+    return missing_data
+
+
 def _build_cited_answer(evidence: list[dict], selected, supported: bool, missing_data: list[str]) -> str:
     """Return a bounded cited response without inventing root-cause facts."""
     if not evidence:
@@ -189,19 +209,13 @@ def _build_cited_answer(evidence: list[dict], selected, supported: bool, missing
     if not supported:
         paths = ", ".join(item.get("document_path", "unknown") for item in evidence[:3])
         return f"The evidence points to {paths}. This is a cited repository lookup, not a confident root-cause finding ({labels})."
-    if selected.confidence == "low" or missing_data:
+    if selected.confidence != "high":
         return f"The available evidence does not support a confident root-cause conclusion. The leading assessment is: {selected.summary} ({labels})."
     return f"The leading assessment is: {selected.summary} ({labels})."
 
 
 def _raw_source_types(results: list[dict]) -> set[str]:
-    source_types: set[str] = set()
-    for result in results:
-        metadata = result["chunk"].metadata_json or {}
-        source_type = metadata.get("source_type")
-        if isinstance(source_type, str) and source_type:
-            source_types.add(source_type)
-    return source_types
+    return {chunk_source_type(result["chunk"]) for result in results} - {"unknown_text"}
 
 
 def _score_confidence(

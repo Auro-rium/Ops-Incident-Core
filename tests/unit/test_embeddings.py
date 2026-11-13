@@ -77,6 +77,7 @@ def test_huggingface_embed_accepts_feature_extraction_batch(monkeypatch):
         hf_api_token="token",
         hf_embedding_model="thenlper/gte-large",
         hf_embedding_endpoint="https://router.huggingface.co/hf-inference",
+        embedding_dim=2,
         llm_timeout_seconds=5,
         embedding_request_max_retries=0,
         embedding_request_initial_backoff_seconds=0.01,
@@ -99,6 +100,7 @@ def test_huggingface_embed_pools_token_level_feature_extraction(monkeypatch):
         hf_api_token="token",
         hf_embedding_model="thenlper/gte-large",
         hf_embedding_endpoint="https://router.huggingface.co/hf-inference",
+        embedding_dim=2,
         llm_timeout_seconds=5,
         embedding_request_max_retries=0,
         embedding_request_initial_backoff_seconds=0.01,
@@ -124,6 +126,9 @@ def test_nvidia_nemotron_embed_preserves_provider_order_and_input_type(monkeypat
         nvidia_embedding_endpoint="https://integrate.api.nvidia.com/v1/embeddings",
         embedding_dim=2,
         llm_timeout_seconds=5,
+        embedding_request_max_retries=0,
+        embedding_request_initial_backoff_seconds=0.01,
+        embedding_request_max_backoff_seconds=0.05,
     )
     fake_client = _FakeClient(
         [

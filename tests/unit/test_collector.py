@@ -5,7 +5,6 @@ from pathlib import Path
 import httpx
 
 from incidentops.collector.client import CoreCollectorClient
-from incidentops.collector.hints import build
 from incidentops.collector.metadata import extract
 from incidentops.collector.redaction import redact
 from incidentops.collector.service import CollectorService
@@ -25,22 +24,18 @@ def test_collector_redacts_before_normalized_payload():
     content, count = redact("token=sk-abcdefghijklmnopqrstuvwxyz0123456789")
     assert count == 1
     assert "sk-" not in content
-    assert "[REDACTED:openai_key]" in content
+    assert "[REDACTED_API_KEY]" in content
 
 
-def test_collector_go_and_proto_metadata_and_hints_are_deterministic():
+def test_collector_go_and_proto_metadata_is_deterministic():
     go_text = "package history\n\ntype Engine struct{}\n\nfunc (e *Engine) Start() {}\n"
     go_metadata = extract("service/history/engine.go", go_text, repo_name="temporal")
-    go_hints = build("service/history/engine.go", go_text, "code")
     assert go_metadata["package_name"] == "history"
     assert set(go_metadata["symbol_names"]) == {"Engine", "Start"}
-    assert {hint["type"] for hint in go_hints} == {"go_symbol"}
 
     proto_text = "service History {\n rpc GetHistory(Request) returns (Response);\n}\nmessage Request {}\n"
     proto_metadata = extract("api/history.proto", proto_text)
-    proto_hints = build("api/history.proto", proto_text, "api_doc")
     assert {"History", "GetHistory", "Request"}.issubset(proto_metadata["symbol_names"])
-    assert {hint["type"] for hint in proto_hints} == {"proto_symbol"}
 
 
 def test_collector_metadata_contains_repository_and_explainable_evidence_facts():

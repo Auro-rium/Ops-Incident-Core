@@ -65,8 +65,8 @@ async def test_production_startup_does_not_call_create_all(monkeypatch):
     )
 
 
-def test_alembic_head_resolves_to_v2_baseline():
-    assert get_head_revision() == "v2_baseline"
+def test_alembic_head_resolves_to_latest_v2_revision():
+    assert get_head_revision() == "v2_0002_review_fixes"
 
 
 def test_required_tables_match_current_models():
@@ -153,4 +153,9 @@ def test_production_validation_rejects_unsafe_security_defaults():
     assert any("JOB_QUEUE_BACKEND" in error for error in errors)
     assert any("METRICS_BACKEND" in error for error in errors)
     assert any("LOCAL_INGEST_ENABLED" in error for error in errors)
-    assert any("Azure OpenAI" in error for error in errors)
+    # With no provider configured, prod fails closed on the provider check.
+    assert any("CLOUD_PROVIDER" in error for error in errors)
+    azure_errors = production_settings_errors(
+        Settings(app_env="production", jwt_secret="x" * 40, require_azure_openai=True)
+    )
+    assert any("Azure OpenAI" in error for error in azure_errors)

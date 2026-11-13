@@ -31,7 +31,6 @@ _HTTP_ENDPOINT = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+(/[^\s]+)")
 _OPENAPI_PATH = re.compile(r"^\s{0,4}(/[^\s:]+):\s*(?:#.*)?$", re.MULTILINE)
 _LOG_LEVEL = re.compile(r"\b(DEBUG|INFO|WARN|WARNING|ERROR|CRITICAL)\b")
 _ERROR_CODE = re.compile(r"\b(?:ERR_[A-Z0-9_]+|E\d{3,5})\b")
-_COMMIT = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
 _TIMESTAMP = re.compile(
     r"\b\d{4}-\d{2}-\d{2}[T ][0-2]\d:[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b"
 )
@@ -53,14 +52,14 @@ def extract(
     language_name = language(path)
     posix = PurePosixPath(path)
     symbols, function_names, class_names, package_name = _source_symbols(language_name, content)
-    commit_matches = _COMMIT.findall(content)
     timestamps = _TIMESTAMP.findall(content)
     endpoint_candidates = sorted(set([*_HTTP_ENDPOINT.findall(content), *_OPENAPI_PATH.findall(content)]))[:50]
     package_path = str(posix.parent) if str(posix.parent) not in {"", "."} else None
     result = {
         "repo_name": repo_name,
         "branch": branch,
-        "commit_sha": commit_sha or (commit_matches[0].lower() if commit_matches else None),
+        # Only the explicit or Git HEAD commit; hex runs in content are not commits.
+        "commit_sha": commit_sha,
         "file_language": language_name,
         "language": language_name,
         "module_path": str(posix.with_suffix("")),
@@ -112,7 +111,8 @@ def _source_symbols(language_name: str | None, content: str) -> tuple[list[str],
 def _python_symbols(content: str) -> tuple[list[str], list[str], list[str], str | None]:
     try:
         tree = ast.parse(content)
-    except SyntaxError:
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        # Pathologically nested source raises more than SyntaxError.
         names = _PY_SYMBOL.findall(content)
         return names, names, [], None
     functions: list[str] = []

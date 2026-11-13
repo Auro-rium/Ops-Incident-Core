@@ -5,6 +5,7 @@ import inspect
 import logging
 import time
 import uuid
+from datetime import datetime, timezone
 
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
@@ -26,10 +27,24 @@ from incidentops.db.models import (
 )
 from incidentops.observability.metrics import incr, observe_latency
 from incidentops.observability.tracing import traced
+from incidentops.retrieval.hybrid_search import known_service_names
 
 logger = logging.getLogger("incidentops.agent.service")
 
 NON_RETRYABLE_NODES = {"wait_for_human_approval"}
+
+
+class ApprovalConflictError(Exception):
+    """The run or its approval is not in a state that can be resolved."""
+
+
+class NodeExecutionError(RuntimeError):
+    """A workflow node exhausted its attempts; carries only the safe failure labels."""
+
+    def __init__(self, node_name: str, cause: Exception | None) -> None:
+        self.node_name = node_name
+        self.cause_type = cause.__class__.__name__.lower()[:64] if cause else "unknown"
+        super().__init__(f"node_failed:{node_name}:{self.cause_type}")
 
 
 async def create_run(db: AsyncSession, project_id: uuid.UUID, user_id: uuid.UUID | None, query: str) -> AgentRun:
@@ -50,7 +65,14 @@ async def execute_run(
 ) -> AgentRun:
     settings = settings or get_settings()
     started = time.time()
-    state = InvestigationState(run_id=str(run.id), project_id=str(run.project_id), user_query=run.user_query, status="running")
+    state = InvestigationState(
+        run_id=str(run.id),
+        project_id=str(run.project_id),
+        user_query=run.user_query,
+        status="running",
+        create_issue_draft=create_issue_draft,
+        known_services=sorted(await known_service_names(db, run.project_id)),
+    )
     run.status = RunStatus.running
     run.error = None
     await append_run_event(db, run.id, "run_started", payload={"status": "running"})
@@ -181,7 +203,7 @@ async def execute_node_with_observability(
                 )
                 continue
             break
-    raise RuntimeError(f"Node {node_name} failed: {_safe_error(last_error or RuntimeError('unknown error'))}")
+    raise NodeExecutionError(node_name, last_error) from last_error
 
 
 async def _call_node(node, state: InvestigationState) -> InvestigationState:
@@ -228,7 +250,7 @@ async def _persist_drafts(db: AsyncSession, run_id, state: InvestigationState) -
                     status=DraftStatus.draft,
                 )
             )
-    if state.issue_draft:
+    if state.issue_draft and state.create_issue_draft:
         existing_issue = await db.execute(select(IssueDraft).where(IssueDraft.run_id == run_id))
         if not existing_issue.scalar_one_or_none():
             db.add(
@@ -240,31 +262,69 @@ async def _persist_drafts(db: AsyncSession, run_id, state: InvestigationState) -
                     status=DraftStatus.draft,
                 )
             )
-        await db.flush()
+    await db.flush()
 
 
-async def resume_after_approval(db: AsyncSession, run: AgentRun, approved: bool, rationale: str | None) -> AgentRun:
+async def resume_after_approval(
+    db: AsyncSession,
+    run: AgentRun,
+    approved: bool,
+    rationale: str | None,
+    resolved_by_user_id: uuid.UUID | None = None,
+) -> AgentRun:
+    """Resolve a pending approval and mark the IssueDraft; no external system is called.
+
+    Rows are locked run -> approval -> drafts, so a concurrent decision waits and
+    then sees the resolved state. The caller commits, which releases the locks.
+    """
+    # populate_existing: callers already loaded this run, and the session would
+    # otherwise hand back that unlocked copy with its stale status.
+    locked = await db.execute(
+        select(AgentRun).where(AgentRun.id == run.id).with_for_update().execution_options(populate_existing=True)
+    )
+    run = locked.scalar_one_or_none()
+    if run is None or run.status != RunStatus.awaiting_approval:
+        raise ApprovalConflictError("Run is not awaiting approval")
     result = await db.execute(
-        select(Approval).where(Approval.run_id == run.id).order_by(Approval.created_at.desc())
+        select(Approval)
+        .where(Approval.run_id == run.id, Approval.status == ApprovalStatus.pending)
+        .order_by(Approval.created_at.desc())
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     approval = result.scalars().first()
-    if not approval:
-        return run
+    if approval is None:
+        raise ApprovalConflictError("Run has no pending approval")
+    drafts = await db.execute(
+        select(IssueDraft)
+        .where(IssueDraft.run_id == run.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    for draft in drafts.scalars().all():
+        draft.status = DraftStatus.approved if approved else DraftStatus.rejected
     approval.status = ApprovalStatus.approved if approved else ApprovalStatus.rejected
     approval.rationale = rationale
+    approval.resolved_by_user_id = resolved_by_user_id
+    approval.resolved_at = datetime.now(timezone.utc)
     run.pending_approval = False
     run.status = RunStatus.completed if approved else RunStatus.rejected
-    final_answer = run.final_answer_json or {}
-    final_answer["approval"] = {"status": approval.status.value, "rationale": rationale}
-    run.final_answer_json = final_answer
+    # A new dict: JSONB columns only detect reassignment to a different object.
+    run.final_answer_json = {
+        **(run.final_answer_json or {}),
+        "approval": {"status": approval.status.value, "rationale": rationale},
+    }
     await append_run_event(
         db,
         run.id,
         "approval_resolved",
         payload={"status": approval.status.value, "rationale": rationale},
     )
+    await db.flush()
     return run
 
 
 def _safe_error(exc: Exception) -> str:
-    return str(exc).replace("\n", " ")[:1000]
+    if isinstance(exc, NodeExecutionError):
+        return str(exc)
+    return exc.__class__.__name__.lower()[:64]

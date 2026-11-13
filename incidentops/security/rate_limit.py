@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from collections import defaultdict, deque
 from typing import Protocol
 
@@ -10,7 +11,7 @@ from incidentops.config.settings import Settings
 
 
 class RateLimiter(Protocol):
-    def check(self, key: str, limit: int, window_seconds: int) -> None:
+    async def check(self, key: str, limit: int, window_seconds: int) -> None:
         ...
 
 
@@ -18,7 +19,7 @@ class InMemoryRateLimiter:
     def __init__(self):
         self._events: dict[str, deque[float]] = defaultdict(deque)
 
-    def check(self, key: str, limit: int, window_seconds: int) -> None:
+    async def check(self, key: str, limit: int, window_seconds: int) -> None:
         now = time.time()
         bucket = self._events[key]
         while bucket and bucket[0] <= now - window_seconds:
@@ -31,22 +32,27 @@ class InMemoryRateLimiter:
 class RedisRateLimiter:
     def __init__(self, redis_url: str):
         try:
-            import redis
+            import redis.asyncio as redis_asyncio
         except ImportError as exc:  # pragma: no cover - depends on deployment extras
             raise RuntimeError("RATE_LIMIT_BACKEND=redis requires the redis package") from exc
-        self._client = redis.Redis.from_url(redis_url, decode_responses=True)
+        self._client = redis_asyncio.Redis.from_url(redis_url, decode_responses=True)
 
-    def check(self, key: str, limit: int, window_seconds: int) -> None:
+    async def check(self, key: str, limit: int, window_seconds: int) -> None:
         now = time.time()
         redis_key = f"incidentops:rate:{key}"
         pipe = self._client.pipeline()
         pipe.zremrangebyscore(redis_key, 0, now - window_seconds)
         pipe.zcard(redis_key)
-        pipe.zadd(redis_key, {str(now): now})
-        pipe.expire(redis_key, window_seconds)
-        _, count, _, _ = pipe.execute()
+        _, count = await pipe.execute()
+        # Rejected requests are not recorded, so a client that keeps retrying
+        # regains access once its accepted requests leave the window.
         if int(count) >= limit:
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded")
+        pipe = self._client.pipeline()
+        # Unique members: two requests in the same clock tick must both count.
+        pipe.zadd(redis_key, {f"{now}:{uuid.uuid4().hex}": now})
+        pipe.expire(redis_key, window_seconds)
+        await pipe.execute()
 
 
 _memory_limiter = InMemoryRateLimiter()
@@ -60,6 +66,3 @@ def get_rate_limiter(settings: Settings) -> RateLimiter:
             _redis_limiter = RedisRateLimiter(settings.resolved_redis_url)
         return _redis_limiter
     return _memory_limiter
-
-
-limiter = _memory_limiter

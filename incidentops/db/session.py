@@ -6,11 +6,13 @@ from __future__ import annotations
 
 from typing import AsyncGenerator
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.orm import Session
 
 from incidentops.config.settings import get_settings
 
@@ -41,13 +43,45 @@ def _get_session_factory():
     return _session_factory
 
 
+_PENDING_WRITES_KEY = "incidentops_pending_writes"
+
+
+@event.listens_for(Session, "after_flush")
+def _mark_flushed(session, _flush_context) -> None:
+    session.info[_PENDING_WRITES_KEY] = True
+
+
+@event.listens_for(Session, "do_orm_execute")
+def _mark_statement(orm_execute_state) -> None:
+    # Core insert/update/delete (and raw text) bypass the unit of work, so
+    # session.new/dirty/deleted never see them; track them explicitly.
+    if not orm_execute_state.is_select:
+        orm_execute_state.session.info[_PENDING_WRITES_KEY] = True
+
+
+@event.listens_for(Session, "after_commit")
+@event.listens_for(Session, "after_rollback")
+def _clear_pending(session) -> None:
+    session.info.pop(_PENDING_WRITES_KEY, None)
+
+
+def has_pending_writes(session: Session | AsyncSession) -> bool:
+    return bool(
+        session.new
+        or session.dirty
+        or session.deleted
+        or session.info.get(_PENDING_WRITES_KEY)
+    )
+
+
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """Yield a transactional async session; auto-rollback on error."""
+    """Yield an async session; commit only uncommitted writes, rollback on error."""
     factory = _get_session_factory()
     async with factory() as session:
         try:
             yield session
-            await session.commit()
+            if has_pending_writes(session):
+                await session.commit()
         except Exception:
             await session.rollback()
             raise

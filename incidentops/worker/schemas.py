@@ -13,4 +13,9 @@ class Job(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     attempts: int = 0
     enqueued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Retry backoff: a worker that dequeues the job earlier re-queues it untouched.
+    not_before: datetime | None = None
+
+    def is_ready(self, now: datetime | None = None) -> bool:
+        return self.not_before is None or self.not_before <= (now or datetime.now(timezone.utc))
 

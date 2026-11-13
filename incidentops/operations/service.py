@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from incidentops.config.settings import Settings
-from incidentops.db.models import EvalRun, IndexJob, OperationalEvent, OperationalFinding, OperationalRun, OperationalRunStatus, SourceSync
+from incidentops.db.models import EvalRun, EvalStatus, IndexJob, OperationalEvent, OperationalFinding, OperationalRun, OperationalRunStatus, SourceSync
 from incidentops.observability.metrics import incr, observe_latency
 from incidentops.security.audit import sanitize_audit_metadata
 from incidentops.security.secret_redaction import redact_secrets
@@ -62,29 +62,31 @@ async def run_observer(db: AsyncSession, run: OperationalRun, settings: Settings
     parser_errors = sum(int(sync.parser_errors or 0) for sync in syncs)
     parser_rate = parser_errors / max(files_seen, 1)
     if parser_errors and parser_rate >= settings.observer_parser_error_rate_threshold:
-        findings.append(_finding("parser_loss_spike", "high" if parser_rate >= settings.observer_parser_error_rate_threshold * 2 else "medium", {"syncs_checked": len(syncs), "files_seen": files_seen, "parser_errors": parser_errors, "rate": round(parser_rate, 4)}, {"max_rate": settings.observer_parser_error_rate_threshold}, "Inspect parser_error_reasons and add deterministic parser support before changing retrieval weights."))
+        findings.append(_finding("parser_loss_spike", "high" if parser_rate >= settings.observer_parser_error_rate_threshold * 2 else "medium", {"syncs_checked": len(syncs), "files_seen": files_seen, "parser_errors": parser_errors, "rate": round(parser_rate, 4)}, {"max_rate": settings.observer_parser_error_rate_threshold}, "Inspect parser_error_reasons and add deterministic parser support before changing retrieval weights.", project_id=run.project_id, evidence_key="source_syncs:parser_errors"))
     failed_jobs = int((await db.execute(select(func.count()).select_from(IndexJob).where(IndexJob.project_id == run.project_id, IndexJob.status == "failed"))).scalar_one())
     stale_jobs = int((await db.execute(select(func.count()).select_from(IndexJob).where(IndexJob.project_id == run.project_id, IndexJob.status == "stale"))).scalar_one())
     if failed_jobs:
-        findings.append(_finding("index_job_failures", "high", {"failed_index_jobs": failed_jobs}, {"allowed": 0}, "Inspect sanitized index-job errors and reingest after the dependency is healthy."))
+        findings.append(_finding("index_job_failures", "high", {"failed_index_jobs": failed_jobs}, {"allowed": 0}, "Inspect sanitized index-job errors and reingest after the dependency is healthy.", project_id=run.project_id, evidence_key="index_jobs:failed"))
     if stale_jobs:
-        findings.append(_finding("stale_index_version", "medium", {"stale_index_jobs": stale_jobs, "index_version": settings.vector_index_version}, {"allowed": 0}, "Schedule Collector reingestion for the active index version; Core cannot refetch external sources."))
-    latest_eval = (await db.execute(select(EvalRun).where(EvalRun.project_id == run.project_id).order_by(EvalRun.created_at.desc()).limit(1))).scalar_one_or_none()
+        findings.append(_finding("stale_index_version", "medium", {"stale_index_jobs": stale_jobs, "index_version": settings.vector_index_version}, {"allowed": 0}, "Schedule Collector reingestion for the active index version; Core cannot refetch external sources.", project_id=run.project_id, evidence_key=f"index_jobs:stale:{settings.vector_index_version}"))
+    latest_eval = (await db.execute(select(EvalRun).where(EvalRun.project_id == run.project_id, EvalRun.status == EvalStatus.completed).order_by(EvalRun.created_at.desc()).limit(1))).scalar_one_or_none()
     if latest_eval and latest_eval.summary_json:
         summary = latest_eval.summary_json
         recall = float(summary.get("avg_evidence_recall") or summary.get("avg_recall") or 0.0)
         wrong_rate = float(summary.get("wrong_source_type_rate") or 0.0)
         p95 = float(summary.get("latency_p95_ms") or 0.0)
+        eval_key = f"eval_run:{latest_eval.id}"
         if recall < settings.observer_min_eval_recall:
-            findings.append(_finding("retrieval_recall_regression", "high", {"eval_run_id": str(latest_eval.id), "avg_evidence_recall": recall}, {"min_recall": settings.observer_min_eval_recall}, "Review chunking and intent budgets against failed eval cases before tuning models."))
+            findings.append(_finding("retrieval_recall_regression", "high", {"eval_run_id": str(latest_eval.id), "avg_evidence_recall": recall}, {"min_recall": settings.observer_min_eval_recall}, "Review chunking and intent budgets against failed eval cases before tuning models.", project_id=run.project_id, evidence_key=eval_key))
         if wrong_rate > settings.observer_max_wrong_source_type_rate:
-            findings.append(_finding("wrong_source_type_rate", "medium", {"eval_run_id": str(latest_eval.id), "wrong_source_type_rate": wrong_rate}, {"max_rate": settings.observer_max_wrong_source_type_rate}, "Inspect intent routing and source-type boosts; do not hide mismatches with prompts."))
+            findings.append(_finding("wrong_source_type_rate", "medium", {"eval_run_id": str(latest_eval.id), "wrong_source_type_rate": wrong_rate}, {"max_rate": settings.observer_max_wrong_source_type_rate}, "Inspect intent routing and source-type boosts; do not hide mismatches with prompts.", project_id=run.project_id, evidence_key=eval_key))
         if p95 > settings.observer_eval_p95_latency_ms:
-            findings.append(_finding("eval_latency_regression", "medium", {"eval_run_id": str(latest_eval.id), "latency_p95_ms": p95}, {"max_latency_p95_ms": settings.observer_eval_p95_latency_ms}, "Review retrieval branches, rerank rate, and evidence-pack size before increasing timeouts."))
+            findings.append(_finding("eval_latency_regression", "medium", {"eval_run_id": str(latest_eval.id), "latency_p95_ms": p95}, {"max_latency_p95_ms": settings.observer_eval_p95_latency_ms}, "Review retrieval branches, rerank rate, and evidence-pack size before increasing timeouts.", project_id=run.project_id, evidence_key=eval_key))
+    findings, deduplicated = await _drop_open_duplicates(db, run.project_id, findings)
     for finding in findings:
         db.add(OperationalFinding(operational_run_id=run.id, project_id=run.project_id, finding_type=finding["finding_type"], severity=finding["severity"], evidence_json=finding["evidence"], threshold_json=finding["threshold"], recommended_action=finding["recommended_action"], fingerprint=finding["fingerprint"]))
-    await record_operational_event(db, project_id=run.project_id, operational_run_id=run.id, category="observer", event_type="observer_completed", severity="high" if any(item["severity"] == "high" for item in findings) else "info", payload={"findings_count": len(findings), "syncs_checked": len(syncs)})
-    run.summary_json = {"status": "completed", "findings_count": len(findings), "syncs_checked": len(syncs), "parser_error_rate": round(parser_rate, 4), "failed_index_jobs": failed_jobs, "stale_index_jobs": stale_jobs}
+    await record_operational_event(db, project_id=run.project_id, operational_run_id=run.id, category="observer", event_type="observer_completed", severity="high" if any(item["severity"] == "high" for item in findings) else "info", payload={"findings_count": len(findings), "deduplicated_findings": deduplicated, "syncs_checked": len(syncs)})
+    run.summary_json = {"status": "completed", "findings_count": len(findings), "deduplicated_findings": deduplicated, "syncs_checked": len(syncs), "parser_error_rate": round(parser_rate, 4), "failed_index_jobs": failed_jobs, "stale_index_jobs": stale_jobs}
     await _finish(db, run)
     incr("operational_runs_total")
     incr("observer_runs_total")
@@ -97,7 +99,7 @@ async def run_logging_aggregate(db: AsyncSession, run: OperationalRun, settings:
     started = datetime.now(timezone.utc)
     await _start(db, run)
     events = list((await db.execute(select(OperationalEvent).where(OperationalEvent.project_id == run.project_id).order_by(OperationalEvent.created_at.desc()).limit(settings.logging_aggregate_event_limit))).scalars())
-    run.summary_json = {"status": "completed", "events_checked": len(events), "categories": dict(sorted(Counter(event.category for event in events).items())), "severities": dict(sorted(Counter(event.severity for event in events).items())), "event_types": dict(sorted(Counter(event.event_type for event in events).items())[:20]), "model_summary_used": False}
+    run.summary_json = {"status": "completed", "events_checked": len(events), "categories": dict(sorted(Counter(event.category for event in events).items())), "severities": dict(sorted(Counter(event.severity for event in events).items())), "event_types": dict(Counter(event.event_type for event in events).most_common(20)), "model_summary_used": False}
     await _finish(db, run)
     incr("operational_runs_total")
     incr("logging_runs_total")
@@ -155,8 +157,17 @@ def sanitize_operational_payload(value: Any, *, depth: int = 0) -> Any:
     return redact_secrets(str(value)[:256])
 
 
-def _finding(finding_type: str, severity: str, evidence: dict[str, Any], threshold: dict[str, Any], recommended_action: str) -> dict[str, Any]:
-    fingerprint = hashlib.sha256(json.dumps({"finding_type": finding_type, "threshold": threshold}, sort_keys=True).encode("utf-8")).hexdigest()
+async def _drop_open_duplicates(db: AsyncSession, project_id: uuid.UUID, findings: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    if not findings:
+        return findings, 0
+    fingerprints = [finding["fingerprint"] for finding in findings]
+    existing = set((await db.execute(select(OperationalFinding.fingerprint).where(OperationalFinding.project_id == project_id, OperationalFinding.status == "open", OperationalFinding.fingerprint.in_(fingerprints)))).scalars())
+    fresh = [finding for finding in findings if finding["fingerprint"] not in existing]
+    return fresh, len(findings) - len(fresh)
+
+
+def _finding(finding_type: str, severity: str, evidence: dict[str, Any], threshold: dict[str, Any], recommended_action: str, *, project_id: uuid.UUID, evidence_key: str) -> dict[str, Any]:
+    fingerprint = hashlib.sha256(json.dumps({"project_id": str(project_id), "finding_type": finding_type, "evidence_key": evidence_key, "threshold": threshold}, sort_keys=True).encode("utf-8")).hexdigest()
     return {"finding_type": finding_type, "severity": severity, "evidence": sanitize_operational_payload(evidence), "threshold": sanitize_operational_payload(threshold), "recommended_action": redact_secrets(recommended_action[:512]), "fingerprint": fingerprint}
 
 

@@ -134,6 +134,17 @@ Collector may read configured source paths and send normalized documents. It
 cannot read Core storage directly. MCP calls Core tools only; it cannot ingest,
 normalize, access the database, or bypass project RBAC.
 
+HTTP MCP transports require `Authorization: Bearer <MCP_INBOUND_TOKEN>`, compared
+in constant time, and refuse to start without the token. This is one shared static
+secret, not per-caller identity. Outbound calls to Core use the service
+`MCP_TOKEN`, so Core authorizes the MCP service rather than the end user. The stdio
+transport has no inbound auth and relies on local process access.
+
+Login locks an account for `LOGIN_LOCKOUT_MINUTES` after
+`LOGIN_MAX_FAILED_ATTEMPTS` failures, and a successful login clears the counter.
+`POST /v1/auth/logout-all` bumps `token_version`, which invalidates every token
+already issued to that user.
+
 Secrets are rejected or redacted before persistence where detected. Audit events
 and diagnostics contain metadata and counters, not raw evidence, passwords,
 tokens, API keys, or connection strings.
@@ -154,13 +165,15 @@ business state remains in PostgreSQL.
 
 ## Migration Model
 
-The repository has one clean V2 baseline:
+The repository has an immutable V2 baseline plus forward migrations:
 
 ~~~text
 alembic/versions/v2/v2_baseline.py
+alembic/versions/v2/v2_0002_review_fixes.py
 ~~~
 
-It creates the complete fresh-install schema. The old 0001-0006 chain was
+The baseline creates the original fresh-install schema, and later changes are
+added as new migrations. The old 0001-0006 chain was
 removed because this repository has no database to preserve. A database built
 from the old chain is not compatible with this reset without deliberate
 recreation.
@@ -190,7 +203,7 @@ flowchart LR
   F --> R[Conditional reranking]
   R --> P[Compact evidence pack]
   P --> D[Direct cited response]
-  P --> S[Optional Azure OpenAI synthesis]
+  P --> S[Optional LLM synthesis]
 ~~~
 
 Intent classes are code_location, architecture, config_lookup, api_contract,
@@ -201,6 +214,19 @@ Diagnostics include query intent, retrieval budget, source/chunk distributions,
 applied boosts/penalties, branch latency, and total retrieval latency. Code
 questions favor code/proto/API evidence; runtime questions favor
 logs/deploys/incidents/runbooks. Missing runtime evidence produces a warning.
+
+Services are detected only from names indexed for the project. A deploy hash in
+free text is a ranking boost; only an explicit `filters.deploy_hash` is a hard
+filter. After a partial rerank the reranked head stays ahead of the fused-score
+tail, because the two score scales are not comparable. Evidence flagged for
+instruction-like text stays visible but moves down one position and carries
+`prompt_injection_flagged` in answer responses.
+
+An investigation reports low confidence with an "insufficient evidence" summary
+when no hypothesis clears the selector's bar, when a hypothesis claims something
+the evidence types do not back, or when the evidence mix scores low. Answer
+synthesis falls back to `retrieval_only` with a warning when the model reply is
+failed, non-JSON, or empty.
 
 ## Models and Inference
 
@@ -242,6 +268,12 @@ Metrics include evidence recall, term coverage, forbidden hits, source-type hit
 rate, zero-result count, citation rate, latency, and model/token counters when
 available.
 
+`passed_cases` is threshold-based: a case passes only with no error, evidence
+recall at or above the minimum, term coverage at or above the minimum when the
+case lists expected terms, and forbidden-term hits within the limit. The
+thresholds are defaults in `incidentops/eval/runner.py` that Settings may override.
+Source-type hit rate is reported but does not decide a pass.
+
 Evaluation detects retrieval regressions; it does not create production
 evidence or replace real repository and incident benchmarks.
 
@@ -255,7 +287,7 @@ optional but defaults to disabled; `apps/web` is deployed on Vercel.
 
 The verified Azure resource group is `incidentops-demo-swc-rg` in
 `swedencentral`. The deployed Core API, worker, Collector, private MCP, Azure
-database/Redis dependencies, and Azure OpenAI chat/embedding configuration are
+database/Redis dependencies, and NVIDIA chat/embedding configuration are
 managed by the manual GitHub Actions workflow. Health/readiness and the normal
 Azure smoke path have passed. The private MCP smoke is opt-in because the MCP
 ingress is intentionally not public.
@@ -263,6 +295,140 @@ ingress is intentionally not public.
 Qdrant remains external managed infrastructure configured through Key Vault.
 No Azure AI Search migration is implied by this repository. A future storage
 migration must compare quality, latency, cost, and operational failure modes.
+
+## Render Free Deployment
+
+The demo backend is deployed at https://incidentops-core.onrender.com. The
+`fix/review-findings` branch's `render.yaml` defines a free Oregon web service,
+Postgres database and Key Value instance. The Docker web service runs the API,
+queue worker and Qdrant together; Postgres and Key Value are separate services.
+This is a demo, not a production deployment. The Render image does not start the
+MCP server or Vercel console.
+
+### Deploy
+
+1. In the Render Dashboard choose **New → Blueprint**, connect
+   `Auro-rium/Ops-Incident-Core`, select `fix/review-findings`, and use
+   `render.yaml`. Review every proposed resource before applying.
+2. Confirm that `incidentops-core`, `incidentops-db` and
+   `incidentops-redis` each have the Free plan. A workspace can have only one
+   Free Postgres and one Free Key Value instance. Do not modify unrelated
+   resources or select a paid plan.
+3. Render generates `JWT_SECRET` and `BOOTSTRAP_ADMIN_PASSWORD`; access
+   the password privately in the web service's Environment settings when
+   needed to sign in as `admin@incidentops.local`. Never publish secrets.
+   Web-service auto-deploy is disabled; Blueprint auto-sync is a separate
+   setting, so check both before applying changes.
+4. Wait for the build and `/health`, then check `/ready`. The boot seed
+   runs asynchronously: health and readiness do not guarantee search indexing
+   has finished. Check logs for seed and index-job completion, and then test
+   authenticated project listing, search and answer endpoints.
+
+This configuration uses `APP_ENV=local` with explicit safety flags and
+`local-hash-v1` embeddings. No LLM is configured: answers return evidence
+without generated synthesis, so model answer quality is unproven. Do not add a
+paid model provider without explicit approval.
+
+### Sync repository evidence manually
+
+Run the Collector on a separate, trusted machine with Python 3.11+, Git and
+[uv](https://docs.astral.sh/uv/) installed. Render Free has no shell or one-off
+jobs, and the deployed image does not run a repository Collector. The following
+uses the public review branch and a dedicated project; change neither the project
+name nor source name when repeating a sync.
+
+```bash
+git clone --branch fix/review-findings https://github.com/Auro-rium/Ops-Incident-Core.git
+cd Ops-Incident-Core
+uv sync --frozen
+.venv/bin/python - <<'PY'
+import getpass
+import os
+import subprocess
+import sys
+
+import httpx
+
+url = "https://incidentops-core.onrender.com"
+project_name = "ops-incident-core-repository"
+with httpx.Client(base_url=url, timeout=120) as client:
+    login = client.post("/v1/auth/login", json={
+        "email": "admin@incidentops.local",
+        "password": getpass.getpass("Render bootstrap admin password: "),
+    })
+    login.raise_for_status()
+    token = login.json()["access_token"]
+    headers = {"Authorization": "Bearer " + token}
+    response = client.get("/v1/projects", headers=headers)
+    response.raise_for_status()
+    projects = [p for p in response.json() if p["name"] == project_name]
+    if len(projects) > 1:
+        raise SystemExit("More than one matching project; select its ID explicitly.")
+    if not projects:
+        response = client.post("/v1/projects", headers=headers, json={"name": project_name})
+        response.raise_for_status()
+        projects = [response.json()]
+    project_id = str(projects[0]["project_id"])
+
+env = {**os.environ, "INCIDENTOPS_API_URL": url, "INCIDENTOPS_TOKEN": token}
+subprocess.run([
+    sys.executable, "-m", "incidentops.collector", "sync", ".",
+    "--project-id", project_id, "--source-name", "ops-incident-core",
+    "--repo-name", "Ops-Incident-Core",
+], env=env, check=True)
+PY
+```
+
+Read the generated bootstrap password privately from the Render service's
+Environment settings. The script prompts without echoing and passes the
+short-lived access token only to its Collector child process; do not commit
+or share either secret. Review the checkout before upload: redaction is
+pattern-based and does not guarantee removal of every secret.
+
+To refresh, update the checkout with `git pull --ff-only` and rerun the
+Python block. A complete, successful sync can remove documents no longer
+present in the source; a partial sync does not prune them. Sync completion
+does not mean asynchronous indexing has drained: inspect the service logs and
+verify search results after jobs complete. PostgreSQL remains subject to the
+free database expiry described below.
+
+### Free limits and recovery
+
+- Free web services sleep after 15 minutes without inbound traffic. A request
+  wakes the service; startup and indexing can take additional time. Render
+  grants 750 free web-service instance hours per workspace per month.
+- The web filesystem is ephemeral and is wiped on restart, redeploy and
+  spin-down. Before serving traffic, startup replays stored PostgreSQL chunks
+  for all projects into the new Qdrant instance using local-hash embeddings.
+  It fails startup if replay fails. Replay time grows with corpus size, so a
+  large corpus can exceed Render's deployment health-check window. The demo
+  seed and queued indexing continue asynchronously; a seed-finished message
+  does not mean the queue has drained. Verify expected evidence after recovery.
+  This replay is not a backup and cannot restore deleted Postgres data.
+- Free Key Value is in-memory and loses its data on restart. Free Postgres
+  has 1 GB storage, no backups, and expires 30 days after creation; after the
+  expiry grace period Render deletes the database. Export any needed data
+  before expiry.
+- Free plans do not guarantee a zero bill: builds and outbound bandwidth count
+  against workspace allowances, and exceeding those allowances can incur
+  charges when a payment method is present. Check usage, spend limits and
+  current [Render free-tier limits](https://render.com/docs/free).
+
+Before a planned restart or redeploy, stop all Collector and other ingestion
+writes, then wait for outstanding indexing jobs to finish. Restart only
+`incidentops-core` in the Render Dashboard; keep ingestion paused until the
+new instance is live and its logs show `Render vector recovery finished`.
+Render may route requests to the old instance during startup, so an old
+instance's successful health response is not proof that recovery finished.
+Confirm the new instance's expected evidence and then resume ingestion.
+Unplanned restarts and spin-downs can interrupt writes without this pause;
+reconcile affected sources and re-sync if necessary. Restarting does not reset
+Postgres. For a complete fresh demo,
+export anything needed first, then remove and recreate only this Blueprint's
+three named resources using Free plans; deleting Postgres permanently removes
+its data. Recheck the database and Key Value free slots and billing limits
+before recreating anything. A Blueprint can recreate managed resources on sync,
+so inspect its settings and pending changes before teardown.
 
 ## CI/CD
 
@@ -287,16 +453,46 @@ test/development only.
 3. Unchanged document hashes are skipped.
 4. Changed documents replace prior chunks without duplicates.
 5. Purge removes source/project evidence and retains only safe audit metadata.
-6. Reindex refreshes Core-held artifacts; full source reparse requires Collector
-   reingestion.
+6. Reindex re-embeds from content Core already stores and republishes the vectors:
+   inline for existing chunks, or through index jobs built from stored payloads
+   when async indexing is on. It does not re-read the source; source edits require
+   Collector reingestion. On the production configuration it calls paid embeddings.
 7. Production-like startup rejects create_all, local ingest, wildcard CORS,
    memory-only rate limits, inline workers, and local model fallback.
 8. Missing logs/deploys/incidents produce warnings rather than invented RCA.
+9. A sync finished with `complete=true` and status `success`, with at least one
+   document received and no failed files or index jobs, deletes the source's
+   documents it did not see, with their chunks, relations, and vectors. Any other
+   sync records why in `diagnostics.stale_prune_skipped`. PostgreSQL commits first; a failed Qdrant cleanup is
+   recorded in sync diagnostics, and orphaned points are dropped at read time.
+10. Approval changes Core state only: it resolves the Approval, marks the
+    IssueDraft approved or rejected, and finishes the run. No GitHub API call is
+    made. Resolving a run that is not awaiting approval returns 409.
+11. HTTP MCP transports do not serve requests without a valid inbound bearer
+    token.
 
 ## Current Gaps
 
 Before calling this production-grade, prove a clean Azure deployment, database
 and vector/queue connectivity, migration/bootstrap jobs, real Collector sync,
-Azure OpenAI embedding and synthesis calls, MCP tools backed by Core, worker
+NVIDIA embedding and synthesis calls, MCP tools backed by Core, worker
 failure/retry recovery, purge/reingestion, backup/restore, and multi-repository
 quality/latency metrics.
+
+## Honest Limitations
+
+- Pruning (invariant 9) only happens on a full, clean sync, so documents deleted
+  upstream stay searchable until the next one.
+- Approval files nothing in GitHub; the IssueDraft is the end of the path.
+- The MCP inbound token is shared and static, and stdio has no inbound auth.
+- Reindex in production spends on NVIDIA embeddings and needs its own approval.
+- Prompt-injection handling is pattern-based and only flags, demotes by one
+  position, and labels. Flagged text can still reach the model and direct answers.
+- Eval pass/fail reflects retrieval on golden cases, not answer quality.
+- Endpoint filters match exactly or by path prefix in the lexical, metadata, and
+  graph branches. The vector branch matches exactly, and a concrete path such as
+  `/orders/123` does not match the template `/orders/{id}`.
+- Deploy-hash detection needs at least one digit, so an all-letter hash such as
+  `deadbeef` is not recognised from free text.
+- Account lockout can be used to lock out a known account for the lockout window.
+- Network hardening is opt-in and undeployed, and the Vercel console is paused.

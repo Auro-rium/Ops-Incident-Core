@@ -7,7 +7,9 @@ from typing import Any
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from incidentops.config.settings import get_settings
 from incidentops.db.models import AuditEvent, User
+from incidentops.security.client_ip import client_ip
 from incidentops.security.secret_redaction import redact_secrets
 
 logger = logging.getLogger("incidentops.security.audit")
@@ -152,9 +154,4 @@ def sanitize_audit_metadata(value: Any) -> Any:
 
 
 def _ip_address(request: Request | None) -> str | None:
-    if not request or not request.client:
-        return None
-    forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        return forwarded_for.split(",", 1)[0].strip()
-    return request.client.host
+    return client_ip(request, get_settings())
