@@ -329,6 +329,69 @@ This configuration uses `APP_ENV=local` with explicit safety flags and
 without generated synthesis, so model answer quality is unproven. Do not add a
 paid model provider without explicit approval.
 
+### Sync repository evidence manually
+
+Run the Collector on a separate, trusted machine with Python 3.11+, Git and
+[uv](https://docs.astral.sh/uv/) installed. Render Free has no shell or one-off
+jobs, and the deployed image does not run a repository Collector. The following
+uses the public review branch and a dedicated project; change neither the project
+name nor source name when repeating a sync.
+
+```bash
+git clone --branch fix/review-findings https://github.com/Auro-rium/Ops-Incident-Core.git
+cd Ops-Incident-Core
+uv sync --frozen
+.venv/bin/python - <<'PY'
+import getpass
+import os
+import subprocess
+import sys
+
+import httpx
+
+url = "https://incidentops-core.onrender.com"
+project_name = "ops-incident-core-repository"
+with httpx.Client(base_url=url, timeout=120) as client:
+    login = client.post("/v1/auth/login", json={
+        "email": "admin@incidentops.local",
+        "password": getpass.getpass("Render bootstrap admin password: "),
+    })
+    login.raise_for_status()
+    token = login.json()["access_token"]
+    headers = {"Authorization": "Bearer " + token}
+    response = client.get("/v1/projects", headers=headers)
+    response.raise_for_status()
+    projects = [p for p in response.json() if p["name"] == project_name]
+    if len(projects) > 1:
+        raise SystemExit("More than one matching project; select its ID explicitly.")
+    if not projects:
+        response = client.post("/v1/projects", headers=headers, json={"name": project_name})
+        response.raise_for_status()
+        projects = [response.json()]
+    project_id = str(projects[0]["project_id"])
+
+env = {**os.environ, "INCIDENTOPS_API_URL": url, "INCIDENTOPS_TOKEN": token}
+subprocess.run([
+    sys.executable, "-m", "incidentops.collector", "sync", ".",
+    "--project-id", project_id, "--source-name", "ops-incident-core",
+    "--repo-name", "Ops-Incident-Core",
+], env=env, check=True)
+PY
+```
+
+Read the generated bootstrap password privately from the Render service's
+Environment settings. The script prompts without echoing and passes the
+short-lived access token only to its Collector child process; do not commit
+or share either secret. Review the checkout before upload: redaction is
+pattern-based and does not guarantee removal of every secret.
+
+To refresh, update the checkout with `git pull --ff-only` and rerun the
+Python block. A complete, successful sync can remove documents no longer
+present in the source; a partial sync does not prune them. Sync completion
+does not mean asynchronous indexing has drained: inspect the service logs and
+verify search results after jobs complete. PostgreSQL remains subject to the
+free database expiry described below.
+
 ### Free limits and recovery
 
 - Free web services sleep after 15 minutes without inbound traffic. A request
