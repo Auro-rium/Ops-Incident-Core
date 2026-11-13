@@ -398,13 +398,13 @@ free database expiry described below.
   wakes the service; startup and indexing can take additional time. Render
   grants 750 free web-service instance hours per workspace per month.
 - The web filesystem is ephemeral and is wiped on restart, redeploy and
-  spin-down. Qdrant vectors therefore disappear. The seed attempts to rebuild
-  the `demo-fixtures` source in the `demo` project, but not other projects
-  or sources. Its zero-count check can miss an incomplete partial rebuild.
-  Monitor indexing and verify the expected evidence after a restart; reindex or
-  reingest other sources as appropriate. Async reindex diagnostics report
-  documents whose stored payload is unavailable. Restart recovery is not a
-  substitute for persistent vector storage.
+  spin-down. Before serving traffic, startup replays stored PostgreSQL chunks
+  for all projects into the new Qdrant instance using local-hash embeddings.
+  It fails startup if replay fails. Replay time grows with corpus size, so a
+  large corpus can exceed Render's deployment health-check window. The demo
+  seed and queued indexing continue asynchronously; a seed-finished message
+  does not mean the queue has drained. Verify expected evidence after recovery.
+  This replay is not a backup and cannot restore deleted Postgres data.
 - Free Key Value is in-memory and loses its data on restart. Free Postgres
   has 1 GB storage, no backups, and expires 30 days after creation; after the
   expiry grace period Render deletes the database. Export any needed data
@@ -414,9 +414,16 @@ free database expiry described below.
   charges when a payment method is present. Check usage, spend limits and
   current [Render free-tier limits](https://render.com/docs/free).
 
-To reset the web process and its ephemeral vectors, restart only
-`incidentops-core` in the Render Dashboard and allow the seed and indexing
-jobs to finish. Restarting does not reset Postgres. For a complete fresh demo,
+Before a planned restart or redeploy, stop all Collector and other ingestion
+writes, then wait for outstanding indexing jobs to finish. Restart only
+`incidentops-core` in the Render Dashboard; keep ingestion paused until the
+new instance is live and its logs show `Render vector recovery finished`.
+Render may route requests to the old instance during startup, so an old
+instance's successful health response is not proof that recovery finished.
+Confirm the new instance's expected evidence and then resume ingestion.
+Unplanned restarts and spin-downs can interrupt writes without this pause;
+reconcile affected sources and re-sync if necessary. Restarting does not reset
+Postgres. For a complete fresh demo,
 export anything needed first, then remove and recreate only this Blueprint's
 three named resources using Free plans; deleting Postgres permanently removes
 its data. Recheck the database and Key Value free slots and billing limits
