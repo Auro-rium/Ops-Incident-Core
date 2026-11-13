@@ -296,6 +296,70 @@ Qdrant remains external managed infrastructure configured through Key Vault.
 No Azure AI Search migration is implied by this repository. A future storage
 migration must compare quality, latency, cost, and operational failure modes.
 
+## Render Free Deployment
+
+The demo backend is deployed at https://incidentops-core.onrender.com. The
+`fix/review-findings` branch's `render.yaml` defines a free Oregon web service,
+Postgres database and Key Value instance. The Docker web service runs the API,
+queue worker and Qdrant together; Postgres and Key Value are separate services.
+This is a demo, not a production deployment. The Render image does not start the
+MCP server or Vercel console.
+
+### Deploy
+
+1. In the Render Dashboard choose **New → Blueprint**, connect
+   `Auro-rium/Ops-Incident-Core`, select `fix/review-findings`, and use
+   `render.yaml`. Review every proposed resource before applying.
+2. Confirm that `incidentops-core`, `incidentops-db` and
+   `incidentops-redis` each have the Free plan. A workspace can have only one
+   Free Postgres and one Free Key Value instance. Do not modify unrelated
+   resources or select a paid plan.
+3. Render generates `JWT_SECRET` and `BOOTSTRAP_ADMIN_PASSWORD`; access
+   the password privately in the web service's Environment settings when
+   needed to sign in as `admin@incidentops.local`. Never publish secrets.
+   Web-service auto-deploy is disabled; Blueprint auto-sync is a separate
+   setting, so check both before applying changes.
+4. Wait for the build and `/health`, then check `/ready`. The boot seed
+   runs asynchronously: health and readiness do not guarantee search indexing
+   has finished. Check logs for seed and index-job completion, and then test
+   authenticated project listing, search and answer endpoints.
+
+This configuration uses `APP_ENV=local` with explicit safety flags and
+`local-hash-v1` embeddings. No LLM is configured: answers return evidence
+without generated synthesis, so model answer quality is unproven. Do not add a
+paid model provider without explicit approval.
+
+### Free limits and recovery
+
+- Free web services sleep after 15 minutes without inbound traffic. A request
+  wakes the service; startup and indexing can take additional time. Render
+  grants 750 free web-service instance hours per workspace per month.
+- The web filesystem is ephemeral and is wiped on restart, redeploy and
+  spin-down. Qdrant vectors therefore disappear. The seed attempts to rebuild
+  the `demo-fixtures` source in the `demo` project, but not other projects
+  or sources. Its zero-count check can miss an incomplete partial rebuild.
+  Monitor indexing and verify the expected evidence after a restart; reindex or
+  reingest other sources as appropriate. Async reindex diagnostics report
+  documents whose stored payload is unavailable. Restart recovery is not a
+  substitute for persistent vector storage.
+- Free Key Value is in-memory and loses its data on restart. Free Postgres
+  has 1 GB storage, no backups, and expires 30 days after creation; after the
+  expiry grace period Render deletes the database. Export any needed data
+  before expiry.
+- Free plans do not guarantee a zero bill: builds and outbound bandwidth count
+  against workspace allowances, and exceeding those allowances can incur
+  charges when a payment method is present. Check usage, spend limits and
+  current [Render free-tier limits](https://render.com/docs/free).
+
+To reset the web process and its ephemeral vectors, restart only
+`incidentops-core` in the Render Dashboard and allow the seed and indexing
+jobs to finish. Restarting does not reset Postgres. For a complete fresh demo,
+export anything needed first, then remove and recreate only this Blueprint's
+three named resources using Free plans; deleting Postgres permanently removes
+its data. Recheck the database and Key Value free slots and billing limits
+before recreating anything. A Blueprint can recreate managed resources on sync,
+so inspect its settings and pending changes before teardown.
+
 ## CI/CD
 
 .github/workflows/deploy-azure.yml is a manual Azure workflow. It tests Core
