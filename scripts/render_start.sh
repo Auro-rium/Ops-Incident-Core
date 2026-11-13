@@ -8,7 +8,7 @@ export DATABASE_URL="${DATABASE_URL/#postgresql:\/\//postgresql+asyncpg://}"
 export QDRANT_URL="http://127.0.0.1:6333"
 PORT="${PORT:-10000}"
 
-# The container disk is wiped on every restart, so vectors are rebuilt by the seed step.
+# The container disk is wiped on every restart; replay stored chunks before serving.
 data_dir="$(mktemp -d)"
 (
   cd "$data_dir"
@@ -22,6 +22,8 @@ data_dir="$(mktemp -d)"
 qdrant_pid=$!
 
 alembic upgrade head
+# Pause external ingestion throughout restart, including any old Render instance.
+python scripts/render_recover.py
 python -m incidentops.security.bootstrap_admin --email "$BOOTSTRAP_ADMIN_EMAIL" --password "$BOOTSTRAP_ADMIN_PASSWORD"
 
 python -m incidentops.worker &
